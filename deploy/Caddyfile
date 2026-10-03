@@ -1,0 +1,5 @@
+# 自动申请 HTTPS 证书。DOMAIN 在 .env 中设置，域名需提前解析到本机
+{$DOMAIN} {
+	encode gzip
+	reverse_proxy web:8000
+}

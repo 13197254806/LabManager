@@ -1,0 +1,30 @@
+#!/bin/sh
+# 查看自己今天在本机预约到的显卡。
+#   lab-gpus            显示信息
+#   eval "$(lab-gpus --export)"   预约变化后，在当前 shell 里刷新 CUDA_VISIBLE_DEVICES
+user="$(id -un)"
+file="/etc/lab-gpu/$user"
+
+if [ "$1" = "--export" ]; then
+    if [ -r "$file" ]; then
+        echo "export CUDA_DEVICE_ORDER=PCI_BUS_ID"
+        echo "export CUDA_VISIBLE_DEVICES=$(cat "$file")"
+    else
+        echo "unset CUDA_VISIBLE_DEVICES"
+    fi
+    exit 0
+fi
+
+if [ -r "$file" ]; then
+    gpus="$(cat "$file")"
+    echo "你（$user）今天在 $(hostname) 上预约的显卡：$gpus"
+    if [ "${CUDA_VISIBLE_DEVICES:-}" != "$gpus" ]; then
+        echo "当前 shell 的 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<未设置>}，与预约不一致。"
+        echo "执行以下命令刷新：  eval \"\$(lab-gpus --export)\""
+    fi
+    if command -v nvidia-smi >/dev/null 2>&1; then
+        nvidia-smi --id="$gpus" --query-gpu=index,name,utilization.gpu,memory.used,memory.total --format=csv
+    fi
+else
+    echo "你（$user）今天在 $(hostname) 上没有显卡预约。请到实验室平台预约。"
+fi

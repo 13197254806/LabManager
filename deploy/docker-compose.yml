@@ -1,0 +1,78 @@
+x-app: &app
+  image: lab-server:latest
+  env_file: .env
+  environment:
+    DATABASE_URL: sqlite:////data/lab.db
+  volumes:
+    - ./data:/data
+  restart: unless-stopped
+
+services:
+  web:
+    <<: *app
+    build:
+      context: ..
+      dockerfile: server/Dockerfile
+      args:
+        APT_MIRROR: ${APT_MIRROR-mirrors.cloud.tencent.com}
+        PIP_INDEX_URL: ${PIP_INDEX_URL-https://mirrors.cloud.tencent.com/pypi/simple}
+
+  # 飞书机器人（长连接收事件）
+  bot:
+    <<: *app
+    command: ["python", "-m", "app.bot"]
+    pull_policy: never   # 与 web 共用同一个本地构建的镜像
+    depends_on: [web]
+
+  # 校园网 VPN：自动登录 aTrust，对内提供 SOCKS5（1080）代理进入校园网
+  # 镜像基于 https://github.com/kenvix/aTrustLogin 与 https://github.com/docker-easyconnect/docker-easyconnect
+  atrust:
+    image: ${ATRUST_IMAGE:-kenvix/docker-atrust-autologin:latest}
+    container_name: lab-atrust
+    restart: unless-stopped
+    devices: [/dev/net/tun]
+    cap_add: [NET_ADMIN]
+    shm_size: 256m
+    stdin_open: true   # 首次登录遇到图形验证码时：VNC 里输入后，docker attach lab-atrust 按回车继续
+    tty: true
+    sysctls:
+      net.ipv4.conf.default.route_localnet: 1
+    # 校园网账号密码只放在 atrust.env 里，只有这个容器能读到（平台容器拿不到）
+    env_file: atrust.env
+    environment:
+      URLWIN: "1"
+    volumes:
+      - ./data/atrust:/root
+      # 用我们的启动脚本替换镜像自带的：账号密码从环境变量读，不经过 shell 拆分
+      - ./atrust/start-with-autologin-actual.sh:/bin/start-with-autologin-actual.sh:ro
+      - ./atrust/lab_autologin.py:/opt/lab_autologin.py:ro
+    ports:
+      - "127.0.0.1:5901:5901"   # VNC 只监听本机，需要时 ssh -L 5901:127.0.0.1:5901 转发过来看
+    profiles: [campus]
+
+  # 经 aTrust 的 SOCKS5 SSH 到各 GPU 服务器，建立反向隧道（平台 + 上外网代理）
+  tunnel:
+    <<: *app
+    command: ["python", "-m", "app.tunnel", "run"]
+    pull_policy: never
+    environment:
+      DATABASE_URL: sqlite:////data/lab.db
+      TUNNEL_SOCKS: atrust:1080
+      PLATFORM_ADDR: web:8000
+    depends_on: [web, atrust]
+    profiles: [campus]
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    env_file: .env
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+    depends_on: [web]
+    restart: unless-stopped
+
+volumes:
+  caddy_data:

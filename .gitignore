@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+*.pyc
+deploy/.env
+deploy/atrust.env
+deploy/data/
+data/
+.DS_Store
