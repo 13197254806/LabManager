@@ -1,0 +1,81 @@
+# push 到 master 时自动检查并部署到公网服务器。也可以在 GitHub 的 Actions 页面手动触发。
+#
+# 需要在仓库 Settings → Secrets and variables → Actions 里配置：
+#   DEPLOY_HOST          服务器地址，如 122.51.221.158
+#   DEPLOY_USER          SSH 用户，如 ubuntu
+#   DEPLOY_PATH          项目在服务器上的目录，如 /home/ubuntu/lab
+#   DEPLOY_SSH_KEY       部署专用私钥（~/.ssh/zddlab_actions 的内容）
+#   DEPLOY_KNOWN_HOSTS   服务器的 SSH 主机公钥（ssh-keyscan 得到，防止中间人攻击）
+# 详见 docs/管理员手册.md「自动部署」一节。
+name: deploy
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# 同一时间只跑一个部署；新的 push 排队等前一个跑完
+concurrency:
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: 语法检查
+        run: |
+          python -m compileall -q server/app agent deploy/atrust
+          for f in agent/install.sh agent/lab-gpus agent/lab-gpu.sh deploy/*.sh deploy/atrust/*.sh; do
+            bash -n "$f"
+          done
+          node --check server/app/static/app.js
+
+      - name: 启动冒烟测试
+        run: |
+          pip install -q -r server/requirements.txt
+          cd server
+          DEV_LOGIN=1 DATABASE_URL=sqlite:////tmp/ci.db python -m uvicorn app.main:app --port 8000 &
+          for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8000/healthz && exit 0; sleep 1; done
+          echo "平台启动失败"; exit 1
+
+  deploy:
+    needs: check
+    runs-on: ubuntu-latest
+    # 可在 Settings → Environments → production 里设置“需要人工批准”，部署前多一道确认
+    environment: production
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 配置 SSH
+        env:
+          DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          DEPLOY_KNOWN_HOSTS: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$DEPLOY_SSH_KEY" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$DEPLOY_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          printf 'Host deploy-target\n  HostName %s\n  User %s\n  IdentityFile ~/.ssh/deploy_key\n  IdentitiesOnly yes\n  StrictHostKeyChecking yes\n  ServerAliveInterval 30\n' \
+            "${{ secrets.DEPLOY_HOST }}" "${{ secrets.DEPLOY_USER }}" > ~/.ssh/config
+
+      - name: 同步代码（不覆盖服务器上的配置和数据）
+        run: |
+          rsync -az --delete \
+            --exclude '.git/' --exclude '.github/' \
+            --exclude 'deploy/.env' --exclude 'deploy/atrust.env' --exclude 'deploy/data/' \
+            --exclude 'server/.venv/' --exclude '__pycache__/' --exclude '*.pyc' \
+            ./ deploy-target:"${{ secrets.DEPLOY_PATH }}/"
+
+      - name: 构建并重启
+        run: ssh deploy-target "bash '${{ secrets.DEPLOY_PATH }}/deploy/update.sh'"
+
+      - name: 清理密钥
+        if: always()
+        run: rm -f ~/.ssh/deploy_key

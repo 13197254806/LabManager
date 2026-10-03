@@ -22,8 +22,9 @@ agent/           部署在每台 GPU 服务器上（只依赖 Python 3.6+ 标准
   install.sh       安装 Agent，并收紧 sshd 配置
   lab_migrate.py   管理员批量迁移存量文件的命令行工具（成员自助迁移在平台上完成）
   lab-gpus         成员在服务器上查看自己预约的卡
-deploy/          docker compose（web / bot / atrust / tunnel / caddy）+ setup-server.sh 一键部署
+deploy/          docker compose（web / bot / atrust / tunnel / caddy）+ setup-server.sh 首次部署 + update.sh 更新
   atrust/          aTrust 自动登录的启动入口（替换镜像自带的，账号密码从 atrust.env 读）
+.github/          push 到 master 时自动检查并部署（GitHub Actions）
 docs/            用户指南（给同学）、管理员手册（部署与切换流程）
 ```
 
