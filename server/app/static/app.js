@@ -966,7 +966,24 @@ const CFG_GROUPS = {
 const CFG_ORDER = ["cache", "software", "config", "credential"];
 // 选项名称里原来带的相对路径去掉，改为按实际找到的文件显示绝对路径
 const cfgName = (c) => (c.key === "condarc" ? "Conda / Pip 配置" : c.label.replace(/[（(][^）)]*[）)]/, "").trim());
-const cfgPaths = (lg, c) => (c.paths || []).map((p) => `${lg.home.replace(/\/$/, "")}/${p}`).join("、");
+const cfgPaths = (lg, c) => (c.paths || []).map((p) => `${lg.home.replace(/\/$/, "")}/${p}`);
+// 每个选项的说明，连同实际的绝对路径一起放进「?」的悬停提示里
+const CFG_DESC = {
+  shell: "终端启动脚本：别名、环境变量、PATH 等。",
+  git: "Git 的用户名、邮箱和全局设置。",
+  vim: "Vim 的配置和插件。",
+  tmux: "tmux / screen 的配置。",
+  condarc: "Conda、pip 的软件源和包管理配置。",
+  ssh_config: "SSH 客户端配置和已信任的主机记录（不含私钥）。",
+  jupyter: "Jupyter / IPython 的配置。",
+  local_bin: "放在用户目录里的命令行工具。",
+  local_py: "用 pip install --user 安装的 Python 包。",
+  hf_cache: "已下载的 Hugging Face 模型缓存，体积较大。",
+  torch_cache: "PyTorch 下载的预训练权重缓存。",
+  ssh_keys: "共享账号的 SSH 密钥（如 GitHub 密钥）。大家共用，建议以后换成自己的。",
+  tokens: "共享账号保存的 Git 凭据、.netrc、Hugging Face token。大家共用，建议以后换成自己的。",
+};
+const helpIcon = (desc, paths) => `<span class="help" title="${esc([desc, ...(paths.length ? ["", ...paths] : [])].join("\n"))}">?</span>`;
 const MODE_NAMES = { move: "移动", copy: "复制", link: "原地保留" };
 
 async function renderPicker(container, onSubmitted) {
@@ -1011,10 +1028,10 @@ async function renderPicker(container, onSubmitted) {
         const isUser = c.name === ".conda";
         if (!isUser) {
           html += `<div class="cfg-grid"><label class="check"><input type="checkbox" data-conda="${ci}" data-base="1" checked>
-              <span>Conda 本体（<code>${esc(`${home}/${c.name}`)}</code>） <span class="muted small">${fmtBytes(c.base_size)}</span></span></label></div>`;
+              <span>Conda 本体${helpIcon("Conda 的程序本体，不含环境，复制后自动修正路径。", [`${home}/${c.name}`])} <span class="muted small">${fmtBytes(c.base_size)}</span></span></label></div>`;
         }
         if (c.envs.length) {
-          html += `<div class="env-head"><span>Conda 环境（<code>${esc(`${home}/${c.name}/envs`)}</code>，迁移时自动修正路径问题）</span>
+          html += `<div class="env-head"><span>Conda 环境${helpIcon("已创建的 conda 环境，体积较大，推荐自己 conda create 新建；确实不方便重建的可以展开勾选复制。迁移时自动修正路径问题。", [`${home}/${c.name}/envs`])}</span>
             <button type="button" class="link-btn" data-expand>展开</button></div>
             <div class="cfg-grid hidden" style="margin-top:6px">${c.envs.map((e) => `<label class="check"><input type="checkbox" data-conda="${ci}" data-env="${esc(e.name)}">
               <span>${esc(e.name)} <span class="muted small">${fmtBytes(e.size)}</span></span></label>`).join("")}</div>`;
@@ -1026,7 +1043,7 @@ async function renderPicker(container, onSubmitted) {
         if (!groups[g]) continue;
         html += `<div class="label">${meta.title}${meta.hint ? ` <span class="muted small">· ${meta.hint}</span>` : ""}</div><div class="cfg-grid">`;
         html += groups[g].map((c) => `<label class="check cfg ${g === "credential" ? "cred" : ""}"><input type="checkbox" data-cfg="${esc(c.key)}" ${meta.checked ? "checked" : ""}>
-          <span>${esc(cfgName(c))}（<code>${esc(cfgPaths(lg, c))}</code>） <span class="muted small">${fmtBytes(c.size)}</span></span></label>`).join("");
+          <span>${esc(cfgName(c))}${helpIcon(CFG_DESC[c.key] || "", cfgPaths(lg, c))} <span class="muted small">${fmtBytes(c.size)}</span></span></label>`).join("");
         html += `</div>`;
       }
       html += `<p class="muted small">提示：apt 安装的软件（git、vim、tmux、gcc、CUDA 等）是全系统共享的，新账号直接可用，不需要迁移。</p></div>`;
@@ -1117,6 +1134,7 @@ async function renderPicker(container, onSubmitted) {
   };
   container.onclick = (e) => {
     const t = e.target;
+    if (t.closest?.(".help")) return e.preventDefault();  // 点「?」不要勾选 / 取消勾选所在的选项
     if (t.dataset.expand !== undefined) {  // 展开 / 收起 conda 已有环境列表
       const list = t.parentElement.nextElementSibling;
       const hide = !list.classList.toggle("hidden");
