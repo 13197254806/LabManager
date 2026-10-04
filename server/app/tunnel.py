@@ -114,6 +114,36 @@ def webvpn_url(host, port):
     return f"{base}/ws-{port}/{webvpn.wrdvpn_encrypt(host, 'wrdvpnisthebest!')}/"
 
 
+def probe_handshake(host, port, cookie):
+    """chisel 报 "bad handshake" 时，用同样的地址、Cookie 和代理手动发一次 WebSocket 升级请求，
+    把 WebVPN / GPU 返回的真实状态码和内容摘要写进状态（不含 Cookie），用来区分：
+    101 = 通了；302/200 + HTML = WebVPN 会话/权限问题；502/504 = WebVPN 到不了 GPU；400/404 = 到了 GPU 但不是 chisel。"""
+    import base64
+    import http.client
+    from urllib.parse import urlparse
+    u = urlparse(webvpn_url(host, port))
+    try:
+        if WEBVPN_PROXY:
+            p = urlparse(WEBVPN_PROXY)
+            conn = http.client.HTTPSConnection(p.hostname, p.port, timeout=20)
+            conn.set_tunnel(u.hostname, u.port or 443)
+        else:
+            conn = http.client.HTTPSConnection(u.hostname, u.port or 443, timeout=20)
+        conn.request("GET", u.path, headers={
+            "Cookie": cookie, "Connection": "Upgrade", "Upgrade": "websocket",
+            "Sec-WebSocket-Version": "13", "Sec-WebSocket-Protocol": "chisel-v3",
+            "Sec-WebSocket-Key": base64.b64encode(os.urandom(16)).decode(),
+        })
+        r = conn.getresponse()
+        body = r.read(200).decode("utf-8", "replace").replace("\n", " ").strip()
+        conn.close()
+        loc = r.getheader("Location")
+        return "HTTP %s %s%s，Server=%s，内容：%s" % (
+            r.status, r.reason, f"，Location={loc}" if loc else "", r.getheader("Server") or "-", body[:120] or "(空)")
+    except Exception as e:  # noqa: BLE001
+        return "探测请求本身失败：%r" % (e,)
+
+
 # ---------------- 状态文件 ----------------
 _status_lock = threading.Lock()
 
@@ -170,6 +200,7 @@ class Tunnels:
     def __init__(self):
         self.client = webvpn.WebVPNClient(WEBVPN_PORTAL)
         self.procs = {}       # name -> Popen(chisel client)
+        self.probes = {}      # name -> (时间戳, 探测结果)：握手失败后的诊断，每 10 分钟最多探测一次
         self.cookie = ""
         self.stopping = False
 
@@ -274,7 +305,18 @@ class Tunnels:
                 log.info("[%s] 隧道已建立", name)
                 set_status(name, "connected")
             elif "handshake" in line or "Connection error" in line or "ERR" in line:
-                set_status(name, "error", error=line[-200:])
+                err = line[-200:]
+                if "bad handshake" in line:
+                    ts, result = self.probes.get(name, (0, ""))
+                    if time.time() - ts > 600:
+                        host, port = TARGETS.get(name, (None, None))
+                        if host:
+                            result = probe_handshake(host, port, self.cookie)
+                            self.probes[name] = (time.time(), result)
+                            log.warning("[%s] 握手失败，手动探测 WebVPN：%s", name, result)
+                    if result:
+                        err += " ｜ 探测：" + result
+                set_status(name, "error", error=err)
         p.wait()
         if not self.stopping and self.procs.get(name) is p:
             set_status(name, "disconnected", error=("会话可能已过期" if not connected else "进程退出"))

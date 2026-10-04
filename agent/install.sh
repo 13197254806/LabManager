@@ -196,6 +196,18 @@ UNIT
     systemctl enable lab-chisel >/dev/null 2>&1 || true
     systemctl restart lab-chisel
     info "已启动 chisel 服务端，监听 $CHISEL_PORT"
+    # 自检：服务在跑、端口在监听、本机能连上（chisel 对非 WebSocket 请求会返回 502 之类的 HTTP 响应，说明它活着）
+    sleep 2
+    if ! systemctl is-active --quiet lab-chisel; then
+        warn "lab-chisel 没有在运行：journalctl -u lab-chisel -n 30 查看原因"
+    else
+        CODE=$(curl -s -m 5 --noproxy '*' -o /dev/null -w '%{http_code}' "http://127.0.0.1:$CHISEL_PORT/" 2>/dev/null || true)
+        if [ -z "$CODE" ] || [ "$CODE" = 000 ]; then
+            warn "本机连不上 127.0.0.1:$CHISEL_PORT：journalctl -u lab-chisel -n 30 查看原因"
+        else
+            info "chisel 自检通过（本机 HTTP 响应 $CODE）"
+        fi
+    fi
 
     # 防火墙：只放行 WebVPN 出口网段访问 chisel 端口。依次处理 ufw / firewalld / iptables（有哪个启用就配哪个）
     OPENED=0
