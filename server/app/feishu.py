@@ -26,13 +26,23 @@ class FeishuError(Exception):
     pass
 
 
+# 常见的配置类错误：告诉管理员去飞书开放平台改什么
+ERROR_HINTS = {
+    230006: "应用没有开启机器人能力：到飞书开放平台 → 该应用 → 添加应用能力 → 机器人，开启后在「版本管理与发布」里创建新版本并发布，审核通过后才生效",
+    230013: "该用户不在机器人的可用范围内：到飞书开放平台 → 该应用 → 版本管理与发布，把可用范围改成全部成员或包含此人",
+    99991672: "应用缺少发消息权限：到飞书开放平台 → 权限管理，开通 im:message:send_as_bot 后发布新版本",
+}
+
+
 def _check(resp: httpx.Response) -> dict:
     try:
         data = resp.json()
     except ValueError:
         raise FeishuError(f"HTTP {resp.status_code}: {resp.text[:200]}")
     if data.get("code", 0) != 0:
-        raise FeishuError(f"{data.get('code')}: {data.get('msg') or data.get('error_description')}")
+        code = data.get("code")
+        hint = ERROR_HINTS.get(code)
+        raise FeishuError(f"{code}: {data.get('msg') or data.get('error_description')}" + (f"（{hint}）" if hint else ""))
     return data
 
 

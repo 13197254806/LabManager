@@ -133,9 +133,13 @@ main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 .cal-head .cal-cell:hover { background: inherit; }
 .cal-head .cal-cell.today:hover { background: var(--today); }
 .cal-server { background: var(--bg); min-height: 36px; }
-.cal-server .cal-label { background: var(--bg); flex-direction: row; align-items: center; gap: 8px; justify-content: flex-start; }
+.cal-server .cal-label { background: var(--bg); }
 .cal-server .cal-track { background: var(--bg); }
-.server-name { font-weight: 600; white-space: nowrap; }
+.server-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.cal-server .cal-label { flex-direction: column; align-items: stretch; gap: 0; }
+.srv-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.srv-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 16px; }
+.srv-desc { grid-column: 1 / -1; padding: 8px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.on { background: var(--ok); }
 .gpu-title { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -178,8 +182,8 @@ dialog::backdrop { background: rgba(0, 0, 0, .35); }
 .gpu-picks input { width: auto; min-height: 0; }
 .gpu-picks label.busy { opacity: .45; cursor: not-allowed; }
 .copyable { user-select: all; }
-pre.copyable.mono { max-width: 420px; margin: 2px 0 6px; padding: 6px 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
-td details > summary { cursor: pointer; color: var(--primary); }
+.install-cmd { margin: 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-size: 12.5px; white-space: pre-wrap; word-break: break-all; user-select: all; }
+.install-notes { margin: 0; padding-left: 18px; line-height: 1.7; }
 
 /* 勾选项 */
 label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); font-size: 14px; cursor: pointer; }

@@ -200,10 +200,10 @@ function renderCalendar() {
 
   for (const s of cal.servers) {
     const seen = s.last_seen_at ? `最近上报 ${s.last_seen_at.replace("T", " ").slice(5, 16)}` : "Agent 未连接";
-    html += `<div class="cal-row cal-server"><div class="cal-label" title="${esc(seen)}">
-      <span class="dot ${s.online ? "on" : ""}"></span><span class="server-name">${esc(s.name)}</span>
-      <span class="muted small">${esc(s.host)}</span></div>
-      <div class="cal-track"><div class="muted small" style="grid-column:1/-1;padding:8px 10px;white-space:nowrap">${esc(s.description)}${s.online ? "" : `　<span style="color:var(--warn)">${esc(seen)}</span>`}</div></div></div>`;
+    html += `<div class="cal-row cal-server"><div class="cal-label" title="${esc(`${s.name} ${s.host}\n${seen}`)}">
+      <span class="srv-title"><span class="dot ${s.online ? "on" : ""}"></span><span class="server-name">${esc(s.name)}</span></span>
+      <span class="muted small srv-host">${esc(s.host)}</span></div>
+      <div class="cal-track"><div class="muted small srv-desc">${esc(s.description)}${s.online ? "" : `　<span style="color:var(--warn)">${esc(seen)}</span>`}</div></div></div>`;
     if (!s.gpus.length) {
       html += `<div class="cal-row"><div class="cal-label muted small">等待 Agent 上报显卡…</div><div class="cal-track"></div></div>`;
     }
@@ -972,7 +972,7 @@ function renderAdminServers(servers) {
       }).join("")}</table></div>
       <p class="muted small">「注册命令」只有管理员能看到，用来把 GPU 服务器接入平台。接入过的服务器重装 / 换 token 时点「重置 Token」会生成新命令。</p>`
     : `<p class="muted">还没有服务器。添加后这里会给出一条注册命令，照着执行即可把 GPU 接入平台。</p>`;
-  $$("[data-copy-cmd]").forEach((b) => (b.onclick = () => copyText(b.dataset.copyCmd)));
+  $$("[data-install-server]").forEach((b) => (b.onclick = () => showInstallDialog(servers.find((x) => x.id === Number(b.dataset.installServer)))));
   $$("[data-edit-server]").forEach((b) => (b.onclick = async () => {
     const s = servers.find((x) => x.id === Number(b.dataset.editServer));
     const name = prompt("名称", s.name); if (name === null) return;
@@ -1004,29 +1004,36 @@ function tunnelCell(t) {
   return `<span class="badge ${cls}" title="${esc(t.error || "")}">${text}</span><div class="muted">${esc(t.since?.replace("T", " ").slice(5, 16) || "")}</div>`;
 }
 
-// 根据隧道是否启用，拼出把这台 GPU 接入平台的注册命令 + 说明。
+// 把这台 GPU 接入平台的注册命令：在新服务器上直接执行即可，不需要提前下载任何文件。
+// 命令里的 sudo -E 会带上当前 SSH 会话的代理环境变量（GPU 要靠它访问平台下载 Agent）；
+// 隧道参数、旧共享账号（默认取执行 sudo 的账号）都由脚本自己取回 / 推断。
 function installInfo(token) {
   const base = location.origin;
-  if (state.tunnelEnabled) {
-    return {
-      cmd: `bash tools/add-gpu.sh ${base} ${token} --user ubuntu`,
-      note: "在 lab 仓库目录下、你平时管理 GPU 的电脑上执行（经校园网 / aTrust 直连 GPU），会提示输入 GPU 共享账号密码。把末尾的 ubuntu 换成该服务器的共享账号（如 ubuntu602）。服务器列表平台会自动下发，无需改 .env。",
-    };
-  }
   return {
-    cmd: `curl -fsSL ${base}/agent/install.sh -o install.sh && sudo bash install.sh --server-url ${base} --token ${token} --legacy-user ubuntu`,
-    note: "在该 GPU 服务器上执行（需要 sudo）。把末尾的 ubuntu 换成以前大家共用的账号。",
+    cmd: `curl -fsSL ${base}/agent/install.sh | sudo -E bash -s -- --platform-url ${base} --token ${token}`,
+    notes: [
+      "用以前大家共用的账号 SSH 登录到这台新 GPU 服务器，直接执行上面这条命令即可，不需要提前下载任何文件。",
+      "这个 SSH 会话要能访问公网（已连上你的网络代理），命令里的 sudo -E 会把代理环境变量带给安装脚本。",
+      "旧共享账号默认取执行命令的账号；要指定其他账号，在命令末尾追加 --legacy-user 账号名。",
+      "安装会自动下载 Agent 和 chisel，随后等待公网服务器经校园网 WebVPN 建立隧道（最多 3 分钟）。重复执行会覆盖安装，账号和数据不受影响。",
+    ],
   };
 }
 
 function registerCell(s) {
   if (!s.token) return `<span class="muted">点「重置 Token」生成</span>`;
-  const { cmd, note } = installInfo(s.token);
-  return `<details><summary>查看命令</summary>
-    <pre class="copyable mono">${esc(cmd)}</pre>
-    <button class="btn small" data-copy-cmd="${esc(cmd)}">复制命令</button>
-    <div class="muted" style="margin-top:4px">${esc(note)}</div></details>`;
+  return `<button class="btn small" data-install-server="${s.id}">查看命令</button>`;
 }
+
+function showInstallDialog(s) {
+  const { cmd, notes } = installInfo(s.token);
+  $("#install-title").textContent = `注册命令 · ${s.name}`;
+  $("#install-cmd").textContent = cmd;
+  $("#install-notes").innerHTML = notes.map((n) => `<li>${esc(n)}</li>`).join("");
+  $("#install-copy").onclick = () => copyText(cmd);
+  $("#install-dialog").showModal();
+}
+$("#install-close").onclick = () => $("#install-dialog").close();
 
 $("#server-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1034,7 +1041,7 @@ $("#server-form").addEventListener("submit", async (e) => {
   try {
     await api("/api/admin/servers", { method: "POST", body: { name: f.name.value.trim(), host: f.host.value, description: f.description.value } });
     f.reset();
-    toast("已添加，请在列表该行「注册命令」里查看安装命令");
+    toast("已添加，请点该行「注册命令」里的「查看命令」");
     loadAdmin();
   } catch (err) {
     toast(err.message);
@@ -1046,7 +1053,7 @@ function renderAdminUsers(users) {
     ${users.map((u) => `<tr><td>${esc(u.name)}</td>
       <td>${u.linux_username ? `<code>${esc(u.linux_username)}</code>` : `<span class="badge">未设置</span>`}
         <button class="btn small ghost" data-rename="${u.id}">修改</button></td>
-      <td>${u.uid}</td><td>${u.has_password ? "✓" : "-"}</td><td>${u.key_count}</td>
+      <td>${u.uid}</td><td>${u.has_password ? "✓" : "-"}</td><td>${u.key_count ? u.key_count : `<span class="muted">未配置</span>`}</td>
       <td><input type="checkbox" data-admin="${u.id}" ${u.is_admin ? "checked" : ""} style="width:auto;min-height:0"></td>
       <td><input type="checkbox" data-enabled="${u.id}" ${u.enabled ? "checked" : ""} style="width:auto;min-height:0"></td></tr>`).join("")}
     </table></div>

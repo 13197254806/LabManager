@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 # 在 GPU 服务器上安装 lab-agent 并配置 SSH。
 #
+# 推荐（一条命令，不需要提前下载任何文件；本机需要能访问平台，如 SSH 会话里带着代理）：
+#   curl -fsSL http://平台地址/agent/install.sh | sudo -E bash -s -- --platform-url http://平台地址 --token lab_xxx
+#   脚本会用 token 从平台取回隧道参数，并下载 Agent 和 chisel；--legacy-user 默认取执行 sudo 的那个账号。
+#
+# 手动指定所有参数（文件已经放在脚本旁边时）：
 #   sudo bash install.sh --server-url https://lab.example.com --token lab_xxx --legacy-user ubuntu
 #
+#   --platform-url URL        平台的公网地址：从这里下载 Agent / chisel、读取隧道参数。
+#                             指定后 --server-url、--chisel-* 都不用写，由平台下发
 #   --legacy-user LIST        以前大家共用的账号（如 ubuntu），逗号分隔。保留登录权限（由管理员改密码后自用），
 #                             成员可以从它的家目录迁移文件、复制配置和 conda 环境
 #   --admin-user LIST         可选：其他本机管理员账号（加入 lab-admin 组，任何时候都能登录）
@@ -17,6 +24,7 @@
 set -euo pipefail
 
 SERVER_URL=""
+PLATFORM_URL=""
 TOKEN=""
 ADMIN_USER=""
 LEGACY_USERS=""
@@ -38,6 +46,7 @@ warn() { echo -e "\033[33m[注意]\033[0m $*"; }
 while [ $# -gt 0 ]; do
     case "$1" in
         --server-url) SERVER_URL="${2%/}"; shift 2 ;;
+        --platform-url) PLATFORM_URL="${2%/}"; shift 2 ;;
         --token) TOKEN="$2"; shift 2 ;;
         --admin-user) ADMIN_USER="$2"; shift 2 ;;
         --legacy-user) LEGACY_USERS="$2"; shift 2 ;;
@@ -72,7 +81,12 @@ if [ "$UNINSTALL" -eq 1 ]; then
     exit 0
 fi
 
-[ -n "$SERVER_URL" ] && [ -n "$TOKEN" ] || die "用法: $0 --server-url URL --token TOKEN --legacy-user ubuntu [--admin-user NAME] [--root-login keep|yes|key|no]"
+[ -n "$TOKEN" ] && { [ -n "$SERVER_URL" ] || [ -n "$PLATFORM_URL" ]; } || die "用法: $0 --platform-url URL --token TOKEN [--legacy-user ubuntu] [--admin-user NAME] [--root-login keep|yes|key|no]"
+# 旧共享账号默认取执行 sudo 的账号（在新服务器上用共享账号登录后直接 sudo 执行即可）
+if [ -z "$LEGACY_USERS" ] && [ -n "${SUDO_USER:-}" ] && [ "$SUDO_USER" != root ]; then
+    LEGACY_USERS="$SUDO_USER"
+    info "旧共享账号：$LEGACY_USERS（取自 sudo 的执行者；要换用 --legacy-user 指定）"
+fi
 case "$ROOT_LOGIN" in
     keep) PERMIT_ROOT="" ;;
     yes) PERMIT_ROOT=yes ;;
@@ -85,7 +99,38 @@ ADMINS="$(echo "$LEGACY_USERS,$ADMIN_USER" | tr ',' ' ')"
 command -v python3 >/dev/null || die "需要 python3"
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 6))' || die "需要 Python 3.6+"
 command -v nvidia-smi >/dev/null || warn "没有找到 nvidia-smi，将无法上报显卡信息"
-SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# ---------- 0. 取参数、下载文件 ----------
+# 经 curl | bash 执行、或旁边没有其他文件时，从平台下载到临时目录。
+# 下载走当前环境的代理（sudo -E 保留了 SSH 会话里的 http_proxy 等），下载完立刻清掉：
+# 之后 Agent 只经隧道访问平台（127.0.0.1），不能带着代理走。
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]:-.}")" && pwd)"
+if [ -n "$PLATFORM_URL" ]; then
+    command -v curl >/dev/null || die "需要 curl"
+    DL="$(mktemp -d)"
+    trap 'rm -rf "$DL"' EXIT
+    info "从平台 $PLATFORM_URL 取回部署参数"
+    CFG=$(curl -fsS -m 30 -H "Authorization: Bearer $TOKEN" "$PLATFORM_URL/api/agent/bootstrap-config") \
+        || die "取配置失败：确认 Token 正确（可在平台里「重置 Token」），并且当前 SSH 会话里能访问 $PLATFORM_URL（代理是否生效？sudo 要加 -E 才会带上代理）"
+    cfg() { printf '%s' "$CFG" | python3 -c "import sys,json;print(json.load(sys.stdin).get('$1',''))"; }
+    [ -n "$SERVER_URL" ] || SERVER_URL="$(cfg server_url)"
+    [ -n "$CHISEL_PORT" ] || CHISEL_PORT="$(cfg chisel_port)"
+    [ -n "$CHISEL_SECRET" ] || CHISEL_SECRET="$(cfg chisel_secret)"
+    CHISEL_ALLOW_API="$(cfg chisel_allow)"
+    [ "$CHISEL_ALLOW" != "59.69.127.0/24" ] || CHISEL_ALLOW="${CHISEL_ALLOW_API:-$CHISEL_ALLOW}"
+    [ -n "$CHISEL_SECRET" ] || CHISEL_PORT=""   # 平台没启用隧道：不装 chisel，Agent 直连平台
+    files="lab_agent.py lab-gpus lab-gpu.sh"
+    [ -z "$CHISEL_PORT" ] || files="$files chisel"
+    info "下载 Agent 文件"
+    for f in $files; do
+        curl -fsS -m 300 "$PLATFORM_URL/agent/$f" -o "$DL/$f" || die "下载 $f 失败（$PLATFORM_URL/agent/$f）"
+    done
+    SRC="$DL"
+    # 平台没启用隧道时 Agent 要直连平台，不能清掉代理
+    if [ -n "$CHISEL_PORT" ]; then
+        unset http_proxy https_proxy all_proxy HTTP_PROXY HTTPS_PROXY ALL_PROXY no_proxy NO_PROXY
+    fi
+fi
 
 # ---------- 1. 防止把自己锁在外面 ----------
 for u in $ADMINS; do
@@ -116,7 +161,7 @@ if [ -n "$CHISEL_PORT" ]; then
     [ -n "$CHISEL_SECRET" ] || die "--chisel-port 需要同时提供 --chisel-secret"
     echo "$CHISEL_PORT" | grep -qE '^[0-9]+$' || die "--chisel-port 必须是数字"
     # chisel 可执行文件必须随安装包带来（GPU 此时还不能上外网，无法下载）
-    [ -f "$SRC/chisel" ] || die "找不到 chisel 可执行文件（应和安装脚本放在一起）。请用 Mac 上的 bootstrap 脚本部署"
+    [ -f "$SRC/chisel" ] || die "找不到 chisel 可执行文件（应和安装脚本放在一起）。请用 --platform-url 让脚本从平台下载，或用 tools/add-gpu.sh 部署"
     install -D -m 755 "$SRC/chisel" /opt/lab-agent/chisel
 
     install -d -m 755 /etc/lab-agent

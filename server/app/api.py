@@ -799,7 +799,7 @@ def _agent_server(db: Session, authorization: str) -> Server:
 
 @router.get("/agent/bootstrap-config")
 def agent_bootstrap_config(authorization: str = Header(default=""), db: Session = Depends(get_db)):
-    """Mac 上的 bootstrap 脚本用服务器 token 取回首次部署所需的参数（不含飞书等无关配置）。
+    """install.sh --platform-url / tools/add-gpu.sh 用服务器 token 取回首次部署所需的参数（不含飞书等无关配置）。
     token 只有管理员在平台上添加服务器时看到一次，相当于该服务器的安装口令。"""
     server = _agent_server(db, authorization)
     return {
@@ -808,7 +808,8 @@ def agent_bootstrap_config(authorization: str = Header(default=""), db: Session 
         "chisel_port": settings.chisel_port,
         "chisel_secret": settings.chisel_secret,
         "chisel_allow": settings.chisel_allow,
-        "server_url": f"http://127.0.0.1:{settings.remote_platform_port}",
+        # 启用了校园网隧道：GPU 经隧道在本机 127.0.0.1 上访问平台；否则直连平台公网地址
+        "server_url": f"http://127.0.0.1:{settings.remote_platform_port}" if settings.chisel_secret else settings.base_url,
     }
 
 
