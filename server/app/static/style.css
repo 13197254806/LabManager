@@ -370,3 +370,4 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 .fs-row .muted { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .fs-row .act { text-align: right; white-space: nowrap; }
 @media (max-width: 720px) { .fs-row { grid-template-columns: 1fr auto; } .fs-row .m { display: none; } }
+.pk-tips { margin-top: 10px; line-height: 1.6; }

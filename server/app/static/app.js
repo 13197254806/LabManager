@@ -955,15 +955,14 @@ $("#mig-chip").onclick = () => {
 };
 
 /** 迁移选择器：用于「迁移已有文件」弹窗和首次引导。
- *  上半部分：从旧共享账号（如 ubuntu）复制配置、软件、conda 环境；下半部分：迁移自己的文件 / 目录。 */
+ *  上半部分：从旧共享账号（如 ubuntu）迁移配置、软件、conda（环境是移动，其余是复制）；下半部分：迁移自己的文件 / 目录。 */
 const CFG_GROUPS = {
-  config: { title: "配置文件", hint: "默认全选，文件里的旧家目录路径会自动改成你的家目录", checked: true },
+  config: { title: "配置文件", hint: "", checked: true },
   software: { title: "用户级软件", hint: "", checked: false },
-  cache: { title: "缓存", hint: "", checked: false },
   credential: { title: "共享账号的凭据", hint: "", checked: false },
 };
 // 在界面上从上到下的顺序（Conda 在最前面，单独处理）
-const CFG_ORDER = ["cache", "software", "config", "credential"];
+const CFG_ORDER = ["software", "config", "credential"];
 // 选项名称里原来带的相对路径去掉，改为按实际找到的文件显示绝对路径
 const cfgName = (c) => (c.key === "condarc" ? "Conda / Pip 配置" : c.label.replace(/[（(][^）)]*[）)]/, "").trim());
 const cfgPaths = (lg, c) => (c.paths || []).map((p) => `${lg.home.replace(/\/$/, "")}/${p}`);
@@ -978,8 +977,6 @@ const CFG_DESC = {
   jupyter: "Jupyter / IPython 的配置。",
   local_bin: "放在用户目录里的命令行工具。",
   local_py: "用 pip install --user 安装的 Python 包。",
-  hf_cache: "已下载的 Hugging Face 模型缓存，体积较大。",
-  torch_cache: "PyTorch 下载的预训练权重缓存。",
   ssh_keys: "共享账号的 SSH 密钥（如 GitHub 密钥）。大家共用，建议以后换成自己的。",
   tokens: "共享账号保存的 Git 凭据、.netrc、Hugging Face token。大家共用，建议以后换成自己的。",
 };
@@ -1021,7 +1018,7 @@ async function renderPicker(container, onSubmitted) {
       const groups = {};
       for (const c of lg.configs) (groups[c.group] ||= []).push(c);
       html += `<div class="pk-section" data-legacy="${li}">
-        <h3>① 从共享账号 <code>${esc(lg.user)}</code> 复制环境与配置 <span class="muted small">（复制，原账号不受影响）</span></h3>`;
+        <h3>① 迁移环境与配置${s.legacy.length > 1 ? ` <span class="muted small">（共享账号 <code>${esc(lg.user)}</code>）</span>` : ""}</h3>`;
       const home = lg.home.replace(/\/$/, "");
       if (lg.conda.length) html += `<div class="label">Conda</div>`;
       for (const [ci, c] of lg.conda.entries()) {
@@ -1031,7 +1028,7 @@ async function renderPicker(container, onSubmitted) {
               <span>Conda 本体${helpIcon("Conda 的程序本体，不含环境，复制后自动修正路径。", [`${home}/${c.name}`])} <span class="muted small">${fmtBytes(c.base_size)}</span></span></label></div>`;
         }
         if (c.envs.length) {
-          html += `<div class="env-head"><span>Conda 环境${helpIcon("已创建的 conda 环境，体积较大，推荐自己 conda create 新建；确实不方便重建的可以展开勾选复制。迁移时自动修正路径问题。", [`${home}/${c.name}/envs`])}</span>
+          html += `<div class="env-head"><span>Conda 环境${helpIcon("已创建的 conda 环境，体积较大。迁移时是「移动」：迁移并自检通过后，原环境会从共享账号里移走；路径问题会自动修正。推荐自己 conda create 新建，确实不方便重建的再展开勾选。", [`${home}/${c.name}/envs`])}</span>
             <button type="button" class="link-btn" data-expand>展开</button></div>
             <div class="cfg-grid hidden" style="margin-top:6px">${c.envs.map((e) => `<label class="check"><input type="checkbox" data-conda="${ci}" data-env="${esc(e.name)}">
               <span>${esc(e.name)} <span class="muted small">${fmtBytes(e.size)}</span></span></label>`).join("")}</div>`;
@@ -1046,7 +1043,9 @@ async function renderPicker(container, onSubmitted) {
           <span>${esc(cfgName(c))}${helpIcon(CFG_DESC[c.key] || "", cfgPaths(lg, c))} <span class="muted small">${fmtBytes(c.size)}</span></span></label>`).join("");
         html += `</div>`;
       }
-      html += `<p class="muted small">提示：apt 安装的软件（git、vim、tmux、gcc、CUDA 等）是全系统共享的，新账号直接可用，不需要迁移。</p></div>`;
+      html += `<div class="muted small pk-tips">提示：
+        <div>1. apt 安装的软件（git、vim、tmux、gcc、CUDA 等）是全系统共享的，新账号直接可用，不需要迁移。</div>
+        <div>2. Conda 环境迁移是直接「移动」，其它配置项迁移时是「复制」。</div></div></div>`;
     }
     html += `<div class="pk-section"><h3>② 迁移我的文件和目录</h3>
       <p class="muted small">选择需要迁移到 <code>/home/${esc(state.me.linux_username)}</code> 的文件或目录</p>
@@ -1293,7 +1292,7 @@ function renderOnboarding() {
       </form>`;
   } else if (step === 2) {
     body.innerHTML = `<h2>迁移旧环境和文件（可选）</h2>
-      <p class="muted small">以前大家共用一个账号（如 ubuntu）。这里可以把共用账号里的 .bashrc、git 配置、需要的 conda 环境复制到你的新账号，并把你自己的项目目录迁移过来。</p>
+      <p class="muted small">以前大家共用一个账号（如 ubuntu）。这里可以把共用账号里的 .bashrc、git 配置、需要的 conda 环境迁移到你的新账号，并把你自己的项目目录迁移过来。</p>
       <div id="ob-picker"></div><div id="onboard-migrations"></div>`;
     renderPicker($("#ob-picker"), () => {
       $("#ob-picker").innerHTML = `<p>✅ 迁移已开始，在服务器后台进行。你可以直接关闭这个窗口，进度随时可以在「我的账号 → 文件迁移」或顶部的 📦 查看。</p>`;

@@ -31,3 +31,23 @@ def test_failed_migration_can_be_retried_without_restarting_agent():
     listed[0] = [7]            # 成员点了“重试”：重新排队
     a.once()
     assert started == [7, 7]
+
+
+def test_remove_moved_env(tmp_path):
+    envs = tmp_path / "anaconda3" / "envs"
+    (envs / "torch" / "conda-meta").mkdir(parents=True)
+    (envs / "torch" / "bin").mkdir()
+    (envs / "torch" / "bin" / "python").write_text("x")
+    # 正常的环境目录被删除
+    assert lab_agent.remove_moved_env(str(envs / "torch"), str(envs)) is None
+    assert not (envs / "torch").exists()
+    # 不带 conda-meta 的目录、符号链接、不在 envs 目录下的路径都不会被删
+    (envs / "plain").mkdir()
+    assert lab_agent.remove_moved_env(str(envs / "plain"), str(envs)) is not None
+    assert (envs / "plain").exists()
+    (tmp_path / "outside" / "conda-meta").mkdir(parents=True)
+    (envs / "link").symlink_to(tmp_path / "outside")
+    assert lab_agent.remove_moved_env(str(envs / "link"), str(envs)) is not None
+    assert (tmp_path / "outside" / "conda-meta").exists()
+    assert lab_agent.remove_moved_env(str(tmp_path / "outside"), str(envs)) is not None
+    assert (tmp_path / "outside").exists()

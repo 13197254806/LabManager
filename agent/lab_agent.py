@@ -49,7 +49,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.7.1"
+VERSION = "0.7.2"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -70,7 +70,6 @@ O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 # 旧共享账号家目录里可以复制给成员的内容：(键, 显示名, 分组, 相对家目录的路径)
 #   config     配置文件，默认勾选；文本里的旧家目录路径会改成新家目录
 #   software   用户级软件（pip --user、~/.local/bin 等）；同样改写路径
-#   cache      大缓存，默认不选
 #   credential 共享账号的密钥 / 令牌，默认不选（选了才复制，否则连同所在目录一起排除）
 CATALOG = [
     ("shell", "Shell 配置（.bashrc、.bash_aliases、.profile、.inputrc）", "config",
@@ -83,8 +82,6 @@ CATALOG = [
     ("jupyter", "Jupyter / IPython 配置", "config", [".jupyter", ".ipython"]),
     ("local_bin", "用户级命令行工具（~/.local/bin、~/bin）", "software", [".local/bin", "bin"]),
     ("local_py", "pip --user 安装的 Python 包（~/.local/lib）", "software", [".local/lib"]),
-    ("hf_cache", "Hugging Face 模型缓存（~/.cache/huggingface）", "cache", [".cache/huggingface"]),
-    ("torch_cache", "PyTorch 缓存（~/.cache/torch）", "cache", [".cache/torch"]),
     ("ssh_keys", "SSH 密钥（共享账号的 GitHub 等密钥）", "credential",
      [".ssh/id_rsa", ".ssh/id_rsa.pub", ".ssh/id_ed25519", ".ssh/id_ed25519.pub", ".ssh/id_ecdsa", ".ssh/id_ecdsa.pub"]),
     ("tokens", "其他凭据（.git-credentials、.netrc、Hugging Face token）", "credential",
@@ -847,6 +844,21 @@ def open_beneath(base, rel, last_flags=None):
         raise
 
 
+def remove_moved_env(env_root, envs_dir):
+    """conda 环境的「移动」= 复制 + 自检通过 + 删除源：把共享账号里已迁走的原环境删掉。
+    只删 envs_dir 下的、本身不是符号链接的、带 conda-meta 的目录。成功返回 None，否则返回原因。"""
+    try:
+        parent = os.path.realpath(os.path.dirname(env_root))
+        st = os.lstat(env_root)
+        if (stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode) or parent != os.path.realpath(envs_dir)
+                or not os.path.isdir(os.path.join(env_root, "conda-meta"))):
+            return "路径异常，没有删除"
+        shutil.rmtree(env_root)
+    except OSError as e:
+        return str(e)
+    return None
+
+
 def binary_relocate(data, rx, new):
     """在二进制文件的 C 字符串里替换路径前缀（同 conda 的做法），长度差用字符串结尾的 NUL 填充吸收。
     conda 安装时把 255 字节的占位符换成了实际路径，后面留有大量 NUL，所以新路径稍长一些也放得下。
@@ -1428,6 +1440,7 @@ class Migration(threading.Thread):
         dir_ok = lambda dst_: dst_.st_uid == lpw.pw_uid or dst_.st_mode & 0o005 == 0o005  # noqa: E731
 
         items, envs, labels = [], [], []
+        moved = []  # (共享账号里的原环境, 成员家目录里的新环境, 所在 envs 目录)：自检通过后删掉原环境
         selected = set(opts.get("configs") or [])
         unselected_creds = {p for k, _l, g, ps in CATALOG if g == "credential" and k not in selected for p in ps}
         for key, label, group, paths in CATALOG:
@@ -1465,6 +1478,7 @@ class Migration(threading.Thread):
                 items.append({"rel": os.path.join(name, "envs", e), "text": text,
                               "bin": prefix_rule + (conda_binary_prefix_files(env_root),), "skip": set()})
                 envs.append(os.path.join(new_root, "envs", e))
+                moved.append((env_root, os.path.join(new_root, "envs", e), os.path.join(root, "envs")))
             if env_names:
                 labels.append("conda 环境 " + "、".join(env_names))
         if not items:
@@ -1502,6 +1516,16 @@ class Migration(threading.Thread):
                 self.notes.append("conda 自检失败：" + "；".join("%s：%s" % (os.path.basename(k), v[:100]) for k, v in bad.items()))
             else:
                 self.notes.append("conda 自检通过（%s），重新登录后用 conda activate 环境名 使用" % "、".join(os.path.basename(e) for e in envs))
+        # conda 环境是「移动」：自检通过的才删掉共享账号里的原环境，没通过的保留，方便重试
+        for src, new, envs_dir in moved:
+            name = os.path.basename(src)
+            if (result.get("checks") or {}).get(new) != "ok":
+                self.notes.append("conda 环境 %s 自检未通过，原环境仍保留在共享账号里" % name)
+                continue
+            self.report(force=True, phase="清理共享账号里的原环境 " + name)
+            err = remove_moved_env(src, envs_dir)
+            self.notes.append("conda 环境 %s 已从共享账号移走" % name if err is None
+                              else "conda 环境 %s 已复制到你的家目录，但没能删除共享账号里的原环境：%s" % (name, err))
         self._rmdir_quiet(stage_parent)
         final = "%s（%s）" % (home, "、".join(labels))
         self._save_marker(final, check=home)
