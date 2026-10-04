@@ -1,7 +1,7 @@
 # push 到 master 时自动检查并部署到公网服务器。也可以在 GitHub 的 Actions 页面手动触发。
 #
 # 需要在仓库 Settings → Secrets and variables → Actions 里配置：
-#   DEPLOY_HOST          服务器地址，如 122.51.221.158
+#   DEPLOY_HOST          服务器地址，如 203.0.113.10
 #   DEPLOY_USER          SSH 用户，如 ubuntu
 #   DEPLOY_PATH          项目在服务器上的目录，如 /home/ubuntu/lab
 #   DEPLOY_SSH_KEY       部署专用私钥（~/.ssh/zddlab_actions 的内容）
@@ -37,9 +37,13 @@ jobs:
           done
           node --check server/app/static/app.js
 
+      - name: 单元测试（预约规则、自动续约、Agent 同步接口）
+        run: |
+          pip install -q -r server/requirements.txt pytest
+          cd server && python -m pytest tests -q
+
       - name: 启动冒烟测试
         run: |
-          pip install -q -r server/requirements.txt
           cd server
           DEV_LOGIN=1 DATABASE_URL=sqlite:////tmp/ci.db python -m uvicorn app.main:app --port 8000 &
           for i in $(seq 1 20); do curl -fsS http://127.0.0.1:8000/healthz && exit 0; sleep 1; done

@@ -526,8 +526,12 @@ $("#password-form").addEventListener("submit", async (e) => {
 });
 $("#password-clear").onclick = async () => {
   if (!confirm("关闭后只能用 SSH 公钥登录服务器。确定吗？")) return;
-  await api("/api/me/password", { method: "DELETE" });
-  toast("已关闭密码登录");
+  try {
+    await api("/api/me/password", { method: "DELETE" });
+    toast("已关闭密码登录");
+  } catch (err) {
+    toast(err.message);
+  }
   renderAccount();
 };
 
@@ -725,7 +729,7 @@ async function renderPicker(container, onSubmitted) {
       }
       if (!lg.conda.length) html += `<p class="muted small">共享账号家目录里没有找到 conda。</p>`;
       html += `<p class="muted small">提示：apt 安装的软件（git、vim、tmux、gcc、CUDA 等）是全系统共享的，新账号直接可用，不需要迁移。
-        建议只复制 conda 本体，需要的环境自己用 <code>conda create</code> 新建（服务器已可经平台代理上网）；确实不方便重建的旧环境，可以展开上面的列表一并复制。</p></div>`;
+        建议只复制 conda 本体，需要的环境自己用 <code>conda create</code> 新建（GPU 服务器没有外网，需要先在自己的 SSH 会话里挂上代理）；确实不方便重建的旧环境，可以展开上面的列表一并复制。</p></div>`;
     }
     html += `<div class="pk-section"><h3>② 迁移我的文件和目录</h3>
       <p class="muted small">下面是共享账号家目录${s.legacy.length ? "" : "（未配置）"}和数据目录里<b>还没归属任何成员</b>的内容。请只勾选<b>自己的</b>：
@@ -943,7 +947,7 @@ async function loadAdmin() {
     ]);
     state.users = users;
     state.tunnelEnabled = tunnel.enabled;
-    renderAdminServers(servers);
+    renderAdminServers(servers, tunnel);
     renderAdminUsers(users);
     $("#admin-migrations").innerHTML = migrations.length ? migrations.map((t) => taskHtml(t, true)).join("") : `<p class="muted">暂无迁移记录。</p>`;
     const f = $("#welcome-form");
@@ -957,8 +961,8 @@ async function loadAdmin() {
   }
 }
 
-function renderAdminServers(servers) {
-  $("#admin-servers").innerHTML = servers.length
+function renderAdminServers(servers, tunnel) {
+  $("#admin-servers").innerHTML = webvpnLine(tunnel) + (servers.length
     ? `<div class="table-wrap"><table><tr><th>名称</th><th>地址</th><th>状态</th><th>显卡</th><th>Agent</th><th>校园网隧道</th><th>注册命令</th><th></th></tr>
       ${servers.map((s) => {
         const models = [...new Set(s.gpus.map((g) => g.name.replace(/^NVIDIA /, "")))].join(", ");
@@ -975,7 +979,7 @@ function renderAdminServers(servers) {
             <button class="btn small danger" data-del-server="${s.id}">删除</button></td></tr>`;
       }).join("")}</table></div>
       <p class="muted small">「注册命令」只有管理员能看到，用来把 GPU 服务器接入平台。接入过的服务器重装 / 换 token 时点「重置 Token」会生成新命令。</p>`
-    : `<p class="muted">还没有服务器。添加后这里会给出一条注册命令，照着执行即可把 GPU 接入平台。</p>`;
+    : `<p class="muted">还没有服务器。添加后这里会给出一条注册命令，照着执行即可把 GPU 接入平台。</p>`);
   $$("[data-install-server]").forEach((b) => (b.onclick = () => showInstallDialog(servers.find((x) => x.id === Number(b.dataset.installServer)))));
   $$("[data-edit-server]").forEach((b) => (b.onclick = async () => {
     const s = servers.find((x) => x.id === Number(b.dataset.editServer));
@@ -996,12 +1000,25 @@ function renderAdminServers(servers) {
   }));
   $$("[data-del-server]").forEach((b) => (b.onclick = async () => {
     if (!confirm("删除服务器会同时删除它的所有预约记录。服务器上已创建的账号不会被删除。继续？")) return;
-    await api(`/api/admin/servers/${b.dataset.delServer}`, { method: "DELETE" });
+    try { await api(`/api/admin/servers/${b.dataset.delServer}`, { method: "DELETE" }); } catch (err) { toast(err.message); }
     loadAdmin();
   }));
 }
 
-const TUNNEL_STATE = { connected: ["ok", "已连接"], connecting: ["pending", "连接中"], disconnected: ["error", "已断开"] };
+const TUNNEL_STATE = { connected: ["ok", "已连接"], connecting: ["pending", "连接中"], disconnected: ["error", "已断开"], error: ["error", "出错"] };
+// 公网服务器登录学校 WebVPN 的状态（隧道的前提）
+const WEBVPN_STATE = {
+  logged_in: ["ok", "已登录"], logging_in: ["pending", "登录中…"], login_failed: ["error", "登录失败，自动重试中"],
+  banned: ["error", "被 WebVPN 临时封禁，稍后自动重试"], throttled: ["pending", "达到登录限速，等待中"],
+  bad_credentials: ["error", "账号或密码错误，请更新 .env 里的 WEBVPN_USER / WEBVPN_PASSWORD"],
+  misconfigured: ["error", "配置不完整"],
+};
+function webvpnLine(tunnel) {
+  const w = tunnel?.enabled && tunnel.status?._webvpn;
+  if (!w) return "";
+  const [cls, text] = WEBVPN_STATE[w.state] || ["", w.state];
+  return `<p class="small">公网服务器 → 学校 WebVPN：<span class="badge ${cls}">${esc(text)}</span>${w.error ? ` <span class="muted">${esc(w.error)}</span>` : ""}</p>`;
+}
 function tunnelCell(t) {
   if (!t) return `<span class="muted">-</span>`;
   const [cls, text] = TUNNEL_STATE[t.state] || ["", t.state];

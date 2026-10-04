@@ -608,7 +608,11 @@ class Agent(object):
         self.reconcile(users)
         if self.accounts != getattr(self, "_sent_accounts", None):
             self.sync()  # 账号状态有变化（新建、改名、出错），立即上报给平台
-        tasks = [t for t in state.get("migrations") or [] if t["id"] not in self.finished]
+        listed = state.get("migrations") or []
+        # 平台已不再把它列为待执行（完成 / 失败已上报）的，就不必再记着：否则管理员或成员点“重试”后，
+        # 同一个任务 id 会被一直当作“已执行过”而跳过，直到 Agent 重启
+        self.finished &= {t["id"] for t in listed}
+        tasks = [t for t in listed if t["id"] not in self.finished]
         self.pending_migrations = bool(tasks)
         self.handle_migrations(tasks)
 

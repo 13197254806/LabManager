@@ -32,6 +32,7 @@ def parse_ss(url, idx):
     if "?" in body:
         body, query = body.split("?", 1)
     # body = base64(method:password)@host:port  （也兼容整体 base64）
+    body = urllib.parse.unquote(body) if "%" in body else body  # base64 的 = 填充常被编码成 %3D
     if "@" not in body:
         body = _b64(body).decode()
     userinfo, hostport = body.rsplit("@", 1)
@@ -41,8 +42,11 @@ def parse_ss(url, idx):
     host, port = hostport.rsplit(":", 1)
     proxy = {"name": name, "type": "ss", "server": host, "port": int(port),
              "cipher": method, "password": password, "udp": True}
-    opts = dict(p.split("=", 1) for p in query.split(";") if "=" in p) if query else {}
+    # SIP002 把 plugin 参数整个做了 URL 编码（plugin=obfs-local%3Bobfs%3Dhttp%3B...），先解码再按 ; 拆
+    opts = dict(p.split("=", 1) for p in urllib.parse.unquote(query).split(";") if "=" in p) if query else {}
     plugin = opts.get("plugin", "")
+    if plugin and not plugin.startswith("obfs"):
+        sys.exit(f"节点「{name}」用了 {plugin} 插件，目前只支持 obfs；请换一个不带插件的 ss 节点")
     if plugin.startswith("obfs") or opts.get("obfs"):
         proxy["plugin"] = "obfs"
         proxy["plugin-opts"] = {"mode": opts.get("obfs", "http"),
@@ -71,13 +75,27 @@ def yaml_dump(obj, indent=0):
     return "\n".join(out)
 
 
+def _numeric(s):
+    try:
+        float(s.replace("_", "x"))  # 123、1e5、.5 都会被 YAML 当成数字；带下划线的数字 YAML 也认
+        return True
+    except ValueError:
+        pass
+    try:
+        int(s, 0)
+        return True
+    except ValueError:
+        return s.lstrip("-").replace("_", "").isdigit()
+
+
 def _scalar(v):
     if isinstance(v, bool):
         return "true" if v else "false"
     if isinstance(v, (int, float)):
         return str(v)
     s = str(v)
-    if s == "" or any(c in s for c in ":#{}[],&*?|<>=!%@`\"'") or s != s.strip():
+    if (s == "" or any(c in s for c in ":#{}[],&*?|<>=!%@`\"'") or s != s.strip()
+            or s.lower() in ("true", "false", "yes", "no", "on", "off", "null", "~") or _numeric(s)):
         return '"' + s.replace("\\", "\\\\").replace('"', '\\"') + '"'
     return s
 

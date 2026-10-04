@@ -294,16 +294,20 @@ def run_auto_renew(db: Session) -> int:
     days = max(1, get_int_setting(db, "auto_renew_days"))
     t = now()
     d = today()
-    renewed: dict[int, list[tuple[Reservation, date]]] = {}
+    renewed: dict[int, list[tuple[Reservation, date, date]]] = {}
     failed: dict[int, list[tuple[Reservation, str]]] = {}
+    step = timedelta(days=days)
     with booking_lock:
         candidates = [r for r in overlapping(db, d, d + timedelta(days=3650)) if r.auto_renew and r.user.enabled]
         for r in candidates:
-            deadline = datetime.combine(r.end_date + timedelta(days=1), datetime.min.time())
+            old_end = r.end_date
+            deadline = datetime.combine(old_end + timedelta(days=1), datetime.min.time())
             if t < deadline - before:
                 continue
-            old_end = r.end_date
-            new_end = old_end + timedelta(days=days)
+            # 一次续到“离到期时间已经早于触发窗口”为止：提前小时数大于每次延长天数时需要连续延长几次，
+            # 否则会每分钟续一次、反复发通知
+            wanted = old_end + step * ((t + before - deadline) // step + 1)
+            new_end = wanted
             reason = ""
             clash = [c for c in overlapping(db, old_end + timedelta(days=1), new_end, gpu_ids=[r.gpu_id]) if c.id != r.id]
             if clash:
@@ -313,7 +317,7 @@ def run_auto_renew(db: Session) -> int:
             if new_end > old_end:
                 r.end_date = new_end
                 r.renew_count += 1
-                renewed.setdefault(r.user_id, []).append((r, old_end))
+                renewed.setdefault(r.user_id, []).append((r, old_end, wanted))
             else:
                 # 一天都续不了：关闭自动续约，避免每分钟重试，并通知本人
                 r.auto_renew = False
@@ -322,8 +326,8 @@ def run_auto_renew(db: Session) -> int:
 
     for items in renewed.values():
         user = items[0][0].user
-        lines = [f"- **{r.gpu.server.name}** GPU{r.gpu.index}：{old} → **{r.end_date}**" for r, old in items]
-        partial = any(r.end_date - old < timedelta(days=days) for r, old in items)
+        lines = [f"- **{r.gpu.server.name}** GPU{r.gpu.index}：{old} → **{r.end_date}**" for r, old, _w in items]
+        partial = any(r.end_date < wanted for r, _old, wanted in items)
         md = "以下预约已自动续约：\n" + "\n".join(lines)
         if partial:
             md += "\n\n部分预约因后面已有他人预约，只延长到了冲突前一天。"

@@ -21,7 +21,6 @@ x-app-env: &app-env
   CHISEL_SECRET: ${CHISEL_SECRET:-}
   CHISEL_ALLOW: ${CHISEL_ALLOW:-59.69.127.0/24}
   REMOTE_PLATFORM_PORT: ${REMOTE_PLATFORM_PORT:-18765}
-  REMOTE_PROXY_PORT: ${REMOTE_PROXY_PORT:-13128}
 
 x-app: &app
   image: lab-server:latest
@@ -66,8 +65,14 @@ services:
     <<: *app
     command: ["python", "-m", "app.tunnel", "run"]
     pull_policy: never
+    # 只给隧道自己需要的变量：校园网密码只在这里，飞书 Secret、登录 Cookie 签名密钥不进这个容器
     environment:
-      <<: *app-env
+      DATABASE_URL: sqlite:////data/lab.db
+      TZ_NAME: ${TZ_NAME:-Asia/Shanghai}
+      TUNNEL_TARGETS: ${TUNNEL_TARGETS:-}
+      CHISEL_PORT: ${CHISEL_PORT:-9000}
+      CHISEL_SECRET: ${CHISEL_SECRET:-}
+      REMOTE_PLATFORM_PORT: ${REMOTE_PLATFORM_PORT:-18765}
       WEBVPN_PORTAL: ${WEBVPN_PORTAL:-https://webvpn.whut.edu.cn}
       WEBVPN_USER: ${WEBVPN_USER:-}
       WEBVPN_PASSWORD: ${WEBVPN_PASSWORD:-}

@@ -4,7 +4,7 @@
 #
 #   bash tools/add-gpu.sh <平台地址> <服务器Token> [--user ubuntu]
 #
-# 例：bash tools/add-gpu.sh http://122.51.221.158 lab_xxxxx --user ubuntu
+# 例：bash tools/add-gpu.sh http://<平台地址> lab_xxxxx --user ubuntu
 #
 # Token 在平台「管理 → GPU 服务器 → 显示安装命令」里获得（只显示一次）。
 # 脚本会：用 Token 从平台取回该服务器的内网地址、chisel 端口和口令 → 下载 agent 文件和 chisel →
