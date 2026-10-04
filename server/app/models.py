@@ -67,6 +67,7 @@ class Server(Base):
     candidates_json: Mapped[str] = mapped_column(Text, default="[]")
     # 旧共享账号（如 ubuntu）里可复制给成员的配置、软件、conda 环境
     legacy_json: Mapped[str] = mapped_column(Text, default="[]")
+    browse_roots_json: Mapped[str] = mapped_column(Text, default="[]")  # 可以浏览 / 迁移的位置（旧账号家目录、迁移目录）
     home_free: Mapped[int | None] = mapped_column(BigInteger)
     # Agent 上报的整机资源：{"cpu": 12.3, "mem_used": MiB, "mem_total": MiB, "disk_used": MiB, "disk_total": MiB}
     sysinfo_json: Mapped[str] = mapped_column(Text, default="{}")
@@ -92,6 +93,10 @@ class Server(Base):
     @property
     def legacy(self) -> list[dict]:
         return _loads(self.legacy_json, [])
+
+    @property
+    def browse_roots(self) -> list[str]:
+        return _loads(self.browse_roots_json, [])
 
     @property
     def sysinfo(self) -> dict:

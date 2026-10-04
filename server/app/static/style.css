@@ -71,6 +71,11 @@ input, select, textarea {
   font: inherit; color: var(--text); background: var(--panel);
   border: 1px solid var(--line-strong); border-radius: 6px; padding: 6px 8px; min-height: 32px; width: 100%;
 }
+/* 下拉框：自绘向下箭头，离右边框留出一点距离 */
+select {
+  appearance: none; -webkit-appearance: none; padding-right: 32px; background-repeat: no-repeat; background-position: right 12px center; background-size: 10px 6px;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='6' viewBox='0 0 10 6'%3E%3Cpath d='M1 1l4 4 4-4' fill='none' stroke='%238b93a1' stroke-width='1.6' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E");
+}
 input:focus, select:focus, textarea:focus { outline: 2px solid var(--primary); outline-offset: -1px; border-color: transparent; }
 label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; }
 label > input, label > select, label > textarea { color: var(--text); font-size: 14px; }
@@ -147,8 +152,9 @@ main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 /* 服务器分组：点击服务器行折叠 / 展开，GPU 行用 grid-template-rows 0fr↔1fr 做高度动画（overflow: clip 不影响左列的 sticky） */
 .cal-server-group { border-bottom: 1px solid var(--line); }
 .cal-server-group:last-child { border-bottom: 0; }
-.cal-server { background: var(--bg); min-height: 40px; border-bottom: 0; cursor: pointer; user-select: none; }
-.cal-server:hover { filter: brightness(.97); }
+.cal-server { background: var(--bg); min-height: 40px; border-bottom: 0; user-select: none; }
+.cal-server > .cal-label { cursor: pointer; }
+.cal-server > .cal-label:hover { filter: brightness(.95); }
 .cal-server:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
 .cal-server .cal-label { background: var(--bg); gap: 0; align-items: stretch; }
 .cal-server .cal-track { background: var(--bg); }
@@ -268,7 +274,7 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 .cand .meta { grid-column: 2 / 4; font-size: 12px; color: var(--muted); }
 .cand .dest { width: 140px; min-height: 28px; padding: 2px 6px; font-size: 12px; }
 .cand-ctl { display: flex; gap: 6px; align-items: center; }
-.cand-ctl select { width: auto; min-height: 28px; padding: 2px 6px; font-size: 12px; }
+.cand-ctl select { width: auto; min-height: 28px; padding: 2px 24px 2px 6px; font-size: 12px; background-position: right 8px center; }
 .pk-section { border: 1px solid var(--line); border-radius: 8px; padding: 12px; margin-top: 12px; }
 .pk-section h3 { font-size: 14px; margin: 0 0 8px; }
 .pk-section .label { margin-top: 10px; }
@@ -342,3 +348,25 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 /* 磁盘占用情况（悬停显示各用户占用） */
 .srv-stat .disk-detail { color: var(--primary); cursor: pointer; margin-left: -2px; }
 .srv-stat .disk-detail:hover { text-decoration: underline; }
+
+/* 必填项的红色 * 号 */
+.req { color: var(--danger); margin-left: 3px; font-weight: 600; }
+/* 文字链接样式的按钮（蓝色） */
+.link-btn { background: none; border: 0; padding: 0; color: var(--primary); cursor: pointer; font: inherit; }
+.link-btn:hover { text-decoration: underline; }
+.env-head { display: flex; align-items: center; gap: 10px; margin-top: 8px; font-size: 13px; }
+/* 迁移：已选的文件 / 目录，以及服务器文件浏览 */
+.cand.picked { grid-template-columns: 1fr auto auto; }
+.cand.picked .meta { grid-column: 1 / -1; }
+.fs-path { display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; color: var(--muted); }
+.fs-path .sep { opacity: .5; }
+.fs-list { border: 1px solid var(--line); border-radius: 8px; max-height: 380px; overflow-y: auto; min-height: 120px; }
+.fs-row { display: grid; grid-template-columns: 1fr 96px 80px 90px 96px; gap: 8px; align-items: center; padding: 7px 10px; border-bottom: 1px solid var(--line); font-size: 13px; }
+.fs-row:last-child { border-bottom: 0; }
+.fs-row.head { position: sticky; top: 0; background: var(--panel); color: var(--muted); font-size: 12px; z-index: 1; }
+.fs-row .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.fs-row .name.dir { cursor: pointer; color: var(--text); }
+.fs-row .name.dir:hover { color: var(--primary); }
+.fs-row .muted { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.fs-row .act { text-align: right; white-space: nowrap; }
+@media (max-width: 720px) { .fs-row { grid-template-columns: 1fr auto; } .fs-row .m { display: none; } }

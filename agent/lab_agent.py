@@ -47,7 +47,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.6.0"
+VERSION = "0.7.0"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -403,6 +403,116 @@ class Agent(object):
                 log.exception("扫描可迁移内容失败")
             time.sleep(int(self.cfg.get("candidate_scan_interval", 600)))
 
+    # ---------------- 文件浏览（成员在网页上选择要迁移的文件 / 目录） ----------------
+
+    def browse_bases(self):
+        """可浏览 / 可迁移的位置：旧共享账号的家目录，以及 migration_roots。"""
+        bases = [os.path.realpath(pw.pw_dir) for pw in self.legacy_accounts()]
+        return bases + [r for r in self.roots if os.path.isdir(r) and r not in bases]
+
+    def managed_uids(self):
+        out = set()
+        for n in group_members(GROUP_MANAGED):
+            try:
+                out.add(pwd.getpwnam(n).pw_uid)
+            except KeyError:
+                pass
+        return out
+
+    def check_browsable(self, path, managed=None):
+        """path 必须是真实路径（不含符号链接），位于某个可浏览位置之下（或就是它），
+        且从该位置到 path 之间不经过属于其他成员的目录。返回所在的位置。"""
+        if not path.startswith("/") or path != os.path.realpath(path) or path != os.path.normpath(path):
+            raise ValueError("路径不合法")
+        base = next((b for b in self.browse_bases() if path == b or path.startswith(b.rstrip("/") + "/")), None)
+        if base is None:
+            raise ValueError("只能浏览旧账号家目录和迁移目录")
+        managed = self.managed_uids() if managed is None else managed
+        cur = path
+        while cur != base:
+            if os.lstat(cur).st_uid in managed:
+                raise ValueError("这个目录属于其他成员")
+            cur = os.path.dirname(cur)
+        return base
+
+    def browse_list(self, path):
+        managed = self.managed_uids()
+        try:
+            home_dev = os.stat(self.home_base).st_dev
+        except OSError:
+            home_dev = None
+        homes = [os.path.realpath(pw.pw_dir) for pw in self.legacy_accounts()]
+
+        def info(full, name, st, top=False):
+            try:
+                owner = pwd.getpwuid(st.st_uid).pw_name
+            except KeyError:
+                owner = str(st.st_uid)
+            is_dir = stat.S_ISDIR(st.st_mode)
+            return {
+                "name": name, "path": full, "is_dir": is_dir, "top": top,
+                "size": None if is_dir else st.st_size,
+                "mtime": time.strftime("%Y-%m-%d", time.localtime(st.st_mtime)), "owner": owner,
+                "selectable": not top and st.st_uid not in managed,
+                "same_fs": st.st_dev == home_dev,
+                "in_home": any(full.startswith(h.rstrip("/") + "/") for h in homes),
+            }
+
+        if not path:  # 最上层：可以浏览的位置
+            out = []
+            for b in self.browse_bases():
+                try:
+                    out.append(info(b, b, os.lstat(b), top=True))
+                except OSError:
+                    pass
+            return out
+        self.check_browsable(path, managed)
+        out = []
+        for name in sorted(os.listdir(path)):
+            if name.startswith("."):
+                continue
+            full = os.path.join(path, name)
+            try:
+                st = os.lstat(full)
+            except OSError:
+                continue
+            if stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode):  # 符号链接、设备文件等不显示
+                out.append(info(full, name, st))
+            if len(out) >= 3000:
+                break
+        out.sort(key=lambda e: (not e["is_dir"], e["name"].lower()))
+        return out
+
+    def handle_browse(self, req):
+        res = {"ok": True}
+        try:
+            if req.get("op") == "size":
+                path = req.get("path") or ""
+                self.check_browsable(path)
+                res["size"] = self._du(path) if os.path.isdir(path) else os.lstat(path).st_size
+            else:
+                res["entries"] = self.browse_list(req.get("path") or "")
+        except (OSError, ValueError) as e:
+            res = {"ok": False, "error": str(e) if isinstance(e, ValueError) else "读取失败：%s" % e.strerror}
+        except Exception as e:  # noqa: BLE001
+            log.exception("文件浏览出错")
+            res = {"ok": False, "error": "读取失败：%s" % e}
+        try:
+            self.post("/api/agent/browse/%s" % req["id"], res, timeout=30)
+        except Exception as e:  # noqa: BLE001
+            log.warning("回复文件浏览请求失败: %s", e)
+
+    def browse_loop(self):
+        """长轮询：平台有人在网页上浏览文件时立刻拿到请求，在后台线程里处理并回复。"""
+        while True:
+            try:
+                reply = self.post("/api/agent/browse/poll", {}, timeout=45)
+                for req in reply.get("requests") or []:
+                    threading.Thread(target=self.handle_browse, args=(req,), daemon=True, name="browse").start()
+            except Exception as e:  # noqa: BLE001  网络抖动等：稍后重试
+                log.debug("文件浏览轮询失败: %s", e)
+                time.sleep(5)
+
     def scan_home_usage(self):
         """各用户家目录占用的空间（MiB），按从大到小排。家目录可能很大，du 要跑一阵，所以放在后台。"""
         out = []
@@ -486,6 +596,7 @@ class Agent(object):
             self._sent_accounts = self.accounts
         if self.candidates is not None:
             payload["candidates"] = self.candidates
+            payload["browse_roots"] = self.browse_bases()
             payload["legacy"] = self.legacy
             payload["home_free"] = self.home_free
         return self.post("/api/agent/sync", payload)
@@ -1196,9 +1307,14 @@ class Migration(threading.Thread):
             raise MigrationError("目标文件夹名不合法")
         parent, base = os.path.split(src)
         roots, homes = self._allowed_parents()
-        if parent != os.path.realpath(parent) or base.startswith(".") or parent not in roots | homes:
-            raise MigrationError("只允许迁移旧账号家目录或 %s 下的一级内容" % "、".join(sorted(roots)))
-        in_home = parent in homes
+        bases = roots | homes
+        try:  # 必须在旧账号家目录或迁移目录之下，且不经过其他成员的目录
+            if base.startswith(".") or not any(parent == b or parent.startswith(b.rstrip("/") + "/") for b in bases):
+                raise ValueError
+            self.agent.check_browsable(parent, self._managed_uids())
+        except (ValueError, OSError):
+            raise MigrationError("只允许迁移旧账号家目录或 %s 下的内容" % "、".join(sorted(roots)))
+        in_home = any(parent == h or parent.startswith(h.rstrip("/") + "/") for h in homes)
         if in_home and mode == "link":
             raise MigrationError("旧账号家目录里的内容不能“原地保留”，请选择移动或复制")
         pw = self._user()
@@ -1441,6 +1557,7 @@ def main():
         return
     threading.Thread(target=agent.candidate_loop, daemon=True, name="candidates").start()
     threading.Thread(target=agent.usage_loop, daemon=True, name="usage").start()
+    threading.Thread(target=agent.browse_loop, daemon=True, name="browse-poll").start()
     while True:
         try:
             agent.once()

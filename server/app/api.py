@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from . import feishu, services
+from . import browse, feishu, services
 from .auth import admin_user, current_user
 from .config import now, settings, today
 from .db import SessionLocal, get_db
@@ -226,6 +226,7 @@ def my_servers(user: User = Depends(current_user), db: Session = Depends(get_db)
                 "account": acct,
                 "candidates": cands,
                 "legacy": s.legacy,
+                "browse_roots": s.browse_roots,
             }
         )
     return out
@@ -625,6 +626,12 @@ def my_migrations(user: User = Depends(current_user), db: Session = Depends(get_
     return [task_out(t) for t in tasks]
 
 
+def _related(a: str, b: str) -> bool:
+    """两个路径相同，或者一个在另一个之下。"""
+    a, b = a.rstrip("/"), b.rstrip("/")
+    return a == b or a.startswith(b + "/") or b.startswith(a + "/")
+
+
 DEST_NAME_RE = re.compile(r"^[\w.-][\w .+@-]{0,126}$")
 
 
@@ -642,26 +649,31 @@ def create_migration(body: MigrationIn, bg: BackgroundTasks, user: User = Depend
     server = db.get(Server, body.server_id)
     if not server:
         raise HTTPException(404, "服务器不存在")
-    # 只能选 Agent 上报的候选目录（Agent 端还会再按自己的白名单校验一遍）
+    # 只能迁移旧账号家目录 / 迁移目录之下的内容（Agent 端还会再按自己的白名单校验一遍）
     source = posixpath.normpath(body.source)
+    roots = server.browse_roots
     cand = next((c for c in server.candidates if c.get("path") == source), None)
-    if not cand:
-        raise HTTPException(400, "该目录不在可迁移列表中（列表由服务器每 10 分钟刷新一次）")
-    if cand.get("in_home") and body.mode == "link":
+    under_root = any(source.startswith(r.rstrip("/") + "/") for r in roots)
+    if not source.startswith("/") or not (cand or under_root) or posixpath.basename(source).startswith("."):
+        raise HTTPException(400, "只能迁移旧账号家目录或迁移目录里的文件和目录")
+    legacy_homes = [l.get("home", "").rstrip("/") for l in server.legacy if l.get("home")]
+    in_home = (cand or {}).get("in_home") or any(source.startswith(h + "/") for h in legacy_homes)
+    if in_home and body.mode == "link":
         raise HTTPException(400, "旧账号家目录里的内容不能“原地保留”，请选择移动或复制")
     dest = body.dest_name.strip()
     if not DEST_NAME_RE.match(dest) or dest in (".", ".."):
         raise HTTPException(400, "目标文件夹名只能包含字母、数字、中文和 . _ - 等字符")
     # 移动 / 原地保留会把文件从共享位置拿走，同一个目录只能有一个人这样做；复制不受限制
-    clash = db.scalar(
+    # 路径有包含关系（上级或下级已被别人移走）同样算冲突
+    claimed = db.scalars(
         select(MigrationTask).where(
             MigrationTask.server_id == server.id,
             MigrationTask.kind == "dir",
-            MigrationTask.source == source,
             MigrationTask.mode.in_(("move", "link")),
             MigrationTask.status.in_(MigrationTask.ACTIVE + ("done",)),
         )
-    )
+    ).all()
+    clash = next((t for t in claimed if _related(t.source, source)), None)
     if clash:
         raise HTTPException(409, f"该目录已被 {clash.user.name} 申请迁移")
     need_approval = (
@@ -819,6 +831,7 @@ class AgentReport(BaseModel):
     gpus: list[GPUIn] = []
     accounts: list[AccountIn] | None = None
     candidates: list[CandidateIn] | None = None
+    browse_roots: list[str] | None = None
     legacy: list[dict] | None = None
     home_free: int | None = None
     system: dict | None = None
@@ -873,6 +886,8 @@ def agent_sync(
         server.accounts_json = json.dumps({str(a.id): {**a.model_dump(), "at": now().isoformat()} for a in body.accounts})
     if body.candidates is not None:
         server.candidates_json = json.dumps([c.model_dump() for c in body.candidates][:500])
+    if body.browse_roots is not None:
+        server.browse_roots_json = json.dumps([r for r in body.browse_roots if isinstance(r, str)][:50], ensure_ascii=False)
     if body.legacy is not None:
         server.legacy_json = json.dumps(body.legacy[:5], ensure_ascii=False)
     if body.home_free is not None:
@@ -919,6 +934,70 @@ class MigrationProgress(BaseModel):
     files_total: int = 0
     message: str = Field(default="", max_length=2000)
     dest_path: str = Field(default="", max_length=512)
+
+
+class BrowseIn(BaseModel):
+    op: str = Field(default="list", pattern="^(list|size)$")
+    path: str = Field(default="", max_length=1024)
+
+
+@router.post("/servers/{sid}/browse")
+def browse_server(sid: int, body: BrowseIn, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """成员选择要迁移的文件 / 目录时，请这台服务器上的 Agent 列出目录（op=list）或统计大小（op=size）。"""
+    server = db.get(Server, sid)
+    if not server:
+        raise HTTPException(404, "服务器不存在")
+    if not server.online:
+        raise HTTPException(503, "服务器当前离线")
+    sid_, name = server.id, server.name
+    db.close()  # 等待 Agent 回复期间不占用数据库连接
+    res = browse.broker.ask(sid_, body.op, posixpath.normpath(body.path) if body.path else "", timeout=60 if body.op == "size" else 25)
+    if res is None:
+        raise HTTPException(504, f"{name} 没有及时响应。需要在这台服务器上把 Agent 更新到 0.7.0 或更高版本")
+    if not res.get("ok"):
+        raise HTTPException(400, res.get("error") or "读取失败")
+    if body.op == "size":
+        return {"size": res.get("size")}
+    entries = res.get("entries") or []
+    # 标出已经被别人移走的（含上 / 下级路径有包含关系的）
+    db2 = SessionLocal()
+    try:
+        claims = db2.scalars(
+            select(MigrationTask).where(
+                MigrationTask.server_id == sid_, MigrationTask.kind == "dir",
+                MigrationTask.mode.in_(("move", "link")), MigrationTask.status.in_(MigrationTask.ACTIVE + ("done",)),
+            ).options(joinedload(MigrationTask.user))
+        ).all()
+        for e in entries:
+            t = next((t for t in claims if _related(t.source, e.get("path", ""))), None)
+            e["claimed_by"] = t.user.name if t else None
+    finally:
+        db2.close()
+    return {"entries": entries}
+
+
+@router.post("/agent/browse/poll")
+def agent_browse_poll(authorization: str = Header(default="")):
+    """Agent 长轮询：有成员在浏览文件时立刻返回请求，否则最多挂 20 秒。"""
+    with SessionLocal() as db:
+        sid = _agent_server(db, authorization).id
+    return {"requests": browse.broker.poll(sid, timeout=20)}
+
+
+class BrowseResult(BaseModel):
+    ok: bool = True
+    error: str = ""
+    entries: list[dict] | None = None
+    size: int | None = None
+
+
+@router.post("/agent/browse/{req_id}")
+def agent_browse_answer(req_id: str, body: BrowseResult, authorization: str = Header(default="")):
+    with SessionLocal() as db:
+        sid = _agent_server(db, authorization).id
+    if not browse.broker.answer(req_id, sid, body.model_dump()):
+        raise HTTPException(404, "请求已过期")
+    return {"ok": True}
 
 
 @router.post("/agent/migrations/{tid}")

@@ -71,8 +71,8 @@
             <p class="muted small">用于 <code>ssh 用户名@服务器</code> 密码登录，所有 GPU 服务器通用。平台只保存加密后的哈希。在服务器上用 <code>passwd</code> 改的密码会被平台覆盖，请在这里修改。</p>
             <div id="password-state" class="small"></div>
             <form id="password-form" class="stack">
-              <input type="password" name="password" placeholder="新密码：至少 8 位" autocomplete="new-password" required>
-              <input type="password" name="confirm" placeholder="再输入一次" autocomplete="new-password" required>
+              <label>新密码<input type="password" name="password" placeholder="至少 8 位" autocomplete="new-password" required></label>
+              <label>确认新密码<input type="password" name="confirm" placeholder="再输入一次" autocomplete="new-password" required></label>
               <div class="group">
                 <button class="btn primary">保存密码</button>
                 <button class="btn danger hidden" type="button" id="password-clear">关闭密码登录</button>
@@ -83,8 +83,8 @@
             <h2>SSH 公钥 <span class="muted small">（可选，免输密码）</span></h2>
             <ul id="key-list" class="list"></ul>
             <form id="key-form" class="stack">
-              <input name="title" placeholder="备注（可选），例如：我的笔记本" maxlength="64">
-              <textarea name="public_key" rows="3" placeholder="粘贴公钥，例如 ssh-ed25519 AAAAC3Nza... you@laptop" required></textarea>
+              <label>备注（可选）<input name="title" placeholder="例如：我的笔记本" maxlength="64"></label>
+              <label>公钥<textarea name="public_key" rows="3" placeholder="粘贴公钥，例如 ssh-ed25519 AAAAC3Nza... you@laptop" required></textarea></label>
               <button class="btn primary">添加公钥</button>
             </form>
           </div>
@@ -159,7 +159,7 @@
       <h2>预约 GPU</h2>
       <label>服务器<select name="server" id="booking-server"></select></label>
       <div>
-        <div class="label">显卡（可多选）</div>
+        <div class="label">显卡（可多选）<span class="req">*</span></div>
         <div id="booking-gpus" class="gpu-picks"></div>
       </div>
       <div>
@@ -190,8 +190,8 @@
       <h2 id="detail-title"></h2>
       <div id="detail-info" class="muted"></div>
       <div class="two editable">
-        <label>开始日期（含）<input type="date" name="start_date"></label>
-        <label>结束日期（含）<input type="date" name="end_date"></label>
+        <label>开始日期（含）<input type="date" name="start_date" required></label>
+        <label>结束日期（含）<input type="date" name="end_date" required></label>
       </div>
       <label class="check editable"><input type="checkbox" name="auto_renew"> <span>长期使用 <span class="muted small renew-rule"></span></span></label>
       <label class="editable">用途备注<input name="note" maxlength="256"></label>
@@ -251,6 +251,16 @@
   </dialog>
 
   <!-- 迁移选择 -->
+  <!-- 浏览 GPU 服务器上的文件，选择要迁移的文件 / 目录 -->
+  <dialog id="fs-dialog" class="wide">
+    <div class="stack">
+      <h2>选择文件或目录</h2>
+      <div class="fs-path small" id="fs-path"></div>
+      <div class="fs-list" id="fs-list"></div>
+      <div class="actions"><button class="btn" id="fs-close">关闭</button></div>
+    </div>
+  </dialog>
+
   <dialog id="migrate-dialog" class="wide">
     <div class="stack">
       <h2>迁移环境和文件</h2>

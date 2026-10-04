@@ -27,6 +27,24 @@ function hue(id) {
   return (id * 137.508) % 360;
 }
 
+// 必填项加红色 *：给带 required 控件的 <label> 里的文字加上星号（动态生成的表单也会处理）
+function markRequired(root) {
+  for (const label of root.querySelectorAll?.("label") || []) {
+    if (label.dataset.req) continue;
+    const ctl = [...label.children].find((c) => c.matches?.("input[required], select[required], textarea[required]"));
+    if (!ctl) continue;
+    label.dataset.req = "1";
+    const wrap = document.createElement("span");
+    while (label.firstChild && label.firstChild !== ctl) wrap.appendChild(label.firstChild);
+    wrap.insertAdjacentHTML("beforeend", `<span class="req" aria-hidden="true">*</span>`);
+    label.insertBefore(wrap, ctl);
+  }
+}
+markRequired(document);
+new MutationObserver((muts) => {
+  for (const m of muts) for (const n of m.addedNodes) if (n.nodeType === 1) { if (n.matches("label")) markRequired(n.parentNode); markRequired(n); }
+}).observe(document.body, { childList: true, subtree: true });
+
 // 头像：优先用飞书头像，没有或加载失败时用姓名首字
 function avatarHtml(name, url, id) {
   const ch = esc((name || "?").trim().slice(0, 1).toUpperCase());
@@ -441,8 +459,8 @@ $("#calendar").addEventListener("click", (e) => {
   if (cell && !cell.classList.contains("past")) {
     return openBooking({ serverId: Number(cell.dataset.server), gpuId: Number(cell.dataset.gpu), date: cell.dataset.date });
   }
-  const head = e.target.closest("[data-toggle-srv]");
-  if (head) toggleServer(head);
+  const label = e.target.closest(".cal-server > .cal-label");  // 只有最左侧的服务器格子才折叠 / 展开
+  if (label) toggleServer(label.parentElement);
 });
 $("#calendar").addEventListener("keydown", (e) => {
   const head = e.target.closest?.("[data-toggle-srv]");
@@ -693,8 +711,8 @@ async function renderAccount() {
   const box = $("#linux-account");
   if (!me.linux_username) {
     box.innerHTML = `<p class="muted small">这是你在所有 GPU 服务器上的登录名，建议用姓名拼音，如 <code>zhangsan</code>。以后也可以修改。</p>
-      <form id="username-form" class="group"><input name="username" placeholder="小写字母开头，如 zhangsan" required style="flex:1;width:auto">
-      <button class="btn primary">保存</button></form>`;
+      <form id="username-form" class="stack"><label>Linux 用户名<input name="username" placeholder="小写字母开头，如 zhangsan" required></label>
+      <div><button class="btn primary">保存</button></div></form>`;
     $("#username-form").onsubmit = async (e) => {
       e.preventDefault();
       try {
@@ -997,35 +1015,51 @@ async function renderPicker(container, onSubmitted) {
               <span>conda 本体 <code>~/${esc(c.name)}</code> <span class="muted small">${fmtBytes(c.base_size)} · 不含环境，之后自己 conda create</span></span></label></div>`;
         }
         if (c.envs.length) {
-          html += `<details class="small" style="margin-top:6px"><summary>${isUser ? "<code>~/.conda/envs</code> 里" : `<code>~/${esc(c.name)}/envs</code> 里`}的已有环境（可选，复制后自动修正路径）</summary>
-            <div class="cfg-grid" style="margin-top:6px">${c.envs.map((e) => `<label class="check"><input type="checkbox" data-conda="${ci}" data-env="${esc(e.name)}">
-              <span>${esc(e.name)} <span class="muted small">${fmtBytes(e.size)}</span></span></label>`).join("")}</div></details>`;
+          html += `<div class="env-head"><span>${isUser ? "<code>~/.conda/envs</code> 里" : `<code>~/${esc(c.name)}/envs</code> 里`}的已有环境（可选，复制后自动修正路径）</span>
+            <button type="button" class="link-btn" data-expand>展开</button></div>
+            <div class="cfg-grid hidden" style="margin-top:6px">${c.envs.map((e) => `<label class="check"><input type="checkbox" data-conda="${ci}" data-env="${esc(e.name)}">
+              <span>${esc(e.name)} <span class="muted small">${fmtBytes(e.size)}</span></span></label>`).join("")}</div>`;
         }
       }
       if (!lg.conda.length) html += `<p class="muted small">共享账号家目录里没有找到 conda。</p>`;
-      html += `<p class="muted small">提示：apt 安装的软件（git、vim、tmux、gcc、CUDA 等）是全系统共享的，新账号直接可用，不需要迁移。
-        建议只复制 conda 本体，需要的环境自己用 <code>conda create</code> 新建（GPU 服务器没有外网，需要先在自己的 SSH 会话里挂上代理）；确实不方便重建的旧环境，可以展开上面的列表一并复制。</p></div>`;
+      html += `<p class="muted small">提示：apt 安装的软件（git、vim、tmux、gcc、CUDA 等）是全系统共享的，新账号直接可用，不需要迁移。</p></div>`;
     }
     html += `<div class="pk-section"><h3>② 迁移我的文件和目录</h3>
-      <p class="muted small">下面是共享账号家目录${s.legacy.length ? "" : "（未配置）"}和数据目录里<b>还没归属任何成员</b>的内容。请只勾选<b>自己的</b>：
-      「移动」把文件从共享位置搬走（其他人就看不到了），「复制」保留原文件。迁移前请先停掉正在使用这些文件的程序。</p>
-      <div class="cand-list pk-list">${s.candidates.length ? s.candidates.map((c, i) => {
-        const taken = c.claimed_by || c.mine;
-        const name = c.path.split("/").pop();
-        const modes = c.in_home ? ["move", "copy"] : ["move", "copy", "link"];
-        return `<div class="cand ${taken ? "disabled" : ""}">
-          <input type="checkbox" data-i="${i}" ${taken ? "disabled" : ""}>
-          <span class="path">${esc(c.path)}${c.is_dir === false ? "" : "/"}</span>
-          <span class="cand-ctl">
-            <select data-mode="${i}" ${taken ? "disabled" : ""}>${modes.map((m) => `<option value="${m}">${MODE_NAMES[m]}</option>`).join("")}</select>
-            <input class="dest" data-dest="${i}" value="${esc(name)}" title="放到家目录下的名字" ${taken ? "disabled" : ""}>
-          </span>
-          <span class="meta">${c.size != null ? fmtBytes(c.size) : "大小统计中"} · 修改于 ${esc(c.mtime)} · 属主 ${esc(c.owner)}${c.same_fs ? "" : " · 与家目录不在同一磁盘"}
-            ${c.claimed_by ? ` · 已被 ${esc(c.claimed_by)} 迁移` : ""}${c.mine ? " · 你已迁移过" : ""}</span>
-        </div>`;
-      }).join("") : `<div class="empty">没有可迁移的文件或目录。</div>`}</div></div>`;
+      <p class="muted small">选择需要迁移到 <code>/home/${esc(state.me.linux_username)}</code> 的文件或目录</p>
+      <div class="cand-list pk-list pk-picked"></div>
+      <div style="margin-top:8px"><button type="button" class="btn small" data-add-file>添加文件或目录</button></div></div>`;
     $(".pk-body", container).innerHTML = html;
+    renderPicked();
+  };
+
+  // 已添加的文件 / 目录（初始为空，通过「添加文件或目录」从服务器上选择）
+  let picked = [];
+  const renderPicked = () => {
+    const box = $(".pk-picked", container);
+    box.classList.toggle("hidden", !picked.length);
+    box.innerHTML = picked.map((p, i) => {
+      const modes = p.in_home ? ["move", "copy"] : ["move", "copy", "link"];
+      return `<div class="cand picked">
+        <span class="path">${esc(p.path)}${p.is_dir ? "/" : ""}</span>
+        <span class="cand-ctl">
+          <select data-pmode="${i}">${modes.map((m) => `<option value="${m}" ${p.mode === m ? "selected" : ""}>${MODE_NAMES[m]}</option>`).join("")}</select>
+          <input class="dest" data-pdest="${i}" value="${esc(p.dest)}" title="放到家目录下的名字">
+        </span>
+        <button type="button" class="link-btn" data-pdel="${i}">移除</button>
+        <span class="meta">${p.size === undefined ? "大小统计中…" : p.size == null ? "大小未知" : fmtBytes(p.size)} · 修改于 ${esc(p.mtime)} · 属主 ${esc(p.owner)}${p.same_fs ? "" : " · 与家目录不在同一磁盘"}</span>
+      </div>`;
+    }).join("");
     update();
+  };
+  const addPicked = async (s, e) => {
+    if (picked.some((p) => p.path === e.path)) return;
+    const p = { ...e, mode: "move", dest: e.name, size: e.is_dir ? undefined : e.size };
+    picked.push(p);
+    renderPicked();
+    if (e.is_dir) {  // 目录大小要在服务器上统计，慢一点，先显示“统计中”
+      try { p.size = (await api(`/api/servers/${s.id}/browse`, { method: "POST", body: { op: "size", path: e.path } })).size; } catch { p.size = null; }
+      if (picked.includes(p)) renderPicked();
+    }
   };
 
   const collect = () => {
@@ -1045,10 +1079,7 @@ async function renderPicker(container, onSubmitted) {
       });
       return { legacy_user: lg.user, configs, conda, bytes };
     }).filter((p) => p.configs.length || p.conda.length);
-    const dirs = $$(".pk-list input[type=checkbox]:checked", container).map((c) => {
-      const i = Number(c.dataset.i);
-      return { cand: s.candidates[i], mode: $(`[data-mode="${i}"]`, container).value, dest: $(`[data-dest="${i}"]`, container).value.trim() };
-    });
+    const dirs = picked.map((p) => ({ cand: { path: p.path, size: p.size, same_fs: p.same_fs }, mode: p.mode, dest: p.dest.trim() }));
     return { s, profiles, dirs };
   };
 
@@ -1067,9 +1098,30 @@ async function renderPicker(container, onSubmitted) {
     $(".pk-submit", container).textContent = n ? `开始迁移（${n} 项任务）` : "开始迁移";
   };
 
-  sel.onchange = render;
-  container.onchange = update;
-  container.oninput = (e) => { if (e.target.matches(".dest")) update(); };
+  sel.onchange = () => { picked = []; render(); };
+  container.onchange = (e) => {
+    const t = e.target;
+    if (t.dataset.pmode !== undefined) picked[Number(t.dataset.pmode)].mode = t.value;
+    update();
+  };
+  container.oninput = (e) => {
+    if (e.target.dataset.pdest !== undefined) picked[Number(e.target.dataset.pdest)].dest = e.target.value;
+    if (e.target.matches(".dest")) update();
+  };
+  container.onclick = (e) => {
+    const t = e.target;
+    if (t.dataset.expand !== undefined) {  // 展开 / 收起 conda 已有环境列表
+      const list = t.parentElement.nextElementSibling;
+      const hide = !list.classList.toggle("hidden");
+      t.textContent = hide ? "收起" : "展开";
+    } else if (t.dataset.pdel !== undefined) {
+      picked.splice(Number(t.dataset.pdel), 1);
+      renderPicked();
+    } else if (t.dataset.addFile !== undefined) {
+      const s = cur();
+      openFsBrowser(s, picked.map((p) => p.path), (entry) => addPicked(s, entry));
+    }
+  };
   $(".pk-submit", container).onclick = async () => {
     const { s, profiles, dirs } = collect();
     const err = $(".pk-error", container);
@@ -1102,6 +1154,66 @@ async function renderPicker(container, onSubmitted) {
   };
   render();
 }
+
+/** 文件浏览器：列出 GPU 服务器上旧共享账号家目录 / 迁移目录里的内容，点「选择」选中一个文件或目录。 */
+const fsDialog = $("#fs-dialog");
+function openFsBrowser(server, taken, onPick) {
+  let seq = 0;
+  const load = async (path) => {
+    const my = ++seq;
+    $("#fs-list").innerHTML = `<div class="empty">正在读取 ${esc(server.name)} 上的目录…</div>`;
+    renderCrumbs(path);
+    try {
+      const { entries } = await api(`/api/servers/${server.id}/browse`, { method: "POST", body: { op: "list", path } });
+      if (my !== seq) return;
+      draw(path, entries);
+    } catch (err) {
+      if (my !== seq) return;
+      $("#fs-list").innerHTML = `<div class="empty error">${esc(err.message)}</div>`;
+    }
+  };
+  const renderCrumbs = (path) => {
+    const parts = [`<button type="button" class="link-btn" data-go="">${esc(server.name)}</button>`];
+    if (path) {
+      const base = (server.browse_roots || []).filter((r) => path === r || path.startsWith(`${r.replace(/\/$/, "")}/`)).sort((a, b) => b.length - a.length)[0] || "";
+      let cur = base;
+      if (base) parts.push(`<button type="button" class="link-btn" data-go="${esc(base)}">${esc(base)}</button>`);
+      for (const seg of path.slice(base.length).split("/").filter(Boolean)) {
+        cur = `${cur.replace(/\/$/, "")}/${seg}`;
+        parts.push(`<button type="button" class="link-btn" data-go="${esc(cur)}">${esc(seg)}</button>`);
+      }
+    }
+    $("#fs-path").innerHTML = parts.join(`<span class="sep">/</span>`);
+  };
+  const draw = (path, entries) => {
+    if (!entries.length) {
+      $("#fs-list").innerHTML = `<div class="empty">这里是空的</div>`;
+      return;
+    }
+    const rows = entries.map((e, i) => {
+      let act = "";
+      if (e.top) act = "";
+      else if (taken.includes(e.path)) act = `<span class="muted small">已添加</span>`;
+      else if (e.claimed_by) act = `<span class="muted small">已被 ${esc(e.claimed_by)} 迁移</span>`;
+      else if (!e.selectable) act = `<span class="muted small">不可选</span>`;
+      else act = `<button type="button" class="link-btn" data-pick="${i}">选择</button>`;
+      const icon = e.is_dir ? "📁" : "📄";
+      return `<div class="fs-row"><span class="name ${e.is_dir ? "dir" : ""}" ${e.is_dir ? `data-go="${esc(e.path)}"` : ""}>${icon} ${esc(e.name)}</span>
+        <span class="muted m">${esc(e.mtime)}</span><span class="muted m">${e.is_dir ? "" : fmtBytes(e.size)}</span><span class="muted m">${esc(e.owner)}</span><span class="act">${act}</span></div>`;
+    }).join("");
+    $("#fs-list").innerHTML = `<div class="fs-row head"><span>名称</span><span class="m">修改时间</span><span class="m">大小</span><span class="m">属主</span><span></span></div>${rows}`;
+    $("#fs-list").onclick = (ev) => {
+      const pick = ev.target.closest("[data-pick]");
+      if (pick) { fsDialog.close(); onPick(entries[Number(pick.dataset.pick)]); return; }
+      const go = ev.target.closest("[data-go]");
+      if (go) load(go.dataset.go);
+    };
+  };
+  $("#fs-path").onclick = (ev) => { const go = ev.target.closest("[data-go]"); if (go) load(go.dataset.go); };
+  fsDialog.showModal();
+  load("");
+}
+$("#fs-close").onclick = () => fsDialog.close();
 
 $("#open-migrate").onclick = () => {
   $("#migrate-dialog").showModal();
@@ -1143,7 +1255,7 @@ function renderOnboarding() {
   if (step === 0) {
     body.innerHTML = `<h2>欢迎使用${esc(state.config.lab_name)} GPU 管理平台 👋</h2>
       <p>以后大家用<b>自己的账号</b>登录 GPU 服务器，不再共用 ubuntu 等公共账号。先给自己起一个 Linux 用户名（所有服务器通用，之后也可以修改）：</p>
-      <input id="ob-username" placeholder="小写字母开头，如 zhangsan" value="${esc(me.linux_username || "")}">`;
+      <label>Linux 用户名<input id="ob-username" placeholder="小写字母开头，如 zhangsan" value="${esc(me.linux_username || "")}" required></label>`;
   } else if (step === 1) {
     body.innerHTML = `<h2>设置登录方式</h2>
       <p class="muted small">密码和 SSH 公钥至少设置一种，两种都设也可以。</p>

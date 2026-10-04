@@ -98,3 +98,42 @@ def test_process_path_and_avatar_reported(admin, alice, server):
     assert alice.post("/api/reservations", json={"gpu_ids": [gid], "start_date": d, "end_date": d}).status_code == 200
     res = admin.get("/api/calendar").json()["reservations"][0]
     assert "user_avatar" in res
+
+
+def test_browse_roundtrip_and_nested_migration(admin, alice, server):
+    import threading
+    srv, token = server
+    sid = admin.get("/api/admin/servers").json()[0]["id"]
+    agent = TestClient(app)
+    legacy = {"user": "ubuntu", "home": "/home/ubuntu", "configs": [], "conda": []}
+    sync = {"gpus": [], "candidates": [], "legacy": [legacy], "browse_roots": ["/home/ubuntu", "/data"]}
+    assert agent.post("/api/agent/sync", json=sync, headers=agent_headers(token)).status_code == 200
+
+    def fake_agent():
+        c = TestClient(app)
+        for req in c.post("/api/agent/browse/poll", json={}, headers=agent_headers(token)).json()["requests"]:
+            entries = [{"name": "proj", "path": "/home/ubuntu/proj", "is_dir": True, "selectable": True}]
+            r = c.post(f"/api/agent/browse/{req['id']}", json={"ok": True, "entries": entries}, headers=agent_headers(token))
+            assert r.status_code == 200, r.text
+
+    t = threading.Thread(target=fake_agent)
+    t.start()
+    r = alice.post(f"/api/servers/{sid}/browse", json={"op": "list", "path": "/home/ubuntu"})
+    t.join()
+    assert r.status_code == 200, r.text
+    assert r.json()["entries"][0]["path"] == "/home/ubuntu/proj" and r.json()["entries"][0]["claimed_by"] is None
+
+    # 嵌套路径可以迁移；根目录之外的不行；别人移走上级目录后下级也算冲突
+    ok = alice.post("/api/migrations", json={"server_id": sid, "source": "/home/ubuntu/proj/sub", "mode": "move", "dest_name": "sub"})
+    assert ok.status_code == 200, ok.text
+    assert admin.post("/api/migrations", json={"server_id": sid, "source": "/home/ubuntu/proj", "mode": "copy", "dest_name": "p"}).status_code == 409
+    assert alice.post("/api/migrations", json={"server_id": sid, "source": "/etc/passwd", "mode": "copy", "dest_name": "x"}).status_code == 400
+    assert alice.post("/api/migrations", json={"server_id": sid, "source": "/home/ubuntu/a", "mode": "link", "dest_name": "a"}).status_code == 400
+
+
+def test_browse_times_out_without_agent(admin, alice, server, monkeypatch):
+    from app import browse
+    sid = admin.get("/api/admin/servers").json()[0]["id"]
+    orig = browse.broker.ask
+    monkeypatch.setattr(browse.broker, "ask", lambda *a, **k: orig(a[0], a[1], a[2], timeout=0.2))
+    assert alice.post(f"/api/servers/{sid}/browse", json={"op": "list", "path": ""}).status_code == 504

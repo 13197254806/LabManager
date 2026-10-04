@@ -12,6 +12,8 @@
 #                             指定后 --server-url、--chisel-* 都不用写，由平台下发
 #   --legacy-user LIST        以前大家共用的账号（如 ubuntu），逗号分隔。保留登录权限（由管理员改密码后自用），
 #                             成员可以从它的家目录迁移文件、复制配置和 conda 环境
+#   --adopt-user LIST         本机上已经有自己账号的成员（用户名要和他们在平台上设置的 Linux 用户名一致）：
+#                             交给平台管理，保留原有家目录和文件；之后登录密码 / 公钥以平台上的为准
 #   --admin-user LIST         可选：其他本机管理员账号（加入 lab-admin 组，任何时候都能登录）
 #   --root-login keep|yes|key|no   root 远程登录：keep=保持系统现状（默认） yes=密码和公钥 key=只允许公钥 no=禁止
 #   --migration-roots LIST    旧账号家目录之外、也允许迁移的旧数据目录，逗号分隔（默认 /lab,/data,/workspace）
@@ -28,6 +30,7 @@ PLATFORM_URL=""
 TOKEN=""
 ADMIN_USER=""
 LEGACY_USERS=""
+ADOPT_USERS=""
 ROOT_LOGIN=keep
 MIGRATION_ROOTS="/lab,/data,/workspace"
 CHISEL_PORT=""
@@ -50,6 +53,7 @@ while [ $# -gt 0 ]; do
         --token) TOKEN="$2"; shift 2 ;;
         --admin-user) ADMIN_USER="$2"; shift 2 ;;
         --legacy-user) LEGACY_USERS="$2"; shift 2 ;;
+        --adopt-user) ADOPT_USERS="$2"; shift 2 ;;
         --root-login) ROOT_LOGIN="$2"; shift 2 ;;
         --migration-roots) MIGRATION_ROOTS="$2"; shift 2 ;;
         --chisel-port) CHISEL_PORT="$2"; shift 2 ;;
@@ -257,7 +261,7 @@ done
 
 # 写配置（保留已有配置里的其他字段，如 adopt_users）
 umask 077
-SERVER_URL="$SERVER_URL" TOKEN="$TOKEN" ROOTS="$MIGRATION_ROOTS" LEGACY="$LEGACY_USERS" python3 -c '
+SERVER_URL="$SERVER_URL" TOKEN="$TOKEN" ROOTS="$MIGRATION_ROOTS" LEGACY="$LEGACY_USERS" ADOPT="$ADOPT_USERS" python3 -c '
 import json, os
 path = "/etc/lab-agent/config.json"
 try:
@@ -268,6 +272,8 @@ split = lambda v: [r.strip() for r in v.split(",") if r.strip()]
 cfg.update(server_url=os.environ["SERVER_URL"], token=os.environ["TOKEN"], migration_roots=split(os.environ["ROOTS"]))
 if os.environ["LEGACY"]:
     cfg["legacy_users"] = split(os.environ["LEGACY"])
+if os.environ["ADOPT"]:
+    cfg["adopt_users"] = sorted(set(cfg.get("adopt_users") or []) | set(split(os.environ["ADOPT"])))
 json.dump(cfg, open(path, "w"), indent=2)
 '
 umask 022
