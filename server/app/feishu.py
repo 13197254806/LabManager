@@ -52,10 +52,12 @@ def tenant_access_token() -> str:
         return _token
 
 
-def send_message(open_id: str, msg_type: str, content: dict) -> bool:
-    """以机器人身份私聊某个用户。失败只记日志，不抛异常。"""
+def send_message(open_id: str, msg_type: str, content: dict, raise_errors: bool = False) -> bool:
+    """以机器人身份私聊某个用户。默认失败只记日志、返回 False；raise_errors=True 时抛出（供测试按钮显示具体原因）。"""
     if not settings.feishu_enabled:
         log.info("[飞书未配置，跳过发送] to=%s %s", open_id, json.dumps(content, ensure_ascii=False)[:300])
+        if raise_errors:
+            raise FeishuError("服务端未配置飞书应用")
         return False
     try:
         resp = httpx.post(
@@ -69,6 +71,8 @@ def send_message(open_id: str, msg_type: str, content: dict) -> bool:
         return True
     except Exception as e:  # noqa: BLE001
         log.warning("发送飞书消息失败 to=%s: %s", open_id, e)
+        if raise_errors:
+            raise
         return False
 
 
@@ -76,8 +80,8 @@ def send_text(open_id: str, text: str) -> bool:
     return send_message(open_id, "text", {"text": text})
 
 
-def send_card(open_id: str, card: dict) -> bool:
-    return send_message(open_id, "interactive", card)
+def send_card(open_id: str, card: dict, raise_errors: bool = False) -> bool:
+    return send_message(open_id, "interactive", card, raise_errors=raise_errors)
 
 
 def build_card(title: str, markdown: str, buttons: list[tuple[str, str]] | None = None, template: str = "blue") -> dict:

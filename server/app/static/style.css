@@ -76,7 +76,9 @@ label { display: flex; flex-direction: column; gap: 4px; color: var(--muted); fo
 label > input, label > select, label > textarea { color: var(--text); font-size: 14px; }
 .label { color: var(--muted); font-size: 13px; margin-bottom: 4px; }
 .stack { display: flex; flex-direction: column; gap: 12px; }
-.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; align-items: end; }
+/* 两列里标签文字行数不同（一个两行一个一行）时，让输入框底部对齐 */
+.two > label { justify-content: space-between; }
 .group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .actions { display: flex; justify-content: flex-end; gap: 8px; align-items: center; }
 .spacer { flex: 1; }
@@ -100,6 +102,8 @@ label > input, label > select, label > textarea { color: var(--text); font-size:
 .banner { background: #fff7e6; color: #8a5300; border-bottom: 1px solid #ffe2b3; padding: 8px 16px; font-size: 13px; }
 @media (prefers-color-scheme: dark) { .banner { background: #2e2410; color: #f5c46b; border-color: #4a3a17; } }
 .banner a { color: inherit; font-weight: 600; }
+.banner.warn { background: #fdecec; color: #a3262b; border-color: #f6caca; }
+@media (prefers-color-scheme: dark) { .banner.warn { background: #3a1517; color: #f5a3a6; border-color: #5a2326; } }
 main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 
 /* 日历 */
@@ -174,6 +178,8 @@ dialog::backdrop { background: rgba(0, 0, 0, .35); }
 .gpu-picks input { width: auto; min-height: 0; }
 .gpu-picks label.busy { opacity: .45; cursor: not-allowed; }
 .copyable { user-select: all; }
+pre.copyable.mono { max-width: 420px; margin: 2px 0 6px; padding: 6px 8px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-size: 12px; white-space: pre-wrap; word-break: break-all; }
+td details > summary { cursor: pointer; color: var(--primary); }
 
 /* 勾选项 */
 label.check { flex-direction: row; align-items: center; gap: 8px; color: var(--text); font-size: 14px; cursor: pointer; }
@@ -227,6 +233,8 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 .steps span { font-size: 12px; padding: 2px 10px; border-radius: 999px; background: var(--line); color: var(--muted); }
 .steps span.on { background: var(--primary); color: var(--primary-text); }
 .steps span.ok { background: var(--hover); color: var(--primary); }
+.steps span.clickable { cursor: pointer; }
+.steps span.clickable:hover { background: var(--line-strong); }
 
 .toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 100; background: var(--text); color: var(--panel); padding: 8px 16px; border-radius: 8px; max-width: calc(100vw - 32px); white-space: pre-wrap; }
 

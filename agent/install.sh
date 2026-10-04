@@ -8,9 +8,10 @@
 #   --admin-user LIST         可选：其他本机管理员账号（加入 lab-admin 组，任何时候都能登录）
 #   --root-login keep|yes|key|no   root 远程登录：keep=保持系统现状（默认） yes=密码和公钥 key=只允许公钥 no=禁止
 #   --migration-roots LIST    旧账号家目录之外、也允许迁移的旧数据目录，逗号分隔（默认 /lab,/data,/workspace）
-#   --tunnel-key KEY          公网服务器隧道的公钥：创建受限账号 labtunnel，只允许它开反向端口（由 tunnel bootstrap 自动传入）
-#   --tunnel-ports P1,P2      允许 labtunnel 监听的本机端口（默认 18765,13128）
-#   --internet-proxy URL      GPU 服务器经隧道上外网的代理（如 http://127.0.0.1:13128），写入全局 shell 和 apt 配置
+#   --chisel-port PORT        在本机启动 chisel 服务端监听的端口（公网服务器经 WebVPN 连入，建反向隧道）
+#   --chisel-secret SECRET    chisel 认证口令（和公网服务器共用，防止别人冒连）
+#   --chisel-key FILE         可选：chisel 服务端私钥文件（固定指纹，防中间人）；不填则每次重启指纹变化、不校验
+#   --chisel-allow CIDR       只允许这些来源访问 chisel 端口（默认 59.69.127.0/24，即 WebVPN 出口网段）
 #   --no-sshd                 只安装 Agent，不修改 sshd 配置
 #   --uninstall               停止 Agent 并移除 sshd 配置（账号和数据保留）
 set -euo pipefail
@@ -21,12 +22,14 @@ ADMIN_USER=""
 LEGACY_USERS=""
 ROOT_LOGIN=keep
 MIGRATION_ROOTS="/lab,/data,/workspace"
-TUNNEL_KEY=""
-TUNNEL_PORTS="18765,13128"
-INTERNET_PROXY=""
+CHISEL_PORT=""
+CHISEL_SECRET=""
+CHISEL_KEY=""
+CHISEL_ALLOW="59.69.127.0/24"
 CONFIGURE_SSHD=1
 UNINSTALL=0
 SSHD_DROPIN=/etc/ssh/sshd_config.d/00-lab.conf
+CHISEL_ENV=/etc/lab-agent/chisel.env
 
 die() { echo -e "\033[31m[错误]\033[0m $*" >&2; exit 1; }
 info() { echo -e "\033[32m==>\033[0m $*"; }
@@ -40,9 +43,10 @@ while [ $# -gt 0 ]; do
         --legacy-user) LEGACY_USERS="$2"; shift 2 ;;
         --root-login) ROOT_LOGIN="$2"; shift 2 ;;
         --migration-roots) MIGRATION_ROOTS="$2"; shift 2 ;;
-        --tunnel-key) TUNNEL_KEY="$2"; shift 2 ;;
-        --tunnel-ports) TUNNEL_PORTS="$2"; shift 2 ;;
-        --internet-proxy) INTERNET_PROXY="$2"; shift 2 ;;
+        --chisel-port) CHISEL_PORT="$2"; shift 2 ;;
+        --chisel-secret) CHISEL_SECRET="$2"; shift 2 ;;
+        --chisel-key) CHISEL_KEY="$2"; shift 2 ;;
+        --chisel-allow) CHISEL_ALLOW="$2"; shift 2 ;;
         --no-sshd) CONFIGURE_SSHD=0; shift ;;
         --uninstall) UNINSTALL=1; shift ;;
         *) die "未知参数 $1" ;;
@@ -58,12 +62,13 @@ reload_sshd() {
 
 if [ "$UNINSTALL" -eq 1 ]; then
     systemctl disable --now lab-agent 2>/dev/null || true
-    # 同时撤销隧道账号的公钥（账号本身保留）
-    rm -f /etc/systemd/system/lab-agent.service "$SSHD_DROPIN" /etc/ssh/sshd_config.d/01-lab-tunnel.conf \
-          /var/lib/labtunnel/.ssh/authorized_keys /etc/profile.d/lab-proxy.sh /etc/apt/apt.conf.d/95lab-proxy
+    systemctl disable --now lab-chisel 2>/dev/null || true
+    rm -f /etc/systemd/system/lab-agent.service /etc/systemd/system/lab-chisel.service \
+          "$SSHD_DROPIN" /etc/profile.d/lab-proxy.sh /etc/apt/apt.conf.d/95lab-proxy "$CHISEL_ENV"
     systemctl daemon-reload
     reload_sshd
-    info "已卸载 lab-agent 并移除 sshd 配置。账号、家目录、/etc/lab-agent 保留。"
+    info "已卸载 lab-agent / lab-chisel 并移除 sshd 配置。账号、家目录、/etc/lab-agent 保留。"
+    info "（如需关闭 chisel 端口的防火墙放行，请手动 ufw delete 相应规则）"
     exit 0
 fi
 
@@ -80,6 +85,7 @@ ADMINS="$(echo "$LEGACY_USERS,$ADMIN_USER" | tr ',' ' ')"
 command -v python3 >/dev/null || die "需要 python3"
 python3 -c 'import sys; sys.exit(sys.version_info < (3, 6))' || die "需要 Python 3.6+"
 command -v nvidia-smi >/dev/null || warn "没有找到 nvidia-smi，将无法上报显卡信息"
+SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 # ---------- 1. 防止把自己锁在外面 ----------
 for u in $ADMINS; do
@@ -91,7 +97,7 @@ if [ "$CONFIGURE_SSHD" -eq 1 ] && [ -z "${ADMINS// /}" ] && [ "$ROOT_LOGIN" != y
 fi
 
 # ---------- 2. 用户组 ----------
-for g in lab-users lab-active lab-admin lab-tunnel; do
+for g in lab-users lab-active lab-admin; do
     getent group "$g" >/dev/null || { groupadd "$g"; info "创建用户组 $g"; }
 done
 # root、旧共享账号、管理员账号在 lab-admin 组里，任何时候都能登录（不受预约限制），登录方式保持原样
@@ -105,71 +111,57 @@ for u in $ADMINS; do
     fi
 done
 
-# ---------- 2.5 公网服务器隧道账号（只能开反向端口，不能登录 shell） ----------
-if [ -n "$TUNNEL_KEY" ]; then
-    echo "$TUNNEL_KEY" | grep -qE '^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp[0-9]+) [A-Za-z0-9+/=]+' || die "--tunnel-key 格式不对"
-    if ! id labtunnel >/dev/null 2>&1; then
-        useradd -r -m -d /var/lib/labtunnel -s /usr/sbin/nologin -G lab-tunnel labtunnel
-        info "创建隧道账号 labtunnel"
-    fi
-    usermod -aG lab-tunnel labtunnel
-    OPTS="restrict,port-forwarding"
-    # OpenSSH 7.8+ 支持 permitlisten：只允许监听指定的本机端口
-    SSH_VER=$(ssh -V 2>&1 | sed -n 's/^OpenSSH_\([0-9]*\)\.\([0-9]*\).*/\1\2/p')
-    if [ "${SSH_VER:-0}" -ge 78 ]; then
-        for p in $(echo "$TUNNEL_PORTS" | tr ',' ' '); do OPTS="$OPTS,permitlisten=\"127.0.0.1:$p\""; done
-    fi
-    install -d -m 700 -o labtunnel -g labtunnel /var/lib/labtunnel/.ssh
-    echo "$OPTS $TUNNEL_KEY" > /var/lib/labtunnel/.ssh/authorized_keys
-    chown labtunnel:labtunnel /var/lib/labtunnel/.ssh/authorized_keys
-    chmod 600 /var/lib/labtunnel/.ssh/authorized_keys
-    # 单独的配置文件（即使 --no-sshd 也写入）：隧道账号只允许反向端口转发，禁止 -L 借道访问内网其他机器；
-    # 30 秒心跳，断线后旧会话最多 90 秒就会释放端口，方便重连
-    if ! grep -qE '^\s*Include\s+/etc/ssh/sshd_config\.d/\*\.conf' /etc/ssh/sshd_config; then
-        cp /etc/ssh/sshd_config "/etc/ssh/sshd_config.bak.$(date +%s)"
-        sed -i '1i Include /etc/ssh/sshd_config.d/*.conf' /etc/ssh/sshd_config
-    fi
-    mkdir -p /etc/ssh/sshd_config.d
-    cat > /etc/ssh/sshd_config.d/01-lab-tunnel.conf <<'TUNNEL'
-# 由 lab-agent 安装脚本生成：公网服务器隧道账号
-Match User labtunnel
-    AllowTcpForwarding remote
-    PermitOpen none
-    X11Forwarding no
-    AllowAgentForwarding no
-    PermitTTY no
-    PasswordAuthentication no
-    ClientAliveInterval 30
-    ClientAliveCountMax 3
-Match all
-TUNNEL
-    if ! reload_sshd; then
-        rm -f /etc/ssh/sshd_config.d/01-lab-tunnel.conf
-        die "sshd 配置校验失败，已回滚"
-    fi
-fi
+# ---------- 2.5 chisel 服务端（公网服务器经 WebVPN 连入，建反向隧道） ----------
+if [ -n "$CHISEL_PORT" ]; then
+    [ -n "$CHISEL_SECRET" ] || die "--chisel-port 需要同时提供 --chisel-secret"
+    echo "$CHISEL_PORT" | grep -qE '^[0-9]+$' || die "--chisel-port 必须是数字"
+    # chisel 可执行文件必须随安装包带来（GPU 此时还不能上外网，无法下载）
+    [ -f "$SRC/chisel" ] || die "找不到 chisel 可执行文件（应和安装脚本放在一起）。请用 Mac 上的 bootstrap 脚本部署"
+    install -D -m 755 "$SRC/chisel" /opt/lab-agent/chisel
 
-# ---------- 2.6 经隧道上外网的代理 ----------
-if [ -n "$INTERNET_PROXY" ]; then
-    cat > /etc/profile.d/lab-proxy.sh <<PROXY
-# 由 lab-agent 安装：GPU 服务器经公网服务器隧道访问外网（pip / conda / git / wget / curl）
-export http_proxy="$INTERNET_PROXY" https_proxy="$INTERNET_PROXY"
-export HTTP_PROXY="$INTERNET_PROXY" HTTPS_PROXY="$INTERNET_PROXY"
-export no_proxy="localhost,127.0.0.1,::1,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
-export NO_PROXY="\$no_proxy"
-PROXY
-    chmod 644 /etc/profile.d/lab-proxy.sh
-    printf 'Acquire::http::Proxy "%s";\nAcquire::https::Proxy "%s";\n' "$INTERNET_PROXY" "$INTERNET_PROXY" > /etc/apt/apt.conf.d/95lab-proxy 2>/dev/null || true
-    for rc in /etc/bash.bashrc /etc/bashrc; do
-        if [ -f "$rc" ] && ! grep -q lab-proxy.sh "$rc"; then
-            sed -i '1i [ -r /etc/profile.d/lab-proxy.sh ] \&\& . /etc/profile.d/lab-proxy.sh  # lab-agent' "$rc"
-        fi
-    done
-    info "已配置上外网代理 $INTERNET_PROXY（新登录的终端生效）"
+    install -d -m 755 /etc/lab-agent
+    # 认证口令放进只有 root 可读的 EnvironmentFile，不出现在进程命令行里
+    umask 077
+    printf 'AUTH=%s:%s\n' "lab" "$CHISEL_SECRET" > "$CHISEL_ENV"
+    KEYARG=""
+    if [ -n "$CHISEL_KEY" ] && [ -f "$CHISEL_KEY" ]; then
+        install -m 600 "$CHISEL_KEY" /etc/lab-agent/chisel_key
+        KEYARG="--keyfile /etc/lab-agent/chisel_key"
+    fi
+    umask 022
+
+    cat > /etc/systemd/system/lab-chisel.service <<UNIT
+[Unit]
+Description=Lab chisel server (reverse tunnel over WebVPN)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# AUTH=lab:<口令> 从此文件读取，不出现在进程命令行里。只有持口令的公网服务器能建隧道。
+EnvironmentFile=$CHISEL_ENV
+# --backend 指向无效地址：未带凭证的普通 HTTP 探测拿不到任何东西
+ExecStart=/opt/lab-agent/chisel server --reverse --backend http://127.0.0.1:9 --port $CHISEL_PORT $KEYARG
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+    systemctl daemon-reload
+    systemctl enable lab-chisel >/dev/null 2>&1 || true
+    systemctl restart lab-chisel
+    info "已启动 chisel 服务端，监听 $CHISEL_PORT"
+
+    # 防火墙：只放行 WebVPN 出口网段访问 chisel 端口（GPU 默认 ufw deny，不放行就连不进来）
+    if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
+        ufw allow from "$CHISEL_ALLOW" to any port "$CHISEL_PORT" proto tcp comment "lab chisel (WebVPN)" >/dev/null
+        info "已放行 $CHISEL_ALLOW 访问 $CHISEL_PORT/tcp"
+    else
+        warn "没有检测到启用的 ufw：请自行放行来源 $CHISEL_ALLOW 访问本机 $CHISEL_PORT/tcp，否则隧道连不进来"
+    fi
 fi
 
 # ---------- 3. 安装文件 ----------
-SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 fetch() {  # 优先用脚本同目录的文件，否则从平台下载
     if [ -f "$SRC/$1" ]; then cp "$SRC/$1" "$2"; else curl -fsSL "$SERVER_URL/agent/$1" -o "$2"; fi
 }
@@ -206,8 +198,8 @@ json.dump(cfg, open(path, "w"), indent=2)
 umask 022
 
 # ---------- 4. 首次同步 ----------
-if [ -n "$TUNNEL_KEY" ]; then
-    info "等待公网服务器建立隧道（最多 3 分钟）..."
+if [ -n "$CHISEL_PORT" ]; then
+    info "等待公网服务器经 WebVPN 建立隧道（最多 3 分钟）..."
     for i in $(seq 1 90); do
         curl -fsS -m 5 --noproxy '*' "$SERVER_URL/healthz" >/dev/null 2>&1 && break
         [ "$i" -eq 90 ] && die "隧道一直没有建立：在公网服务器上执行 docker compose logs tunnel 查看原因"
@@ -252,8 +244,8 @@ $ROOT_LINE
 # 成员可以用平台上设置的密码或登记的公钥登录
 PasswordAuthentication yes
 PubkeyAuthentication yes
-# 只有今天有预约的成员（lab-active）、root / 旧共享账号 / 管理员（lab-admin）和隧道账号（lab-tunnel）可以登录
-AllowGroups lab-active lab-admin lab-tunnel
+# 只有今天有预约的成员（lab-active）、root / 旧共享账号 / 管理员（lab-admin）可以登录
+AllowGroups lab-active lab-admin
 
 # 成员只认在实验室平台登记的公钥（自己往 ~/.ssh 里加的不生效，防止把账号借给别人）
 Match Group lab-users

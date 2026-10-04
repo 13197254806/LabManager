@@ -17,7 +17,7 @@ logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name
 STATIC = Path(__file__).parent / "static"
 # GPU 服务器上安装 Agent 时从这里下载脚本（都是公开内容，不含密钥）
 AGENT_DIR = Path(os.environ.get("AGENT_DIR", Path(__file__).resolve().parents[2] / "agent"))
-AGENT_FILES = {"install.sh", "lab_agent.py", "lab-gpus", "lab-gpu.sh", "lab_migrate.py"}
+AGENT_FILES = {"install.sh", "lab_agent.py", "lab-gpus", "lab-gpu.sh", "lab_migrate.py", "chisel"}
 
 
 @asynccontextmanager
@@ -55,4 +55,5 @@ def index():
 def agent_file(name: str):
     if name not in AGENT_FILES or not (AGENT_DIR / name).is_file():
         raise HTTPException(404)
-    return FileResponse(AGENT_DIR / name, media_type="text/plain; charset=utf-8")
+    media = "application/octet-stream" if name == "chisel" else "text/plain; charset=utf-8"
+    return FileResponse(AGENT_DIR / name, media_type=media)

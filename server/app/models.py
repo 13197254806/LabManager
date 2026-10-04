@@ -56,6 +56,8 @@ class Server(Base):
     host: Mapped[str] = mapped_column(String(128), default="")
     description: Mapped[str] = mapped_column(String(256), default="")
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
+    # 明文注册 token：只给管理员在平台上查看 / 复制安装命令用（DB 在私有服务器上）
+    token: Mapped[str | None] = mapped_column(String(64))
     hostname: Mapped[str | None] = mapped_column(String(128))
     agent_version: Mapped[str | None] = mapped_column(String(32))
     last_seen_at: Mapped[datetime | None] = mapped_column(DateTime)

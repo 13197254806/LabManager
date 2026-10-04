@@ -72,6 +72,28 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.add("hidden"), 3500);
 }
 
+// 复制文本。navigator.clipboard 只在 HTTPS / localhost 可用；平台用 http+IP 访问时退回 execCommand。
+async function copyText(text) {
+  try {
+    if (navigator.clipboard && window.isSecureContext) {
+      await navigator.clipboard.writeText(text);
+      return toast("已复制");
+    }
+  } catch {}
+  try {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
+    document.body.appendChild(ta);
+    ta.focus(); ta.select();
+    const ok = document.execCommand("copy");
+    document.body.removeChild(ta);
+    toast(ok ? "已复制" : "复制失败，请手动选中复制");
+  } catch {
+    toast("复制失败，请手动选中复制");
+  }
+}
+
 // ---------------- 全局状态 ----------------
 
 const state = {
@@ -821,7 +843,13 @@ function renderOnboarding() {
   const me = state.me;
   renderBanner();
   const step = onboard.step;
-  $("#onboard-steps").innerHTML = STEPS.map((s, i) => `<span class="${i === step ? "on" : i < step ? "ok" : ""}">${i + 1}. ${s}</span>`).join("");
+  $("#onboard-steps").innerHTML = STEPS.map((s, i) =>
+    `<span class="${i === step ? "on" : i < step ? "ok" : ""}${i < step ? " clickable" : ""}" data-step="${i}">${i + 1}. ${s}</span>`).join("");
+  // 点已完成的步骤可以回退（之前填的内容已保存）
+  $("#onboard-steps").onclick = (e) => {
+    const sp = e.target.closest("[data-step]");
+    if (sp && Number(sp.dataset.step) < onboard.step) { onboard.step = Number(sp.dataset.step); renderOnboarding(); }
+  };
   $("#onboard-error").textContent = "";
   const body = $("#onboard-body");
   const next = $("#onboard-next");
@@ -838,7 +866,7 @@ function renderOnboarding() {
       <p class="muted small">密码和 SSH 公钥至少设置一种，两种都设也可以。</p>
       <form id="ob-pw" class="stack">
         <div class="label">登录密码 ${me.has_password ? `<span class="badge ok">已设置</span>` : ""}</div>
-        <input type="password" name="password" placeholder="至少 8 位，包含字母和数字" autocomplete="new-password">
+        <input type="password" name="password" placeholder="至少 8 位" autocomplete="new-password">
         <input type="password" name="confirm" placeholder="再输入一次" autocomplete="new-password">
         <div class="label">SSH 公钥（可选）${me.key_count ? `<span class="badge ok">已添加 ${me.key_count} 个</span>` : ""}</div>
         <textarea name="public_key" rows="2" placeholder="粘贴 ~/.ssh/id_ed25519.pub 的内容"></textarea>
@@ -905,10 +933,12 @@ $("#onboard-later").onclick = () => {
 
 async function loadAdmin() {
   try {
-    const [servers, users, settings, migrations] = await Promise.all([
+    const [servers, users, settings, migrations, tunnel] = await Promise.all([
       api("/api/admin/servers"), api("/api/admin/users"), api("/api/admin/settings"), api("/api/admin/migrations"),
+      api("/api/admin/tunnel").catch(() => ({ enabled: false })),
     ]);
     state.users = users;
+    state.tunnelEnabled = tunnel.enabled;
     renderAdminServers(servers);
     renderAdminUsers(users);
     $("#admin-migrations").innerHTML = migrations.length ? migrations.map((t) => taskHtml(t, true)).join("") : `<p class="muted">暂无迁移记录。</p>`;
@@ -925,7 +955,7 @@ async function loadAdmin() {
 
 function renderAdminServers(servers) {
   $("#admin-servers").innerHTML = servers.length
-    ? `<div class="table-wrap"><table><tr><th>名称</th><th>地址</th><th>状态</th><th>显卡</th><th>Agent</th><th>校园网隧道</th><th></th></tr>
+    ? `<div class="table-wrap"><table><tr><th>名称</th><th>地址</th><th>状态</th><th>显卡</th><th>Agent</th><th>校园网隧道</th><th>注册命令</th><th></th></tr>
       ${servers.map((s) => {
         const models = [...new Set(s.gpus.map((g) => g.name.replace(/^NVIDIA /, "")))].join(", ");
         return `<tr><td><b>${esc(s.name)}</b><div class="muted small">${esc(s.description)}</div></td><td>${esc(s.host)}</td>
@@ -934,12 +964,15 @@ function renderAdminServers(servers) {
           <td>${s.gpus.length} × ${esc(models || "-")}</td>
           <td class="small">${esc(s.hostname || "-")}<div class="muted">${esc(s.agent_version || "")}</div></td>
           <td class="small">${tunnelCell(s.tunnel)}</td>
+          <td class="small">${registerCell(s)}</td>
           <td style="white-space:nowrap">
             <button class="btn small" data-edit-server="${s.id}">编辑</button>
             <button class="btn small" data-token-server="${s.id}">重置 Token</button>
             <button class="btn small danger" data-del-server="${s.id}">删除</button></td></tr>`;
-      }).join("")}</table></div>`
-    : `<p class="muted">还没有服务器。添加后会得到一条安装命令，在 GPU 服务器上执行即可。</p>`;
+      }).join("")}</table></div>
+      <p class="muted small">「注册命令」只有管理员能看到，用来把 GPU 服务器接入平台。接入过的服务器重装 / 换 token 时点「重置 Token」会生成新命令。</p>`
+    : `<p class="muted">还没有服务器。添加后这里会给出一条注册命令，照着执行即可把 GPU 接入平台。</p>`;
+  $$("[data-copy-cmd]").forEach((b) => (b.onclick = () => copyText(b.dataset.copyCmd)));
   $$("[data-edit-server]").forEach((b) => (b.onclick = async () => {
     const s = servers.find((x) => x.id === Number(b.dataset.editServer));
     const name = prompt("名称", s.name); if (name === null) return;
@@ -948,9 +981,14 @@ function renderAdminServers(servers) {
     try { await api(`/api/admin/servers/${s.id}`, { method: "PATCH", body: { name, host, description } }); loadAdmin(); } catch (err) { toast(err.message); }
   }));
   $$("[data-token-server]").forEach((b) => (b.onclick = async () => {
-    if (!confirm("重置后旧 Token 立即失效，需要在服务器上更新 /etc/lab-agent/config.json。继续？")) return;
-    const { token } = await api(`/api/admin/servers/${b.dataset.tokenServer}/token`, { method: "POST" });
-    showToken(token, servers.find((x) => x.id === Number(b.dataset.tokenServer))?.name);
+    if (!confirm("重置后旧 Token 立即失效。重置完会在这一行的「注册命令」里给出新命令，重新执行一次即可（会自动覆盖安装，账号和数据不受影响）。继续？")) return;
+    try {
+      await api(`/api/admin/servers/${b.dataset.tokenServer}/token`, { method: "POST" });
+      toast("已重置，请在该行「注册命令」里查看新命令");
+      loadAdmin();
+    } catch (err) {
+      toast(err.message);
+    }
   }));
   $$("[data-del-server]").forEach((b) => (b.onclick = async () => {
     if (!confirm("删除服务器会同时删除它的所有预约记录。服务器上已创建的账号不会被删除。继续？")) return;
@@ -966,32 +1004,38 @@ function tunnelCell(t) {
   return `<span class="badge ${cls}" title="${esc(t.error || "")}">${text}</span><div class="muted">${esc(t.since?.replace("T", " ").slice(5, 16) || "")}</div>`;
 }
 
-async function showToken(token, serverName) {
+// 根据隧道是否启用，拼出把这台 GPU 接入平台的注册命令 + 说明。
+function installInfo(token) {
   const base = location.origin;
-  const tunnel = await api("/api/admin/tunnel").catch(() => ({ enabled: false }));
-  const name = serverName || "<服务器名称>";
-  $("#token-hint").textContent = "Token 只显示这一次，请立即保存。" + (tunnel.enabled
-    ? "GPU 服务器经校园网隧道接入，在公网服务器上执行："
-    : "在该 GPU 服务器上执行（需要 sudo）：");
-  $("#token-cmd").textContent = tunnel.enabled
-    ? `# GPU 服务器在校园内网：在公网服务器的 deploy 目录下执行（经 aTrust 隧道安装，会提示输入共享账号的密码）\n` +
-      `docker compose exec tunnel python -m app.tunnel bootstrap ${name} --user <共享账号，如 ubuntu> --token ${token}\n\n` +
-      `# 服务器名称需写在 .env 的 TUNNEL_TARGETS 里（当前：${tunnel.targets.join(", ") || "空"}）`
-    : `curl -fsSL ${base}/agent/install.sh -o install.sh\n` +
-      `sudo bash install.sh --server-url ${base} --token ${token} --legacy-user <以前大家共用的账号，如 ubuntu>`;
-  $("#token-dialog").showModal();
+  if (state.tunnelEnabled) {
+    return {
+      cmd: `bash tools/add-gpu.sh ${base} ${token} --user ubuntu`,
+      note: "在 lab 仓库目录下、你平时管理 GPU 的电脑上执行（经校园网 / aTrust 直连 GPU），会提示输入 GPU 共享账号密码。把末尾的 ubuntu 换成该服务器的共享账号（如 ubuntu602）。服务器列表平台会自动下发，无需改 .env。",
+    };
+  }
+  return {
+    cmd: `curl -fsSL ${base}/agent/install.sh -o install.sh && sudo bash install.sh --server-url ${base} --token ${token} --legacy-user ubuntu`,
+    note: "在该 GPU 服务器上执行（需要 sudo）。把末尾的 ubuntu 换成以前大家共用的账号。",
+  };
 }
-$("#token-copy").onclick = () => navigator.clipboard?.writeText($("#token-cmd").textContent).then(() => toast("已复制"));
-$("#token-close").onclick = () => { $("#token-dialog").close(); loadAdmin(); };
+
+function registerCell(s) {
+  if (!s.token) return `<span class="muted">点「重置 Token」生成</span>`;
+  const { cmd, note } = installInfo(s.token);
+  return `<details><summary>查看命令</summary>
+    <pre class="copyable mono">${esc(cmd)}</pre>
+    <button class="btn small" data-copy-cmd="${esc(cmd)}">复制命令</button>
+    <div class="muted" style="margin-top:4px">${esc(note)}</div></details>`;
+}
 
 $("#server-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target;
   try {
-    const name = f.name.value.trim();
-    const { token } = await api("/api/admin/servers", { method: "POST", body: { name, host: f.host.value, description: f.description.value } });
+    await api("/api/admin/servers", { method: "POST", body: { name: f.name.value.trim(), host: f.host.value, description: f.description.value } });
     f.reset();
-    showToken(token, name);
+    toast("已添加，请在列表该行「注册命令」里查看安装命令");
+    loadAdmin();
   } catch (err) {
     toast(err.message);
   }
@@ -1068,10 +1112,13 @@ async function boot() {
   if (!state.me) {
     $("#dev-login").classList.toggle("hidden", !state.config.dev_login);
     $("#feishu-login").classList.toggle("hidden", !state.config.feishu_enabled);
+    $("#login-unavailable").classList.toggle("hidden", state.config.feishu_enabled || state.config.dev_login);
     return showLogin();
   }
   $("#login").classList.add("hidden");
   $("#app").classList.remove("hidden");
+  const local = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
+  $("#http-banner").classList.toggle("hidden", location.protocol === "https:" || local);
   $("#me-name").textContent = state.me.name;
   $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !state.me.is_admin));
   renderBanner();

@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 用当前目录的代码重新构建并重启平台（GitHub Actions 自动部署时调用，也可以手动执行）。
-# 不会改动 .env、atrust.env 和 data/。首次部署请先手动执行 sudo bash setup-server.sh。
+# 不会改动 .env 和 data/，不需要 sudo。首次部署请先手动执行一次 sudo bash setup-server.sh。
 set -euo pipefail
 cd "$(dirname "$0")"
 
@@ -11,7 +11,7 @@ DOCKER=(docker)
 docker info >/dev/null 2>&1 || DOCKER=(sudo -n docker)
 DC=("${DOCKER[@]}" compose)
 
-echo "==> 构建并重启（atrust 容器配置没变时不会重启，校园网连接不受影响）"
+echo "==> 构建并重启（只重建代码有变化的容器，WebVPN 隧道不受影响）"
 "${DC[@]}" up -d --build --remove-orphans
 
 echo "==> 健康检查"
@@ -27,6 +27,9 @@ for i in $(seq 1 30); do
     fi
     sleep 2
 done
+
+# Caddyfile 有改动时生效（Caddy 不会自动重读配置文件）
+"${DC[@]}" exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || true
 
 "${DC[@]}" ps
 # 清理构建留下的无用镜像层，避免磁盘越用越满

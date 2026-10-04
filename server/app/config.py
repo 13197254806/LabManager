@@ -42,9 +42,14 @@ class Settings:
     # Agent 超过这么多秒没上报就视为离线
     agent_offline_seconds = int(_env("AGENT_OFFLINE_SECONDS", "180"))
 
-    # 校园网隧道（tunnel 服务）：配置了 TUNNEL_TARGETS 时，GPU 服务器经隧道访问平台
+    # 校园网隧道（tunnel 服务，WebVPN + chisel）：配置了 TUNNEL_TARGETS 时，GPU 服务器经隧道访问平台
     tunnel_targets = [t.split("=", 1)[0].strip() for t in _list("TUNNEL_TARGETS") if "=" in t]
     tunnel_status_file = _env("TUNNEL_DIR", "/data/tunnel") + "/status.json"
+    # 首次部署 GPU 服务器（Mac 上的 bootstrap 脚本经 /agent/bootstrap-config 读取这些值）
+    chisel_port = int(_env("CHISEL_PORT", "9000"))
+    chisel_secret = _env("CHISEL_SECRET")
+    chisel_allow = _env("CHISEL_ALLOW", "59.69.127.0/24")
+    remote_platform_port = int(_env("REMOTE_PLATFORM_PORT", "18765"))
 
     @property
     def feishu_enabled(self) -> bool:

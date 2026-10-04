@@ -12,6 +12,7 @@
       <h1 id="login-title">实验室平台</h1>
       <p class="muted">GPU 预约 · 服务器账号 · 实验室助手</p>
       <a class="btn primary big" href="/auth/login" id="feishu-login">使用飞书登录</a>
+      <p class="muted small hidden" id="login-unavailable">管理员还没有配置飞书应用，暂时无法登录。<br>（在服务器 deploy/.env 里填写 FEISHU_APP_ID / FEISHU_APP_SECRET）</p>
       <form id="dev-login" class="dev-login hidden">
         <p class="muted small">开发模式：输入任意名字登录</p>
         <input name="name" placeholder="名字" required>
@@ -35,6 +36,7 @@
       </div>
     </header>
 
+    <div id="http-banner" class="banner warn hidden">⚠️ 当前是临时的不加密访问方式（HTTP），网络上传输的内容可能被他人看到。请不要在这里设置你在其他地方也在用的密码；正式域名开通后会切换到 HTTPS。</div>
     <div id="setup-banner" class="banner hidden"></div>
 
     <main>
@@ -118,7 +120,7 @@ cat ~/.ssh/id_ed25519.pub   # 复制输出的整行</pre>
             <h2>GPU 服务器</h2>
             <div id="admin-servers"></div>
             <form id="server-form" class="row-form">
-              <input name="name" placeholder="名称，如 gpu-01" required maxlength="64">
+              <input name="name" placeholder="名称，如 gpu-01（中文/空格也行）" required maxlength="64">
               <input name="host" placeholder="内网地址，如 10.0.0.11" maxlength="128">
               <input name="description" placeholder="备注，如 8×A100 80G" maxlength="256">
               <button class="btn primary">添加服务器</button>
@@ -247,16 +249,6 @@ cat ~/.ssh/id_ed25519.pub   # 复制输出的整行</pre>
         <button class="btn" id="onboard-skip">跳过这步</button>
         <button class="btn primary" id="onboard-next">下一步</button>
       </div>
-    </div>
-  </dialog>
-
-  <!-- 服务器 token 弹窗 -->
-  <dialog id="token-dialog">
-    <div class="stack">
-      <h2>Agent 安装信息</h2>
-      <p id="token-hint">Token 只显示这一次，请立即保存。</p>
-      <pre id="token-cmd" class="copyable"></pre>
-      <div class="actions"><button class="btn" id="token-copy">复制</button><button class="btn primary" id="token-close">我已保存</button></div>
     </div>
   </dialog>
 

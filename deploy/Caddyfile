@@ -1,5 +1,12 @@
-# 自动申请 HTTPS 证书。DOMAIN 在 .env 中设置，域名需提前解析到本机
+# 正式入口：自动申请 HTTPS 证书。DOMAIN 在 .env 中设置，域名需解析到本机并已备案
 {$DOMAIN} {
+	encode gzip
+	reverse_proxy web:8000
+}
+
+# 临时入口：域名还不能用时（如备案中），用 http://公网IP 访问（不加密）。
+# 在 .env 里设置 HTTP_SITE=http://122.51.221.158 开启；删掉这一行即关闭（默认值只匹配 localhost，等于不开放）
+{$HTTP_SITE:http://localhost} {
 	encode gzip
 	reverse_proxy web:8000
 }

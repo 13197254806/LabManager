@@ -31,8 +31,8 @@ jobs:
 
       - name: 语法检查
         run: |
-          python -m compileall -q server/app agent deploy/atrust
-          for f in agent/install.sh agent/lab-gpus agent/lab-gpu.sh deploy/*.sh deploy/atrust/*.sh; do
+          python -m compileall -q server/app agent
+          for f in agent/install.sh agent/lab-gpus agent/lab-gpu.sh deploy/*.sh tools/*.sh; do
             bash -n "$f"
           done
           node --check server/app/static/app.js
@@ -67,9 +67,10 @@ jobs:
 
       - name: 同步代码（不覆盖服务器上的配置和数据）
         run: |
-          rsync -az --delete \
+          # --inplace：原地改写文件，单文件挂载进容器的配置（Caddyfile 等）才能看到新内容
+          rsync -az --delete --inplace \
             --exclude '.git/' --exclude '.github/' \
-            --exclude 'deploy/.env' --exclude 'deploy/atrust.env' --exclude 'deploy/data/' \
+            --exclude 'deploy/.env*' --exclude 'deploy/data/' --exclude 'agent/chisel' \
             --exclude 'server/.venv/' --exclude '__pycache__/' --exclude '*.pyc' \
             ./ deploy-target:"${{ secrets.DEPLOY_PATH }}/"
 

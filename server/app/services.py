@@ -69,14 +69,12 @@ def hash_password(password: str, username: str | None) -> str:
     """校验强度并生成 Linux 可用的 sha512-crypt 哈希（/etc/shadow 格式）。"""
     from passlib.hash import sha512_crypt
 
+    # 只做最低限度的校验：长度（太短的密码同步到各服务器 SSH 上有被爆破的风险）和字符安全
+    # （换行/空字符会破坏 /etc/shadow）。不再强制复杂度、不再禁止包含用户名。
     if len(password) < 8 or len(password) > 128:
         raise ValueError("密码长度需为 8-128 位")
-    if password.isdigit() or password.isalpha():
-        raise ValueError("密码需同时包含字母和数字（或符号）")
-    if username and username in password:
-        raise ValueError("密码不能包含用户名")
     if any(c in password for c in "\n\r\x00"):
-        raise ValueError("密码包含非法字符")
+        raise ValueError("密码不能包含换行等特殊字符")
     return sha512_crypt.using(rounds=100000).hash(password)
 
 
@@ -237,10 +235,10 @@ def welcome_card(db: Session) -> dict:
     return feishu.build_card(get_setting(db, "welcome_title"), get_setting(db, "welcome_markdown"), buttons)
 
 
-def send_welcome(db: Session, open_id: str, force: bool = False) -> bool:
+def send_welcome(db: Session, open_id: str, force: bool = False, raise_errors: bool = False) -> bool:
     if not force and not claim_notice(db, f"welcome:{open_id}"):
         return False
-    return feishu.send_card(open_id, welcome_card(db))
+    return feishu.send_card(open_id, welcome_card(db), raise_errors=raise_errors)
 
 
 def notify_booked(db: Session, user_id: int, res_ids: list[int], action: str):

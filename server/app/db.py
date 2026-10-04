@@ -44,3 +44,21 @@ def init_db():
     from . import models  # noqa: F401  注册模型
 
     Base.metadata.create_all(engine)
+    _ensure_columns()
+
+
+# 轻量级“迁移”：给已存在的表补上新增的列（SQLite 的 create_all 不会改已有表）。
+_EXTRA_COLUMNS = {
+    "servers": {"token": "VARCHAR(64)"},
+}
+
+
+def _ensure_columns():
+    if not _is_sqlite:
+        return
+    with engine.begin() as conn:
+        for table, cols in _EXTRA_COLUMNS.items():
+            existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+            for col, decl in cols.items():
+                if col not in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {col} {decl}")

@@ -8,7 +8,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from . import services
+from . import feishu, services
 from .auth import admin_user, current_user
 from .config import now, settings, today
 from .db import SessionLocal, get_db
@@ -95,7 +95,7 @@ def server_out(s: Server, holders: dict[int, set[str]] | None = None, admin: boo
         ],
     }
     if admin:
-        d.update(hostname=s.hostname, agent_version=s.agent_version)
+        d.update(hostname=s.hostname, agent_version=s.agent_version, token=s.token)
     return d
 
 
@@ -459,14 +459,16 @@ def admin_servers(_: User = Depends(admin_user), db: Session = Depends(get_db)):
     out = []
     for s in servers:
         d = server_out(s, admin=True)
-        d["tunnel"] = tunnels.get(s.name) if s.name in settings.tunnel_targets else None
+        # 隧道会连接所有填了内网地址的服务器（列表从数据库动态读取，不用再维护 TUNNEL_TARGETS）
+        d["tunnel"] = tunnels.get(s.name) if (s.host or "").strip() else None
         out.append(d)
     return out
 
 
 @router.get("/admin/tunnel")
 def admin_tunnel(_: User = Depends(admin_user)):
-    return {"enabled": bool(settings.tunnel_targets), "targets": settings.tunnel_targets, "status": _tunnel_status()}
+    # 配置了校园网接入（有 chisel 口令）即视为启用；GPU 列表由隧道从数据库自动读取
+    return {"enabled": bool(settings.chisel_secret), "status": _tunnel_status()}
 
 
 class ServerIn(BaseModel):
@@ -480,7 +482,7 @@ def admin_create_server(body: ServerIn, _: User = Depends(admin_user), db: Sessi
     if db.scalar(select(Server).where(Server.name == body.name.strip())):
         raise HTTPException(400, "服务器名称已存在")
     token, token_hash = services.new_agent_token()
-    s = Server(name=body.name.strip(), host=body.host.strip(), description=body.description.strip(), token_hash=token_hash)
+    s = Server(name=body.name.strip(), host=body.host.strip(), description=body.description.strip(), token=token, token_hash=token_hash)
     db.add(s)
     db.commit()
     return {"server": server_out(s, admin=True), "token": token}
@@ -502,6 +504,7 @@ def admin_reset_token(sid: int, _: User = Depends(admin_user), db: Session = Dep
     if not s:
         raise HTTPException(404)
     token, s.token_hash = services.new_agent_token()
+    s.token = token
     db.commit()
     return {"token": token}
 
@@ -546,8 +549,12 @@ def admin_put_settings(body: dict[str, str], _: User = Depends(admin_user), db: 
 def admin_test_welcome(me: User = Depends(admin_user), db: Session = Depends(get_db)):
     if not settings.feishu_enabled:
         raise HTTPException(400, "服务端未配置飞书应用")
-    if not services.send_welcome(db, me.open_id, force=True):
-        raise HTTPException(500, "发送失败，请查看服务端日志")
+    try:
+        services.send_welcome(db, me.open_id, force=True, raise_errors=True)
+    except feishu.FeishuError as e:
+        raise HTTPException(400, f"飞书返回错误：{e}")
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(500, f"发送失败：{e}")
     return {"ok": True}
 
 
@@ -788,6 +795,21 @@ def _agent_server(db: Session, authorization: str) -> Server:
     if not server:
         raise HTTPException(401, "invalid agent token")
     return server
+
+
+@router.get("/agent/bootstrap-config")
+def agent_bootstrap_config(authorization: str = Header(default=""), db: Session = Depends(get_db)):
+    """Mac 上的 bootstrap 脚本用服务器 token 取回首次部署所需的参数（不含飞书等无关配置）。
+    token 只有管理员在平台上添加服务器时看到一次，相当于该服务器的安装口令。"""
+    server = _agent_server(db, authorization)
+    return {
+        "name": server.name,
+        "host": server.host,
+        "chisel_port": settings.chisel_port,
+        "chisel_secret": settings.chisel_secret,
+        "chisel_allow": settings.chisel_allow,
+        "server_url": f"http://127.0.0.1:{settings.remote_platform_port}",
+    }
 
 
 @router.post("/agent/sync")
