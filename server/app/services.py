@@ -106,7 +106,7 @@ def overlapping(db: Session, start: date, end: date, gpu_ids=None, server_id=Non
 
 def merge_reservations(db: Session, user_id: int | None = None, gpu_id: int | None = None) -> dict[int, int]:
     """把同一个人在同一张卡上首尾相接（或重叠）的有效预约合并成一条，不提交事务。
-    保留最早的那条，开始日期取最早、结束日期取最晚；用途备注和自动续约以这段连续预约里
+    保留最早的那条，开始日期取最早、结束日期取最晚；用途备注和长期使用标记以这段连续预约里
     第一条还没结束的预约为准（都已结束则沿用最早那条）。返回 {被合并删除的预约 id: 保留的预约 id}。"""
     q = select(Reservation).where(Reservation.status == "active").order_by(
         Reservation.user_id, Reservation.gpu_id, Reservation.start_date, Reservation.id
@@ -176,6 +176,69 @@ def check_capacity(db: Session, gpu_ids: list[int], start: date, end: date, user
         raise ValueError("时间冲突：" + "；".join(problems))
 
 
+def book_long_term(db: Session, owner: User, gpus: list[GPU], note: str = "") -> list[int]:
+    """长期使用：从今天起预约一个周期（auto_renew_days 天），之后到期前自动延长。
+    今天已经预约了的部分不重复预约，只补上没有预约的日子，并和后面自己已有的预约合并成一条。
+    某张卡今天就满员（或被自己占着以外的原因无法预约）时抛 ValueError，整个操作不生效。返回预约 id。"""
+    d = today()
+    cycle = min(max(1, get_int_setting(db, "auto_renew_days")), settings.max_reservation_days)
+    window_end = d + timedelta(days=cycle - 1)
+    ids: list[int] = []
+    problems = []
+    for g in gpus:
+        rs = overlapping(db, d, d + timedelta(days=3650), gpu_ids=[g.id])
+        mine = [r for r in rs if r.user_id == owner.id]
+        others = [r for r in rs if r.user_id != owner.id]
+
+        def covered(day, mine=mine):
+            return any(r.start_date <= day <= r.end_date for r in mine)
+
+        def full(day, others=others):
+            return sum(1 for r in others if r.start_date <= day <= r.end_date) >= settings.max_gpu_sharers
+
+        label = f"{g.server.name} GPU{g.index}"
+        if not covered(d) and full(d):
+            problems.append(f"{label} 今天已有 {settings.max_gpu_sharers} 人预约，最多 {settings.max_gpu_sharers} 人共用")
+            continue
+        # 补上 [今天, 周期末] 里自己还没预约的日子；中途遇到别人已满的日子就停在前一天
+        day, reach = d, d
+        run_start = None
+        while day <= window_end:
+            if covered(day):
+                if run_start:
+                    db.add(Reservation(user_id=owner.id, gpu_id=g.id, start_date=run_start, end_date=day - timedelta(days=1), note=note))
+                    run_start = None
+            elif full(day):
+                break
+            elif run_start is None:
+                run_start = day
+            reach = day
+            day += timedelta(days=1)
+        if run_start:
+            db.add(Reservation(user_id=owner.id, gpu_id=g.id, start_date=run_start, end_date=reach, note=note))
+        db.flush()
+        # 从今天起连在一起的这段预约都标记为长期使用，再合并成一条
+        for r in overlapping(db, d, reach + timedelta(days=1), gpu_ids=[g.id]):
+            if r.user_id == owner.id:
+                r.auto_renew = True
+        db.flush()
+        merge_reservations(db, owner.id, g.id)
+        keep = db.scalar(
+            select(Reservation).where(Reservation.status == "active", Reservation.user_id == owner.id,
+                                      Reservation.gpu_id == g.id, Reservation.start_date <= d, Reservation.end_date >= d)
+        ) or db.scalar(
+            select(Reservation).where(Reservation.status == "active", Reservation.user_id == owner.id,
+                                      Reservation.gpu_id == g.id, Reservation.end_date >= d).order_by(Reservation.start_date)
+        )
+        if note and keep and not keep.note:
+            keep.note = note
+        if keep:
+            ids.append(keep.id)
+    if problems:
+        raise ValueError("无法设为长期使用：" + "；".join(problems))
+    return ids
+
+
 def gpu_alerts(gpu: GPU, holders: set[str]) -> list[str]:
     """GPU 上有进程、但进程属主不是今天预约这张卡的人 → 返回这些用户名。"""
     users = {p.get("user") or "?" for p in gpu.processes}
@@ -241,8 +304,8 @@ DEFAULT_SETTINGS = {
     ),
     # 每行一个按钮：按钮文字|链接。{base_url} 会被替换为平台地址
     "welcome_links": "打开实验室平台|{base_url}\n新人指南|https://example.feishu.cn/wiki/xxxx",
-    # 自动续约：到期前多少小时触发，每次延长多少天
-    # 默认：预约结束当天 20:00（距到期 4 小时）自动续约 7 天
+    # 长期使用的自动延长：到期前多少小时触发，每次延长多少天
+    # 默认：预约结束当天 20:00（距到期 4 小时）自动延长 7 天
     "auto_renew_before_hours": "4",
     "auto_renew_days": "7",
     # 成员发起的文件迁移是否需要管理员确认（1/0）
@@ -326,7 +389,7 @@ def notify_booked(db: Session, user_id: int, res_ids: list[int], action: str):
     else:
         md = describe(rs) + "\n\n预约当天 00:00 起，登录对应服务器后会自动只看到你预约的显卡；到期后次日 00:00 这些卡不再分配给你。"
     if any(r.auto_renew for r in rs):
-        md += "\n已开启**自动续约**：到期前会自动延长，并通知你。"
+        md += "\n这是**长期使用**：到期前会自动延长，并通知你。"
     feishu.send_card(
         user.open_id,
         feishu.build_card(f"GPU {action}", md, [("查看日历", settings.base_url)], template="green"),
@@ -352,7 +415,7 @@ def notify_violation(db: Session, server_id: int, gpu_index: int, username: str)
 def send_expiry_reminders(db: Session) -> int:
     """给“今天到期”的预约发提醒，每人每天最多一条。"""
     d = today()
-    # 开了自动续约的不提醒（续约失败时会单独通知）
+    # 长期使用（自动延长）的不提醒（续约失败时会单独通知）
     rs = [r for r in overlapping(db, d, d) if r.end_date == d and not r.auto_renew]
     by_user: dict[int, list[Reservation]] = {}
     for r in rs:
@@ -371,7 +434,7 @@ def send_expiry_reminders(db: Session) -> int:
 
 
 def run_auto_renew(db: Session) -> int:
-    """到期前 N 小时自动延长开启了自动续约的预约；与别人的预约冲突时尽量延长到冲突前一天。"""
+    """到期前 N 小时自动延长长期使用的预约；与别人的预约冲突时尽量延长到冲突前一天。"""
     before = timedelta(hours=get_int_setting(db, "auto_renew_before_hours"))
     days = max(1, get_int_setting(db, "auto_renew_days"))
     t = now()
@@ -405,7 +468,7 @@ def run_auto_renew(db: Session) -> int:
                 renewed.setdefault(r.user_id, []).append((r, old_end, wanted))
                 touched.add((r.user_id, r.gpu_id))
             else:
-                # 一天都续不了：关闭自动续约，避免每分钟重试，并通知本人
+                # 一天都续不了：转为临时使用，避免每分钟重试，并通知本人
                 r.auto_renew = False
                 failed.setdefault(r.user_id, []).append((r, reason))
         db.flush()
@@ -417,16 +480,16 @@ def run_auto_renew(db: Session) -> int:
         user = items[0][0].user
         lines = [f"- **{r.gpu.server.name}** GPU{r.gpu.index}：{old} → **{r.end_date}**" for r, old, _w in items]
         partial = any(r.end_date < wanted for r, _old, wanted in items)
-        md = "以下预约已自动续约：\n" + "\n".join(lines)
+        md = "以下长期使用的预约已自动延长：\n" + "\n".join(lines)
         if partial:
             md += "\n\n部分预约因后面这张卡的共用人数已满，只延长到了冲突前一天。"
-        md += "\n\n不再需要时请及时释放，或在平台上关闭自动续约。"
-        feishu.send_card(user.open_id, feishu.build_card("🔁 GPU 已自动续约", md, [("管理预约", settings.base_url)], template="green"))
+        md += "\n\n不再需要时请及时释放，或在平台上改为临时使用。"
+        feishu.send_card(user.open_id, feishu.build_card("GPU 长期使用已自动延长", md, [("管理预约", settings.base_url)], template="green"))
     for items in failed.values():
         user = items[0][0].user
         lines = [f"- **{r.gpu.server.name}** GPU{r.gpu.index}（{r.end_date} 到期）：{why}" for r, why in items]
-        md = "以下预约**自动续约失败**，已为你关闭自动续约：\n" + "\n".join(lines) + "\n\n请在到期前处理好实验，或换一张卡预约。"
-        feishu.send_card(user.open_id, feishu.build_card("⚠️ GPU 自动续约失败", md, [("去预约", settings.base_url)], template="orange"))
+        md = "以下长期使用的预约**自动延长失败**，已改为临时使用：\n" + "\n".join(lines) + "\n\n请在到期前处理好实验，或换一张卡预约。"
+        feishu.send_card(user.open_id, feishu.build_card("⚠️ GPU 长期使用延长失败", md, [("去预约", settings.base_url)], template="orange"))
     return sum(len(v) for v in renewed.values())
 
 

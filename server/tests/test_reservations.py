@@ -313,9 +313,64 @@ def test_refresh_interval_setting_and_system_report(admin, alice, server):
     assert admin.put("/api/admin/settings", json={"refresh_interval_seconds": "2"}).status_code == 400
     assert admin.put("/api/admin/settings", json={"refresh_interval_seconds": "30"}).status_code == 200
     _, token = server
-    body = {"gpus": [], "system": {"cpu": 12.5, "mem_used": 1000, "mem_total": 4000, "disk_used": 10, "disk_total": 100, "evil": 1}}
+    body = {"gpus": [], "system": {"cpu": 12.5, "mem_used": 1000, "mem_total": 4000, "disk_used": 10, "disk_total": 100, "evil": 1,
+                       "users": [{"user": "alice", "size": 2048}, {"user": "x", "size": "bad"}]}}
     r = TestClient(app).post("/api/agent/sync", json=body, headers=agent_headers(token)).json()
     assert r["interval"] == 30
     srv = admin.get("/api/admin/servers").json()[0]
-    assert srv["system"] == {"cpu": 12.5, "mem_used": 1000, "mem_total": 4000, "disk_used": 10, "disk_total": 100}
+    assert srv["system"] == {"cpu": 12.5, "mem_used": 1000, "mem_total": 4000, "disk_used": 10, "disk_total": 100,
+                             "users": [{"user": "alice", "size": 2048}]}
     assert "description" not in srv
+
+
+def test_long_term_booking_starts_today_and_merges(alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    # 后面紧挨着已有一条临时预约：长期使用要和它合并成一条
+    assert book(alice, g[:1], d + timedelta(days=7), d + timedelta(days=9), note="后面的").status_code == 200
+    r = alice.post("/api/reservations", json={"gpu_ids": g[:1], "long_term": True})
+    assert r.status_code == 200, r.text
+    assert len(r.json()) == 1
+    db.expire_all()
+    rows = db.query(Reservation).filter(Reservation.status == "active").all()
+    assert len(rows) == 1
+    assert (rows[0].start_date, rows[0].end_date) == (d, d + timedelta(days=9))
+    assert rows[0].auto_renew is True
+    # 今天已经预约了：再选长期使用只是把它标成长期使用，不会重复预约
+    r2 = alice.post("/api/reservations", json={"gpu_ids": g[:1], "long_term": True})
+    assert r2.status_code == 200
+    db.expire_all()
+    assert db.query(Reservation).filter(Reservation.status == "active").count() == 1
+
+
+def test_long_term_blocked_when_full_today(admin, alice, server):
+    g = gpu_ids(alice)
+    d = today()
+    assert book(admin, g[:1], d, d + timedelta(days=2)).status_code == 200
+    r = alice.post("/api/reservations", json={"gpu_ids": g[:1], "long_term": True})
+    assert r.status_code == 409
+    # 整个操作不生效：另一张卡也没有被预约
+    r = alice.post("/api/reservations", json={"gpu_ids": g, "long_term": True})
+    assert r.status_code == 409
+    assert alice.get("/api/me/reservations").json() == []
+
+
+def test_long_term_stops_before_full_day(admin, alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    assert book(admin, g[:1], d + timedelta(days=3), d + timedelta(days=4)).status_code == 200
+    assert alice.post("/api/reservations", json={"gpu_ids": g[:1], "long_term": True}).status_code == 200
+    db.expire_all()
+    mine = db.query(Reservation).filter(Reservation.status == "active", Reservation.user.has(linux_username="alice")).all()
+    assert len(mine) == 1 and (mine[0].start_date, mine[0].end_date) == (d, d + timedelta(days=2))
+
+
+def test_started_reservation_start_date_is_locked(admin, alice, server):
+    g = gpu_ids(alice)
+    d = today()
+    rid = book(alice, g[:1], d - timedelta(days=0), d + timedelta(days=3)).json()[0]["id"]
+    for who in (alice, admin):
+        r = who.patch(f"/api/reservations/{rid}", json={"start_date": str(d + timedelta(days=1))})
+        assert r.status_code == 400
+    # 结束日期仍可修改
+    assert alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d + timedelta(days=4))}).status_code == 200

@@ -304,8 +304,8 @@ def _check_rules(user: User, start: date, end: date, is_new_start: bool):
         return
     if is_new_start and start < today():
         raise HTTPException(400, "不能预约过去的日期")
-    # 已经开始的预约按“从今天起还剩几天”计算：自动续约会把总时长延到上限以上，
-    # 不能因此改个备注、关自动续约，或在到期前继续延长，就被“最长 N 天”拦住
+    # 已经开始的预约按“从今天起还剩几天”计算：长期使用的自动延长会把总时长延到上限以上，
+    # 不能因此改个备注、改为临时使用，或在到期前继续延长，就被“最长 N 天”拦住
     if (end - max(start, today())).days + 1 > settings.max_reservation_days:
         raise HTTPException(400, f"单次预约最长 {settings.max_reservation_days} 天，到期前可以续约")
     if start > today() + timedelta(days=settings.max_advance_days):
@@ -321,10 +321,11 @@ def _check_conflicts(db: Session, gpu_ids: list[int], start: date, end: date, us
 
 class ReservationIn(BaseModel):
     gpu_ids: list[int] = Field(min_length=1, max_length=16)
-    start_date: date
-    end_date: date
+    start_date: date | None = None
+    end_date: date | None = None
     note: str = Field(default="", max_length=256)
-    auto_renew: bool = False
+    auto_renew: bool = False  # 长期使用：到期前自动延长（临时使用为 False）
+    long_term: bool = False  # 长期使用：不需要日期，从今天起预约一个周期，之后自动延长
     user_id: int | None = None  # 仅管理员可以替别人预约
 
 
@@ -344,6 +345,19 @@ def create_reservation(
     gpus = db.scalars(select(GPU).where(GPU.id.in_(body.gpu_ids)).options(joinedload(GPU.server))).all()
     if len(gpus) != len(set(body.gpu_ids)):
         raise HTTPException(404, "GPU 不存在")
+    if body.long_term:
+        with _booking_lock:
+            try:
+                rs = services.book_long_term(db, owner, list(gpus), body.note.strip())
+            except ValueError as e:
+                db.rollback()
+                raise HTTPException(409, str(e))
+            db.commit()
+            rs = [db.get(Reservation, i) for i in rs]
+        bg.add_task(_bg, services.notify_booked, owner.id, [r.id for r in rs], "预约成功")
+        return [res_out(r, user) for r in rs]
+    if not body.start_date or not body.end_date:
+        raise HTTPException(400, "请选择开始日期和结束日期")
     _check_rules(user, body.start_date, body.end_date, is_new_start=True)
     with _booking_lock:
         _check_conflicts(db, body.gpu_ids, body.start_date, body.end_date, owner.id)
@@ -392,8 +406,8 @@ def update_reservation(
             raise HTTPException(400, "已结束的预约不能修改")
         start = body.start_date or r.start_date
         end = body.end_date or r.end_date
-        if start != r.start_date and r.start_date <= today() and not user.is_admin:
-            raise HTTPException(400, "预约已经开始，不能修改开始日期")
+        if start != r.start_date and r.start_date <= today():
+            raise HTTPException(400, "预约已经开始，不能修改开始日期（已过去的部分不能改）")
         _check_rules(user, start, end, is_new_start=start != r.start_date)
         _check_conflicts(db, [r.gpu_id], start, end, r.user_id, exclude_id=r.id)
         changed = (start, end) != (r.start_date, r.end_date)
@@ -865,7 +879,14 @@ def agent_sync(
         server.home_free = body.home_free
     if body.system is not None:
         keys = ("cpu", "mem_used", "mem_total", "disk_used", "disk_total")
-        server.sysinfo_json = json.dumps({k: body.system[k] for k in keys if isinstance(body.system.get(k), (int, float))})
+        info = {k: body.system[k] for k in keys if isinstance(body.system.get(k), (int, float))}
+        users = body.system.get("users")
+        if isinstance(users, list):  # 各用户家目录占用（MiB）
+            info["users"] = [
+                {"user": str(u.get("user", ""))[:64], "size": int(u["size"])}
+                for u in users[:100] if isinstance(u, dict) and isinstance(u.get("size"), (int, float))
+            ]
+        server.sysinfo_json = json.dumps(info)
     db.commit()
 
     users = services.desired_state(db, server)

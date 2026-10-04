@@ -232,7 +232,7 @@ function renderBanner() {
 
 // ---------------- 日历 ----------------
 
-// 日历永远按“月”展示：state.month = {y, m}。为了把首尾相接的预约合并成一条、并让合并后的备注与自动续约
+// 日历永远按“月”展示：state.month = {y, m}。为了把首尾相接的预约合并成一条、并让合并后的备注与长期使用标记
 // 在翻月时保持一致，向服务器多取前后各一段时间的预约。
 const MONTH_CN = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二"];
 const pad2 = (n) => String(n).padStart(2, "0");
@@ -271,6 +271,12 @@ async function loadCalendar(quiet = false) {
   }
 }
 
+// 各 Linux 用户家目录占用的空间，从大到小，一人一行
+function diskTable(users) {
+  const rows = users.map((u) => `<tr><td>${esc(u.user)}</td><td>${gb(u.size)} GB</td></tr>`).join("");
+  return `<table class="proc-table"><tr><th>Linux 用户名</th><th>占用空间</th></tr>${rows}</table>`;
+}
+
 // 服务器行：整机 CPU 利用率、内存和磁盘占用（GB）。离线或 Agent 还没上报时不显示
 function serverStats(s) {
   const y = s.system;
@@ -280,7 +286,12 @@ function serverStats(s) {
   const pct = (u, t) => (t ? (u * 100) / t : 0);
   const parts = [item("CPU", y.cpu, `${Math.round(y.cpu)}%`, `CPU 利用率 ${y.cpu}%（各核平均）`)];
   if (y.mem_total) parts.push(item("内存", pct(y.mem_used, y.mem_total), `${gb(y.mem_used)}/${gb(y.mem_total)} GB`, `内存已用 ${gb(y.mem_used)} GB，共 ${gb(y.mem_total)} GB（${Math.round(pct(y.mem_used, y.mem_total))}%）`));
-  if (y.disk_total) parts.push(item("磁盘", pct(y.disk_used, y.disk_total), `${gb(y.disk_used)}/${gb(y.disk_total)} GB`, `家目录所在磁盘已用 ${gb(y.disk_used)} GB，共 ${gb(y.disk_total)} GB（${Math.round(pct(y.disk_used, y.disk_total))}%）`));
+  if (y.disk_total) {
+    const disk = item("磁盘", pct(y.disk_used, y.disk_total), `${gb(y.disk_used)}/${gb(y.disk_total)} GB`, `家目录所在磁盘已用 ${gb(y.disk_used)} GB，共 ${gb(y.disk_total)} GB（${Math.round(pct(y.disk_used, y.disk_total))}%）`);
+    // 各用户家目录占用（Agent 后台统计，新版 Agent 才会上报）
+    const usage = y.users?.length ? `<span class="disk-detail" data-tip-html="${esc(diskTable(y.users))}">磁盘占用情况</span>` : "";
+    parts.push(disk.replace(/<\/span>$/, "") + (usage ? `${usage}</span>` : "</span>"));
+  }
   return `<div class="srv-stats">${parts.join("")}</div>`;
 }
 
@@ -296,7 +307,7 @@ const ALERT_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden=
 // 把一张卡上的预约整理成要画的色块：
 //  - 同一个人首尾相接的预约合并成一条“连续预约”；
 //  - 今天之前的部分单独画成浅色块，今天起的部分正常显示；
-//  - 自动续约、备注以连续预约里第一条还没结束的（非浅色）预约为准（只在悬停提示里显示）；
+//  - 长期使用标记、备注以连续预约里第一条还没结束的（非浅色）预约为准（只在悬停提示里显示）；
 //  - 多人共用同一张卡时，每条连续预约占一条“车道”，在同一行里上下并排。
 function buildBlocks(list, today, vStart, vEnd) {
   const byUser = {};
@@ -345,6 +356,7 @@ function renderCalendar() {
   $("#month-btn").textContent = `${MONTH_CN[state.month.m - 1]}月`;
   const full = (iso) => { const [y, m, d] = iso.split("-").map(Number); return `${y}年${m}月${d}日`; };
   $("#range-label").textContent = `${full(vStart)} – ${full(vEnd)}`;
+  $("#cal-hint").textContent = `点击日历格子或右上角的「+ 预约 GPU」按钮进行预约；同一张卡每天最多 ${state.config.max_gpu_sharers} 人使用。`;
   const root = $("#calendar");
   root.style.setProperty("--days", days);
   state.bars = [];
@@ -402,7 +414,7 @@ function renderCalendar() {
         const mine = c.user_id === state.me.id;
         const n = state.bars.push(b) - 1;
         const tip = `${c.user_name}（${c.linux_username || "-"}）\n${c.start} ~ ${c.end}${c.items.length > 1 ? `（${c.items.length} 段连续预约）` : ""}`
-          + `${head?.auto_renew ? "\n🔁 自动续约" : ""}${head?.note ? `\n${head.note}` : ""}${b.past ? "\n（已结束的部分）" : ""}`;
+          + `${head?.auto_renew ? "\n长期使用（到期前自动延长）" : ""}${head?.note ? `\n${head.note}` : ""}${b.past ? "\n（已结束的部分）" : ""}`;
         html += `<div class="bar ${mine ? "mine" : ""} ${b.past ? "past" : ""} ${b.cutL ? "cut-l" : ""} ${b.cutR ? "cut-r" : ""}"
           style="grid-column:${b.c1}/${b.c2 + 1};grid-row:${b.lane + 1};--h:${hue(c.user_id)}" data-bar="${n}" title="${esc(tip)}">
           ${avatarHtml(c.user_name, c.user_avatar, c.user_id)}<span>${esc(c.user_name)}</span></div>`;
@@ -503,9 +515,29 @@ function gpuLoad(start, end) {
   return out;
 }
 
+// 当前表单选择的日期范围：长期使用从今天起一个周期（之后自动延长），临时使用取所填日期
+const bookingMode = () => bookingForm.mode.value;
+function bookingRange() {
+  if (bookingMode() === "long") {
+    const t = state.config.today;
+    return { start: t, end: addDays(t, Math.min(state.config.auto_renew_days, state.config.max_reservation_days) - 1) };
+  }
+  return { start: bookingForm.start_date.value, end: bookingForm.end_date.value || bookingForm.start_date.value };
+}
+function syncBookingMode() {
+  const long = bookingMode() === "long";
+  $$(".temp-only", bookingForm).forEach((el) => el.classList.toggle("hidden", long));
+  $$(".long-only", bookingForm).forEach((el) => el.classList.toggle("hidden", !long));
+  bookingForm.start_date.required = bookingForm.end_date.required = !long;
+  $("#long-rule").textContent = `从今天起预约 ${Math.min(state.config.auto_renew_days, state.config.max_reservation_days)} 天，并在到期前 ${state.config.auto_renew_before_hours} 小时自动再延长 ${state.config.auto_renew_days} 天，直到你改为临时使用或释放。今天已经预约的部分不会重复预约，后面几天已有的预约会合并成一条。`;
+}
+const reloadPicks = () => renderGpuPicks($$("input[name=gpu]:checked", bookingForm).map((i) => Number(i.value)));
+$$("input[name=mode]", bookingForm).forEach((i) => (i.onchange = () => { syncBookingMode(); reloadPicks(); }));
+
 function renderGpuPicks(selected = []) {
   const s = state.cal.servers.find((x) => x.id === Number(bookingForm.server.value));
-  const load = gpuLoad(bookingForm.start_date.value, bookingForm.end_date.value || bookingForm.start_date.value);
+  const range = bookingRange();
+  const load = gpuLoad(range.start, range.end);
   const cap = state.config.max_gpu_sharers;
   $("#booking-gpus").innerHTML = (s?.gpus || [])
     .map((g) => {
@@ -530,6 +562,7 @@ async function openBooking({ serverId, gpuId, date }) {
   bookingForm.end_date.value = date || today;
   bookingForm.start_date.min = bookingForm.end_date.min = state.me.is_admin ? "" : today;
   $$(".renew-rule").forEach((el) => (el.textContent = renewRuleText()));
+  syncBookingMode();
   $("#booking-rule").textContent = `规则：单次最长 ${state.config.max_reservation_days} 天，最多提前 ${state.config.max_advance_days} 天；按自然日计算，开始当天 00:00 起可使用所选显卡，结束日 24:00 收回。同一张卡同一天最多 ${state.config.max_gpu_sharers} 人共用。`;
   if (state.me.is_admin) {
     const users = state.users.length ? state.users : (state.users = await api("/api/admin/users"));
@@ -557,11 +590,10 @@ bookingForm.addEventListener("submit", async (e) => {
   if (!gpuIds.length) return ($("#booking-error").textContent = "请至少选择一张显卡");
   const body = {
     gpu_ids: gpuIds,
-    start_date: bookingForm.start_date.value,
-    end_date: bookingForm.end_date.value,
     note: bookingForm.note.value,
-    auto_renew: bookingForm.auto_renew.checked,
   };
+  if (bookingMode() === "long") body.long_term = true;
+  else Object.assign(body, { start_date: bookingForm.start_date.value, end_date: bookingForm.end_date.value });
   if (state.me.is_admin && bookingForm.user_id.value) body.user_id = Number(bookingForm.user_id.value);
   $("#booking-submit").disabled = true;
   try {
@@ -588,7 +620,7 @@ function openDetail(r) {
   const today = state.config.today;
   $("#detail-title").textContent = `${r.server_name} · GPU${r.gpu_index}`;
   $("#detail-info").innerHTML = `${esc(r.user_name)}（${esc(r.linux_username || "-")}）<br>${r.start_date} ~ ${r.end_date}`
-    + `${r.auto_renew ? `<br>🔁 已开启自动续约${r.renew_count ? `（已续约 ${r.renew_count} 次）` : ""}` : ""}${r.note ? `<br>${esc(r.note)}` : ""}`;
+    + `${r.auto_renew ? `<br>长期使用${r.renew_count ? `（已自动延长 ${r.renew_count} 次）` : ""}` : "<br>临时使用"}${r.note ? `<br>${esc(r.note)}` : ""}`;
   $("#detail-error").textContent = "";
   const editable = r.editable && r.end_date >= today;  // 已结束的预约只能查看
   $$(".editable", detailForm).forEach((el) => el.classList.toggle("hidden", !editable));
@@ -597,7 +629,8 @@ function openDetail(r) {
   detailForm.end_date.value = r.end_date;
   detailForm.note.value = r.note;
   detailForm.auto_renew.checked = r.auto_renew;
-  detailForm.start_date.disabled = r.start_date <= today && !state.me.is_admin;
+  detailForm.start_date.disabled = r.start_date <= today;  // 已经开始的预约，开始日期（已过去的部分）不能改
+  detailForm.start_date.title = detailForm.start_date.disabled ? "已经开始的预约不能修改开始日期" : "";
   detailForm.end_date.min = state.me.is_admin ? "" : today;
   $("#detail-release").textContent = r.start_date >= today ? "取消预约" : "立即释放";
   detailDialog.showModal();
@@ -704,17 +737,17 @@ async function renderAccount() {
 
   // 预约
   $("#my-reservations").innerHTML = rs.length
-    ? `<div class="table-wrap"><table><tr><th>服务器</th><th>显卡</th><th>日期</th><th>自动续约</th><th>备注</th><th></th></tr>
+    ? `<div class="table-wrap"><table><tr><th>服务器</th><th>显卡</th><th>日期</th><th>长期使用</th><th>备注</th><th></th></tr>
         ${rs.map((r) => `<tr><td>${esc(r.server_name)}</td><td>GPU${r.gpu_index}</td><td>${r.start_date} ~ ${r.end_date}</td>
           <td><label class="check"><input type="checkbox" data-renew="${r.id}" ${r.auto_renew ? "checked" : ""}>${r.renew_count ? `<span class="muted small">已续 ${r.renew_count} 次</span>` : ""}</label></td>
           <td>${esc(r.note)}</td><td><button class="btn small" data-open-res="${r.id}">续约 / 释放</button></td></tr>`).join("")}
-      </table></div><p class="muted small">自动续约${esc(renewRuleText())}。与他人预约冲突时只延长到冲突前一天。</p>`
+      </table></div><p class="muted small">长期使用${esc(renewRuleText())}。与他人预约冲突时只延长到冲突前一天。</p>`
     : `<p class="muted">没有进行中或即将开始的预约。</p>`;
   $$("[data-open-res]").forEach((b) => (b.onclick = () => openDetail(rs.find((r) => r.id === Number(b.dataset.openRes)))));
   $$("[data-renew]").forEach((c) => (c.onchange = async () => {
     try {
       await api(`/api/reservations/${c.dataset.renew}`, { method: "PATCH", body: { auto_renew: c.checked } });
-      toast(c.checked ? "已开启自动续约" : "已关闭自动续约");
+      toast(c.checked ? "已改为长期使用" : "已改为临时使用");
     } catch (err) {
       c.checked = !c.checked;
       toast(err.message);

@@ -41,7 +41,7 @@
       </div>
     </header>
 
-    <div id="http-banner" class="banner warn hidden">⚠️ 当前临时使用不加密访问方式（HTTP），在域名（zddlab.cn）完成备案后会切换至 HTTPS</div>
+    <div id="http-banner" class="banner warn hidden">⚠️ 当前临时使用不加密访问方式（HTTP），在域名完成备案后会切换至 HTTPS，可直接访问 <a class="link-blue" href="https://www.zddlab.cn" target="_blank" rel="noopener">www.zddlab.cn</a></div>
     <div id="setup-banner" class="banner hidden"></div>
 
     <main>
@@ -58,7 +58,7 @@
             <button class="btn primary" id="new-booking">+ 预约 GPU</button>
           </div>
         </div>
-        <p class="hint">点击空白格子预约，点击色块查看 / 续约 / 释放；点击服务器名可折叠。同一张卡同一天最多可多人共用，并排显示；浅色表示已过去的预约。行首显示实时利用率与显存，点「详情」查看占用该卡的进程。</p>
+        <p class="hint" id="cal-hint"></p>
         <div class="cal-wrap"><div id="calendar" class="calendar"></div></div>
       </section>
 
@@ -128,7 +128,7 @@
             <h2>预约与迁移规则</h2>
             <form id="rules-form" class="stack">
               <div class="two">
-                <label>自动续约：到期前多少小时触发<input type="number" name="auto_renew_before_hours" min="1" max="336" required></label>
+                <label>长期使用：到期前多少小时自动延长<input type="number" name="auto_renew_before_hours" min="1" max="336" required></label>
                 <label>每次自动延长多少天<input type="number" name="auto_renew_days" min="1" max="60" required></label>
               </div>
               <label>页面自动刷新间隔（秒）<input type="number" name="refresh_interval_seconds" min="3" max="600" required>
@@ -165,11 +165,15 @@
         <div class="label">显卡（可多选）</div>
         <div id="booking-gpus" class="gpu-picks"></div>
       </div>
-      <div class="two">
-        <label>开始日期<input type="date" name="start_date" required></label>
+      <div class="mode-pick" role="radiogroup" aria-label="使用方式">
+        <label><input type="radio" name="mode" value="temp" checked> 临时使用</label>
+        <label><input type="radio" name="mode" value="long"> 长期使用</label>
+      </div>
+      <div class="two temp-only">
+        <label>开始日期（含）<input type="date" name="start_date" required></label>
         <label>结束日期（含）<input type="date" name="end_date" required></label>
       </div>
-      <label class="check"><input type="checkbox" name="auto_renew"> <span>自动续约 <span class="muted small renew-rule"></span></span></label>
+      <p class="muted small long-only hidden" id="long-rule"></p>
       <label class="admin-only hidden">替谁预约（管理员）<select name="user_id" id="booking-user"></select></label>
       <label>用途备注<input name="note" maxlength="256" placeholder="例如：xx 论文消融实验"></label>
       <p class="muted small" id="booking-rule"></p>
@@ -187,10 +191,10 @@
       <h2 id="detail-title"></h2>
       <div id="detail-info" class="muted"></div>
       <div class="two editable">
-        <label>开始日期<input type="date" name="start_date"></label>
+        <label>开始日期（含）<input type="date" name="start_date"></label>
         <label>结束日期（含）<input type="date" name="end_date"></label>
       </div>
-      <label class="check editable"><input type="checkbox" name="auto_renew"> <span>自动续约 <span class="muted small renew-rule"></span></span></label>
+      <label class="check editable"><input type="checkbox" name="auto_renew"> <span>长期使用 <span class="muted small renew-rule"></span></span></label>
       <label class="editable">用途备注<input name="note" maxlength="256"></label>
       <p class="error" id="detail-error"></p>
       <div class="actions">

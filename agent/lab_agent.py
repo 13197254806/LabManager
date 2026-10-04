@@ -47,7 +47,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.5.0"
+VERSION = "0.6.0"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -161,6 +161,7 @@ class Agent(object):
         self.dry_run = dry_run
         self.adopt = set(cfg.get("adopt_users") or [])
         self.home_base = cfg.get("home_base", "/home")
+        self.home_usage = None  # [{"user": 名字, "size": MiB}]，由 usage_loop 在后台更新
         self.roots = [os.path.realpath(r) for r in (cfg.get("migration_roots") or DEFAULT_ROOTS)]
         self.accounts = None       # 上一轮对齐的结果，下次同步时上报
         self.candidates = None     # 后台扫描的可迁移文件 / 目录
@@ -402,6 +403,32 @@ class Agent(object):
                 log.exception("扫描可迁移内容失败")
             time.sleep(int(self.cfg.get("candidate_scan_interval", 600)))
 
+    def scan_home_usage(self):
+        """各用户家目录占用的空间（MiB），按从大到小排。家目录可能很大，du 要跑一阵，所以放在后台。"""
+        out = []
+        for name in sorted(os.listdir(self.home_base)):
+            path = os.path.join(self.home_base, name)
+            try:
+                st = os.lstat(path)
+                if not stat.S_ISDIR(st.st_mode) or st.st_uid < 1000:
+                    continue
+                owner = pwd.getpwuid(st.st_uid).pw_name
+                res = subprocess.run(["nice", "-n", "19", "du", "-sb", path], stdout=subprocess.PIPE,
+                                     stderr=subprocess.DEVNULL, universal_newlines=True, timeout=1800)
+                out.append({"user": owner, "size": int(res.stdout.split()[0]) // (1024 * 1024)})
+            except Exception:  # noqa: BLE001  某个目录读不了不影响其他
+                continue
+        out.sort(key=lambda x: -x["size"])
+        self.home_usage = out[:100]
+
+    def usage_loop(self):
+        while True:
+            try:
+                self.scan_home_usage()
+            except Exception:  # noqa: BLE001
+                log.exception("统计家目录占用失败")
+            time.sleep(int(self.cfg.get("usage_scan_interval", 1800)))
+
     # ---------------- 与云端同步 ----------------
 
     # ---------------- 整机资源（CPU / 内存 / 磁盘），显示在日历的服务器行 ----------------
@@ -447,6 +474,8 @@ class Agent(object):
             out["disk_used"] = (st.f_blocks - st.f_bfree) * st.f_frsize // (1024 * 1024)
         except OSError:
             pass
+        if self.home_usage is not None:
+            out["users"] = self.home_usage
         return out
 
     def sync(self):
@@ -1411,6 +1440,7 @@ def main():
             agent.migration.join()
         return
     threading.Thread(target=agent.candidate_loop, daemon=True, name="candidates").start()
+    threading.Thread(target=agent.usage_loop, daemon=True, name="usage").start()
     while True:
         try:
             agent.once()
