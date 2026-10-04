@@ -128,6 +128,8 @@ def test_browse_roundtrip_and_nested_migration(admin, alice, server):
     assert ok.status_code == 200, ok.text
     assert admin.post("/api/migrations", json={"server_id": sid, "source": "/home/ubuntu/proj", "mode": "copy", "dest_name": "p"}).status_code == 409
     assert alice.post("/api/migrations", json={"server_id": sid, "source": "/etc/passwd", "mode": "copy", "dest_name": "x"}).status_code == 400
+    assert alice.post("/api/migrations", json={"server_id": sid, "source": "/home/ubuntu/.bashrc", "mode": "copy", "dest_name": ".bashrc"}).status_code == 200
+    assert alice.post("/api/migrations", json={"server_id": sid, "source": "/home/ubuntu/.lab-migrate", "mode": "copy", "dest_name": "x"}).status_code == 400
     assert alice.post("/api/migrations", json={"server_id": sid, "source": "/home/ubuntu/a", "mode": "link", "dest_name": "a"}).status_code == 400
 
 

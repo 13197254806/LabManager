@@ -47,7 +47,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.7.0"
+VERSION = "0.7.1"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -469,7 +469,7 @@ class Agent(object):
         self.check_browsable(path, managed)
         out = []
         for name in sorted(os.listdir(path)):
-            if name.startswith("."):
+            if name.startswith(".lab-"):  # 迁移程序自己的暂存 / 备份目录，不显示
                 continue
             full = os.path.join(path, name)
             try:
@@ -1309,7 +1309,7 @@ class Migration(threading.Thread):
         roots, homes = self._allowed_parents()
         bases = roots | homes
         try:  # 必须在旧账号家目录或迁移目录之下，且不经过其他成员的目录
-            if base.startswith(".") or not any(parent == b or parent.startswith(b.rstrip("/") + "/") for b in bases):
+            if base.startswith(".lab-") or not any(parent == b or parent.startswith(b.rstrip("/") + "/") for b in bases):
                 raise ValueError
             self.agent.check_browsable(parent, self._managed_uids())
         except (ValueError, OSError):

@@ -654,7 +654,7 @@ def create_migration(body: MigrationIn, bg: BackgroundTasks, user: User = Depend
     roots = server.browse_roots
     cand = next((c for c in server.candidates if c.get("path") == source), None)
     under_root = any(source.startswith(r.rstrip("/") + "/") for r in roots)
-    if not source.startswith("/") or not (cand or under_root) or posixpath.basename(source).startswith("."):
+    if not source.startswith("/") or not (cand or under_root) or posixpath.basename(source).startswith(".lab-"):
         raise HTTPException(400, "只能迁移旧账号家目录或迁移目录里的文件和目录")
     legacy_homes = [l.get("home", "").rstrip("/") for l in server.legacy if l.get("home")]
     in_home = (cand or {}).get("in_home") or any(source.startswith(h + "/") for h in legacy_homes)
