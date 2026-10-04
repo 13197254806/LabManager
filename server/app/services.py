@@ -111,7 +111,7 @@ def gpu_alerts(gpu: GPU, holders: set[str]) -> list[str]:
 
 
 def desired_state(db: Session, server: Server) -> list[dict]:
-    """某台服务器“此刻应该是什么样”：所有已绑定账号的成员 + 今天谁能登录、能用哪些卡。
+    """某台服务器“此刻应该是什么样”：所有已绑定账号的成员 + 今天谁有预约、能用哪些卡。
     Agent 用 uid 识别账号，所以平台上改了用户名，Agent 会把同一个账号改名，而不是新建。"""
     d = today()
     active: dict[int, set[int]] = {}
@@ -244,7 +244,7 @@ def send_welcome(db: Session, open_id: str, force: bool = False, raise_errors: b
 def notify_booked(db: Session, user_id: int, res_ids: list[int], action: str):
     user = db.get(User, user_id)
     rs = [db.get(Reservation, i) for i in res_ids]
-    md = describe(rs) + "\n\n预约当天 00:00 起可以 SSH 登录对应服务器，到期后次日 00:00 关闭登录权限。"
+    md = describe(rs) + "\n\n预约当天 00:00 起，登录对应服务器后会自动只看到你预约的显卡；到期后次日 00:00 这些卡不再分配给你。"
     if any(r.auto_renew for r in rs):
         md += "\n已开启**自动续约**：到期前会自动延长，并通知你。"
     feishu.send_card(
@@ -282,7 +282,7 @@ def send_expiry_reminders(db: Session) -> int:
         user = items[0].user
         if not claim_notice(db, f"expire:{d}:{user.id}"):
             continue
-        md = describe(items) + "\n\n以上预约将在 **今晚 24:00** 到期，之后无法再 SSH 登录（已在运行的程序不会被强制结束）。\n需要继续使用请在平台上延长预约。"
+        md = describe(items) + "\n\n以上预约将在 **今晚 24:00** 到期，之后这些卡不再分配给你（登录和文件不受影响，已在运行的程序也不会被强制结束）。\n需要继续使用请在平台上延长预约。"
         feishu.send_card(user.open_id, feishu.build_card("⏰ GPU 预约今天到期", md, [("去续约", settings.base_url)], template="orange"))
         sent += 1
     return sent

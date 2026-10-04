@@ -240,7 +240,15 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 .steps span.clickable { cursor: pointer; }
 .steps span.clickable:hover { background: var(--line-strong); }
 
-.toast { position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); z-index: 100; background: var(--text); color: var(--panel); padding: 8px 16px; border-radius: 8px; max-width: calc(100vw - 32px); white-space: pre-wrap; }
+/* 气泡（提示条 / 悬停提示）：和界面的白色面板统一，popover 在浏览器顶层，弹窗也盖不住 */
+.toast, .tip {
+  position: fixed; margin: 0; border: 1px solid var(--line-strong); border-radius: var(--radius);
+  background: var(--panel); color: var(--text); box-shadow: 0 6px 24px rgba(0, 0, 0, .14);
+  font-size: 13px; line-height: 1.6; white-space: pre-wrap; overflow-wrap: anywhere; overflow: visible;
+}
+.toast { inset: auto auto 24px 50%; transform: translateX(-50%); padding: 10px 16px; max-width: min(560px, calc(100vw - 32px)); }
+.tip { inset: auto; padding: 8px 12px; max-width: min(360px, calc(100vw - 16px)); }
+.toast[hidden], .tip[hidden] { display: none; }
 
 @media (max-width: 720px) {
   .topbar { gap: 8px; padding: 0 12px; }

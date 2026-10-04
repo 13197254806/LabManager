@@ -15,8 +15,8 @@ if [ "$1" = "--export" ]; then
     exit 0
 fi
 
-if [ -r "$file" ]; then
-    gpus="$(cat "$file")"
+gpus="$(cat "$file" 2>/dev/null)"
+if [ -n "$gpus" ]; then
     echo "你（$user）今天在 $(hostname) 上预约的显卡：$gpus"
     if [ "${CUDA_VISIBLE_DEVICES:-}" != "$gpus" ]; then
         echo "当前 shell 的 CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<未设置>}，与预约不一致。"
@@ -26,5 +26,5 @@ if [ -r "$file" ]; then
         nvidia-smi --id="$gpus" --query-gpu=index,name,utilization.gpu,memory.used,memory.total --format=csv
     fi
 else
-    echo "你（$user）今天在 $(hostname) 上没有显卡预约。请到实验室平台预约。"
+    echo "你（$user）今天在 $(hostname) 上没有显卡预约，所以看不到任何显卡。需要用卡请到实验室平台预约。"
 fi

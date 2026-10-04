@@ -63,14 +63,70 @@ async function api(path, opts = {}) {
   return data;
 }
 
+// ---------------- 气泡：提示条（toast）和悬停提示（tooltip） ----------------
+// 都用 popover 放进浏览器的顶层，不会被弹窗（dialog）遮住；样式统一在 style.css 的 .toast / .tip。
+const hasPopover = typeof HTMLElement !== "undefined" && "showPopover" in HTMLElement.prototype;
+if (!hasPopover) { $("#toast").hidden = true; $("#tip").hidden = true; }
+function popShow(el) { if (hasPopover) { if (!el.matches(":popover-open")) el.showPopover(); } else el.hidden = false; }
+function popHide(el) { if (hasPopover) { if (el.matches(":popover-open")) el.hidePopover(); } else el.hidden = true; }
+
+// 提示条：鼠标放在上面时不消失，移开后再停留一会儿才消失
 let toastTimer;
-function toast(msg) {
-  const el = $("#toast");
-  el.textContent = msg;
-  el.classList.remove("hidden");
+const toastEl = () => $("#toast");
+function toastHideLater(ms) {
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => el.classList.add("hidden"), 3500);
+  toastTimer = setTimeout(() => popHide(toastEl()), ms);
 }
+function toast(msg) {
+  const el = toastEl();
+  el.textContent = msg;
+  popShow(el);
+  toastHideLater(3500);
+}
+toastEl().addEventListener("mouseenter", () => clearTimeout(toastTimer));
+toastEl().addEventListener("mouseleave", () => toastHideLater(1000));
+
+// 悬停提示：接管页面里所有 title="..."（浏览器自带的提示丑、不能统一风格、鼠标一动就消失）。
+// 鼠标从元素移到提示上时提示保持显示，移出提示后才消失。
+const tipEl = $("#tip");
+let tipAnchor = null, tipShowTimer, tipHideTimer;
+function tipHideNow() { clearTimeout(tipShowTimer); clearTimeout(tipHideTimer); tipAnchor = null; popHide(tipEl); }
+function tipHideLater(ms = 250) { clearTimeout(tipShowTimer); clearTimeout(tipHideTimer); tipHideTimer = setTimeout(tipHideNow, ms); }
+function tipShow(anchor) {
+  const text = anchor.dataset.tip;
+  if (!text) return;
+  tipAnchor = anchor;
+  tipEl.textContent = text;
+  popShow(tipEl);
+  const r = anchor.getBoundingClientRect(), t = tipEl.getBoundingClientRect();
+  const left = Math.min(Math.max(8, r.left + r.width / 2 - t.width / 2), window.innerWidth - t.width - 8);
+  // 默认显示在元素下方，放不下就放上方；中间留 0 间隙，鼠标能直接移上去
+  const top = r.bottom + t.height + 8 <= window.innerHeight ? r.bottom : Math.max(8, r.top - t.height);
+  tipEl.style.left = `${left}px`;
+  tipEl.style.top = `${top}px`;
+}
+document.addEventListener("mouseover", (e) => {
+  if (tipEl.contains(e.target)) return;
+  const a = e.target.closest?.("[title], [data-tip]");
+  if (!a) return tipAnchor && tipHideLater();
+  if (a.hasAttribute("title")) {  // 把 title 摘下来，避免浏览器再弹自带的提示
+    if (a.title) a.dataset.tip = a.title;
+    a.removeAttribute("title");
+  }
+  if (!a.dataset.tip) return;
+  if (a === tipAnchor) return clearTimeout(tipHideTimer);
+  clearTimeout(tipHideTimer); clearTimeout(tipShowTimer);
+  tipShowTimer = setTimeout(() => tipShow(a), tipAnchor ? 0 : 300);
+});
+document.addEventListener("mouseout", (e) => {
+  if (e.relatedTarget && (tipEl.contains(e.relatedTarget) || e.target.closest?.("[data-tip]")?.contains(e.relatedTarget))) return;
+  if (e.target.closest?.("[data-tip]") || tipEl.contains(e.target)) tipHideLater();
+});
+tipEl.addEventListener("mouseenter", () => clearTimeout(tipHideTimer));
+tipEl.addEventListener("mouseleave", () => tipHideLater());
+document.addEventListener("pointerdown", (e) => { if (!tipEl.contains(e.target)) tipHideNow(); }, true);
+window.addEventListener("scroll", tipHideNow, true);
+setInterval(() => { if (tipAnchor && !tipAnchor.isConnected) tipHideNow(); }, 1000);  // 日历刷新后元素被替换
 
 // 复制文本，成功返回 true。navigator.clipboard 只在 HTTPS / localhost 可用；平台用 http+IP 访问时退回 execCommand。
 // 弹窗（showModal）打开时页面其余部分是 inert 的，临时输入框必须放进弹窗里才能聚焦、选中，否则复制会静默失败。
@@ -158,7 +214,7 @@ function renderBanner() {
   if (!me.has_password && !me.key_count) missing.push("设置登录密码或添加 SSH 公钥");
   const el = $("#setup-banner");
   if (!missing.length) return el.classList.add("hidden");
-  el.innerHTML = `你还需要 <b>${missing.join("、")}</b>，否则预约后也无法登录服务器。<a href="#" id="banner-go">去设置 →</a>`;
+  el.innerHTML = `你还需要 <b>${missing.join("、")}</b>，否则无法登录服务器。<a href="#" id="banner-go">去设置 →</a>`;
   el.classList.remove("hidden");
   $("#banner-go").onclick = (e) => { e.preventDefault(); openOnboarding(true); };
 }
@@ -329,7 +385,7 @@ bookingForm.addEventListener("submit", async (e) => {
   try {
     await api("/api/reservations", { method: "POST", body });
     bookingDialog.close();
-    toast("预约成功，开始当天即可登录服务器");
+    toast("预约成功，预约当天起可以使用所选显卡");
     loadCalendar();
   } catch (err) {
     $("#booking-error").textContent = err.message;
@@ -389,7 +445,7 @@ $("#detail-release").onclick = async () => {
   const r = detailRes;
   const msg = r.start_date >= state.config.today
     ? "确定取消这条预约吗？"
-    : "确定立即释放吗？今天起这张卡会让给别人，你将无法再登录该服务器（若没有其他预约）。";
+    : "确定立即释放吗？今天起这张卡会让给别人，你将不能再使用它（若没有其他预约）。";
   if (!confirm(msg)) return;
   try {
     await api(`/api/reservations/${r.id}`, { method: "DELETE" });
@@ -444,7 +500,7 @@ async function renderAccount() {
     }).join("");
     box.innerHTML = `<div class="group" style="margin-bottom:8px">用户名 <code>${esc(me.linux_username)}</code>　UID <code>${me.uid}</code>
         <button class="btn small" id="rename-btn">修改</button></div>
-      <p class="muted small">只有在<b>当天有预约</b>的服务器上才能登录（需在实验室内网）。登录后执行 <code>lab-gpus</code> 查看分配给你的显卡。</p>
+      <p class="muted small">随时都可以登录服务器（需在实验室内网），不需要预约；预约只决定你能用哪些显卡。登录后执行 <code>lab-gpus</code> 查看今天分配给你的显卡。</p>
       ${servers.length ? `<div class="table-wrap"><table><tr><th>服务器</th><th>登录命令</th><th>账号状态</th></tr>${rows}</table></div>` : `<p class="muted">暂无服务器</p>`}`;
     $("#rename-btn").onclick = openRename;
   }
@@ -890,7 +946,7 @@ function renderOnboarding() {
     const running = state.migrations.some((t) => ["queued", "running", "pending_approval"].includes(t.status));
     body.innerHTML = `<h2>设置完成 🎉</h2>
       <ul>
-        <li>在「GPU 日历」上点空白格子即可预约显卡，预约当天就能登录对应服务器。</li>
+        <li>在「GPU 日历」上点空白格子即可预约显卡，预约当天起可以使用所选显卡（没有预约也能登录服务器、迁移文件，只是看不到显卡）。</li>
         <li>登录命令：<code>ssh ${esc(me.linux_username)}@服务器地址</code>${me.has_password ? "，输入你刚设置的密码" : ""}。</li>
         ${running ? "<li>文件迁移正在后台进行，进度见顶部的 📦。</li>" : ""}
       </ul>`;

@@ -6,8 +6,9 @@
   2. 取回“这台机器此刻应该是什么状态”，在本机对齐：
      - 为每位成员维护 Linux 账号（按 uid 识别：平台上改了用户名，这里就改名并移动家目录）
      - 同步登录密码（平台只下发 sha512-crypt 哈希）和 SSH 公钥
-     - 今天有预约的成员加入 lab-active 组（sshd 只允许该组登录），否则移出
-     - 写 /etc/lab-gpu/<用户名>，登录时据此设置 CUDA_VISIBLE_DEVICES
+     - 今天有预约的成员加入 lab-active 组（只用来让管理员看出谁今天有预约，登录不受它限制），否则移出
+     - 写 /etc/lab-gpu/<用户名>，登录时据此设置 CUDA_VISIBLE_DEVICES：预约了哪些卡就能看到哪些，
+       没有预约则文件为空、看不到任何卡。登录本身不需要预约
      - 被停用的成员：锁定账号，保留家目录
   3. 在后台线程执行成员发起的文件迁移，每隔几秒上报进度：
      - 旧共享账号（如 ubuntu）家目录里的项目目录：移动或复制给成员
@@ -49,7 +50,7 @@ VERSION = "0.3.0"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
-GROUP_ACTIVE = "lab-active"   # 今天允许 SSH 登录的账号
+GROUP_ACTIVE = "lab-active"   # 今天有 GPU 预约的账号（仅供查看，sshd 不依赖它）
 GROUP_ADMIN = "lab-admin"     # 本机管理员和 root（由安装脚本设置，Agent 不改动）
 PROTECTED_GROUPS = ("sudo", "admin", "wheel", GROUP_ADMIN)
 KEYS_DIR = "/etc/ssh/lab_authorized_keys"
@@ -571,10 +572,8 @@ class Agent(object):
             self.set_group(local, GROUP_ACTIVE, active)
             gpu_path = os.path.join(GPU_DIR, local)
             gpus = [str(int(i)) for i in u.get("gpus") or []]
-            if active and gpus:
-                self.write_file(gpu_path, ",".join(gpus) + "\n")
-            else:
-                self.remove_file(gpu_path)
+            # 没有预约：写空文件，登录后 CUDA_VISIBLE_DEVICES 为空、看不到任何卡（登录和文件迁移不受影响）
+            self.write_file(gpu_path, (",".join(gpus) + "\n") if active and gpus else "")
 
         for name in group_members(GROUP_MANAGED) - wanted:
             self.disable_user(name, shadow)
@@ -603,7 +602,7 @@ class Agent(object):
     def once(self):
         state = self.sync()
         users = state.get("users") or []
-        log.info("同步成功：%s %s，成员 %d 人，今日可登录 %d 人", state.get("server"), state.get("date"),
+        log.info("同步成功：%s %s，成员 %d 人，今日有 GPU 预约 %d 人", state.get("server"), state.get("date"),
                  len(users), sum(1 for u in users if u.get("active")))
         self.reconcile(users)
         if self.accounts != getattr(self, "_sent_accounts", None):
