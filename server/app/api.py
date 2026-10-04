@@ -76,9 +76,10 @@ def server_out(s: Server, holders: dict[int, set[str]] | None = None, admin: boo
         "id": s.id,
         "name": s.name,
         "host": s.host,
-        "description": s.description,
         "online": s.online,
         "last_seen_at": s.last_seen_at.isoformat() if s.last_seen_at else None,
+        # 整机资源（CPU 利用率 %、内存 / 磁盘用量 MiB），离线时不显示
+        "system": s.sysinfo if s.online else None,
         "gpus": [
             {
                 "id": g.id,
@@ -95,7 +96,8 @@ def server_out(s: Server, holders: dict[int, set[str]] | None = None, admin: boo
         ],
     }
     if admin:
-        d.update(hostname=s.hostname, agent_version=s.agent_version, token=s.token)
+        d.update(hostname=s.hostname, agent_version=s.agent_version, token=s.token,
+                 legacy_users=[l.get("user") for l in s.legacy if l.get("user")])
     return d
 
 
@@ -113,6 +115,7 @@ def public_config(db: Session = Depends(get_db)):
         "max_reservation_days": settings.max_reservation_days,
         "max_advance_days": settings.max_advance_days,
         "max_gpu_sharers": settings.max_gpu_sharers,
+        "refresh_interval": services.get_int_setting(db, "refresh_interval_seconds"),
         "require_reservation_to_login": services.get_setting(db, "require_reservation_to_login") == "1",
         "today": today().isoformat(),
     }
@@ -351,9 +354,13 @@ def create_reservation(
             for g in gpus
         ]
         db.add_all(rs)
+        db.flush()
+        # 和自己已有的预约首尾相接时合并成一条（底层数据也合并，不只是日历上显示）
+        merged = {}
+        for g in gpus:
+            merged.update(services.merge_reservations(db, owner.id, g.id))
         db.commit()
-    for r in rs:
-        db.refresh(r)
+        rs = [db.get(Reservation, merged.get(r.id, r.id)) for r in rs]
     bg.add_task(_bg, services.notify_booked, owner.id, [r.id for r in rs], "预约成功")
     return [res_out(r, user) for r in rs]
 
@@ -394,7 +401,10 @@ def update_reservation(
             r.note = body.note.strip()
         if body.auto_renew is not None:
             r.auto_renew = body.auto_renew
+        db.flush()
+        rid_after = services.merge_reservations(db, r.user_id, r.gpu_id).get(r.id, r.id)
         db.commit()
+        r = db.get(Reservation, rid_after)
     if changed:
         bg.add_task(_bg, services.notify_booked, r.user_id, [r.id], "预约已修改")
     return res_out(r, user)
@@ -478,7 +488,6 @@ def admin_tunnel(_: User = Depends(admin_user)):
 class ServerIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     host: str = Field(default="", max_length=128)
-    description: str = Field(default="", max_length=256)
 
 
 @router.post("/admin/servers")
@@ -486,7 +495,7 @@ def admin_create_server(body: ServerIn, _: User = Depends(admin_user), db: Sessi
     if db.scalar(select(Server).where(Server.name == body.name.strip())):
         raise HTTPException(400, "服务器名称已存在")
     token, token_hash = services.new_agent_token()
-    s = Server(name=body.name.strip(), host=body.host.strip(), description=body.description.strip(), token=token, token_hash=token_hash)
+    s = Server(name=body.name.strip(), host=body.host.strip(), token=token, token_hash=token_hash)
     db.add(s)
     db.commit()
     return {"server": server_out(s, admin=True), "token": token}
@@ -497,7 +506,7 @@ def admin_update_server(sid: int, body: ServerIn, _: User = Depends(admin_user),
     s = db.get(Server, sid)
     if not s:
         raise HTTPException(404)
-    s.name, s.host, s.description = body.name.strip(), body.host.strip(), body.description.strip()
+    s.name, s.host = body.name.strip(), body.host.strip()
     db.commit()
     return server_out(s, admin=True)
 
@@ -526,10 +535,12 @@ def admin_delete_server(sid: int, _: User = Depends(admin_user), db: Session = D
 SETTING_KEYS = (
     "welcome_title", "welcome_markdown", "welcome_links",
     "auto_renew_before_hours", "auto_renew_days", "migration_requires_approval", "require_reservation_to_login",
+    "refresh_interval_seconds",
 )
 INT_SETTINGS = {
     "auto_renew_before_hours": (1, 24 * 14), "auto_renew_days": (1, 60),
     "migration_requires_approval": (0, 1), "require_reservation_to_login": (0, 1),
+    "refresh_interval_seconds": (3, 600),
 }
 
 
@@ -794,6 +805,7 @@ class AgentReport(BaseModel):
     candidates: list[CandidateIn] | None = None
     legacy: list[dict] | None = None
     home_free: int | None = None
+    system: dict | None = None
 
 
 def _agent_server(db: Session, authorization: str) -> Server:
@@ -849,6 +861,9 @@ def agent_sync(
         server.legacy_json = json.dumps(body.legacy[:5], ensure_ascii=False)
     if body.home_free is not None:
         server.home_free = body.home_free
+    if body.system is not None:
+        keys = ("cpu", "mem_used", "mem_total", "disk_used", "disk_total")
+        server.sysinfo_json = json.dumps({k: body.system[k] for k in keys if isinstance(body.system.get(k), (int, float))})
     db.commit()
 
     users = services.desired_state(db, server)
@@ -866,6 +881,8 @@ def agent_sync(
         "users": users,
         # 开启时：当天没有预约这台服务器显卡的成员不能 SSH 登录；关闭时所有成员都能登录
         "require_reservation_to_login": services.get_setting(db, "require_reservation_to_login") == "1",
+        # Agent 按这个间隔（秒）同步 / 上报，和网页刷新间隔一致
+        "interval": services.get_int_setting(db, "refresh_interval_seconds"),
         "migrations": services.pending_migrations(db, server),
     }
 

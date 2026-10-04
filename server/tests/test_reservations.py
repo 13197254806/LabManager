@@ -15,6 +15,12 @@ def book(client, gids, start, end, **kw):
     return client.post("/api/reservations", json={"gpu_ids": gids, "start_date": str(start), "end_date": str(end), **kw})
 
 
+def _renew_window(db, hours="24"):
+    """默认是到期前 4 小时（最后一天 20:00）才续约；这些用例不关心时间点，把窗口放宽到一整天。"""
+    services.set_setting(db, "auto_renew_before_hours", hours)
+    db.commit()
+
+
 def test_booking_and_conflict(admin, alice, server):
     g = gpu_ids(alice)
     d = today()
@@ -86,6 +92,7 @@ def test_other_user_cannot_edit(admin, alice, server):
 
 
 def test_auto_renew_single_step(admin, alice, server, db):
+    _renew_window(db)
     g = gpu_ids(alice)
     d = today()
     rid = book(alice, g[:1], d, d, auto_renew=True).json()[0]["id"]
@@ -113,6 +120,7 @@ def test_auto_renew_catches_up_in_one_pass(admin, alice, server, db):
 
 
 def test_auto_renew_stops_at_conflict(admin, alice, server, db):
+    _renew_window(db)
     g = gpu_ids(alice)
     d = today()
     rid = book(alice, g[:1], d, d, auto_renew=True).json()[0]["id"]
@@ -124,6 +132,7 @@ def test_auto_renew_stops_at_conflict(admin, alice, server, db):
 
 
 def test_auto_renew_disabled_when_nothing_can_be_renewed(admin, alice, server, db):
+    _renew_window(db)
     g = gpu_ids(alice)
     d = today()
     rid = book(alice, g[:1], d, d, auto_renew=True).json()[0]["id"]
@@ -193,6 +202,7 @@ def test_editing_a_shared_reservation_is_checked_against_others(admin, alice, se
 
 def test_auto_renew_with_shared_gpu(admin, alice, server, db, monkeypatch):
     """自动续约只在共用人数已满的日子前停下，没满就照常续。"""
+    _renew_window(db)
     from app.config import settings
 
     monkeypatch.setattr(settings, "max_gpu_sharers", 2)
@@ -223,3 +233,89 @@ def test_config_and_login_switch(admin, alice, server):
     assert admin.put("/api/admin/settings", json={"require_reservation_to_login": "0"}).status_code == 200
     assert sync()["require_reservation_to_login"] is False
     assert admin.put("/api/admin/settings", json={"require_reservation_to_login": "2"}).status_code == 400
+
+
+# ---------------- 自动续约时间点 / 合并连续预约 ----------------
+
+
+def test_auto_renew_default_is_4_hours_before_end(alice, server, db, monkeypatch):
+    """默认：预约最后一天的 20:00（距到期 4 小时）才续约 7 天；之前不动。"""
+    assert services.get_int_setting(db, "auto_renew_before_hours") == 4
+    assert services.get_int_setting(db, "auto_renew_days") == 7
+    g = gpu_ids(alice)
+    d = today()
+    rid = book(alice, g[:1], d, d, auto_renew=True).json()[0]["id"]
+    at = lambda h, m=0: datetime.combine(d, datetime.min.time()) + timedelta(hours=h, minutes=m)
+    monkeypatch.setattr(services, "now", lambda: at(19, 59))
+    assert services.run_auto_renew(db) == 0
+    monkeypatch.setattr(services, "now", lambda: at(20))
+    assert services.run_auto_renew(db) == 1
+    db.expire_all()
+    assert db.get(Reservation, rid).end_date == d + timedelta(days=7)
+
+
+def test_adjacent_reservations_are_merged_in_database(alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    a = book(alice, g[:1], d, d + timedelta(days=1), note="第一段").json()[0]["id"]
+    b = book(alice, g[:1], d + timedelta(days=2), d + timedelta(days=3), note="第二段", auto_renew=True).json()
+    assert len(b) == 1 and b[0]["id"] == a  # 返回的是合并后的那条
+    db.expire_all()
+    rows = db.query(Reservation).filter(Reservation.status == "active").all()
+    assert len(rows) == 1
+    r = rows[0]
+    # 两条都还没结束：备注和自动续约以连续预约里第一条没结束的（即第一段）为准
+    assert (r.start_date, r.end_date) == (d, d + timedelta(days=3))
+    assert r.note == "第一段" and r.auto_renew is False
+    # 不相邻的不合并；另一张卡不合并
+    assert book(alice, g[:1], d + timedelta(days=5), d + timedelta(days=5)).status_code == 200
+    assert book(alice, g[1:], d, d).status_code == 200
+    db.expire_all()
+    assert db.query(Reservation).filter(Reservation.status == "active").count() == 3
+
+
+def test_merge_uses_first_unfinished_reservation_attributes(alice, server, db):
+    """连续预约里已经结束的部分不决定备注 / 自动续约。"""
+    g = gpu_ids(alice)
+    d = today()
+    old = book(alice, g[:1], d, d, note="已结束那段", auto_renew=True).json()[0]["id"]
+    _backdate(db, old, -3, -1)  # 昨天结束
+    cur = book(alice, g[:1], d, d + timedelta(days=1), note="当前这段").json()[0]["id"]  # 与昨天相接 → 合并
+    db.expire_all()
+    rows = db.query(Reservation).filter(Reservation.status == "active").all()
+    assert len(rows) == 1
+    assert rows[0].start_date == d - timedelta(days=3) and rows[0].end_date == d + timedelta(days=1)
+    assert rows[0].note == "当前这段" and rows[0].auto_renew is False
+
+
+def test_startup_merge_of_existing_data(alice, server, db):
+    """历史数据里首尾相接的预约，启动时会被合并（可重复执行）。"""
+    g = gpu_ids(alice)
+    d = today()
+    from app.models import User
+
+    alice_id = db.query(User).filter(User.linux_username == "alice").one().id
+    for s, e, note in [(0, 1, "a"), (2, 2, "b"), (4, 5, "c")]:
+        db.add(Reservation(user_id=alice_id, gpu_id=g[0], start_date=d + timedelta(days=s), end_date=d + timedelta(days=e), note=note))
+    db.commit()
+    assert len(services.merge_reservations(db)) == 1
+    db.commit()
+    rows = sorted(db.query(Reservation).filter(Reservation.status == "active").all(), key=lambda r: r.start_date)
+    assert [(r.start_date, r.end_date) for r in rows] == [(d, d + timedelta(days=2)), (d + timedelta(days=4), d + timedelta(days=5))]
+    assert services.merge_reservations(db) == {}  # 幂等
+
+
+def test_refresh_interval_setting_and_system_report(admin, alice, server):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    assert alice.get("/api/config").json()["refresh_interval"] == 10
+    assert admin.put("/api/admin/settings", json={"refresh_interval_seconds": "2"}).status_code == 400
+    assert admin.put("/api/admin/settings", json={"refresh_interval_seconds": "30"}).status_code == 200
+    _, token = server
+    body = {"gpus": [], "system": {"cpu": 12.5, "mem_used": 1000, "mem_total": 4000, "disk_used": 10, "disk_total": 100, "evil": 1}}
+    r = TestClient(app).post("/api/agent/sync", json=body, headers=agent_headers(token)).json()
+    assert r["interval"] == 30
+    srv = admin.get("/api/admin/servers").json()[0]
+    assert srv["system"] == {"cpu": 12.5, "mem_used": 1000, "mem_total": 4000, "disk_used": 10, "disk_total": 100}
+    assert "description" not in srv

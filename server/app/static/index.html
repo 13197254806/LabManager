@@ -3,14 +3,16 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>实验室平台</title>
+  <title>实验室 GPU 管理平台</title>
+  <link rel="icon" type="image/png" href="/static/logo.png">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
   <div id="login" class="login hidden">
     <div class="login-card">
-      <h1 id="login-title">实验室平台</h1>
-      <p class="muted">GPU 预约 · 服务器账号 · 实验室助手</p>
+      <img class="login-logo" src="/static/logo.png" alt="">
+      <h1 id="login-title">实验室</h1>
+      <p class="muted">GPU 管理平台 · 预约 · 服务器账号 · 实验室助手</p>
       <a class="btn primary big" href="/auth/login" id="feishu-login">使用飞书登录</a>
       <p class="muted small hidden" id="login-unavailable">管理员还没有配置飞书应用，暂时无法登录。<br>（在服务器 deploy/.env 里填写 FEISHU_APP_ID / FEISHU_APP_SECRET）</p>
       <form id="dev-login" class="dev-login hidden">
@@ -23,7 +25,10 @@
 
   <div id="app" class="hidden">
     <header class="topbar">
-      <div class="brand" id="brand">实验室平台</div>
+      <div class="brand" id="brand">
+        <img class="brand-logo" src="/static/logo.png" alt="">
+        <div class="brand-text"><span id="brand-name"></span><small>GPU 管理平台</small></div>
+      </div>
       <nav class="tabs">
         <button data-tab="calendar" class="active">GPU 日历</button>
         <button data-tab="account">我的账号</button>
@@ -112,14 +117,11 @@ cat ~/.ssh/id_ed25519.pub   # 复制输出的整行</pre>
       <section id="tab-admin" class="tab hidden">
         <div class="cards">
           <div class="card wide">
-            <h2>GPU 服务器</h2>
+            <div class="card-head">
+              <h2>GPU 服务器</h2>
+              <button class="btn primary" id="add-server">+ 添加服务器</button>
+            </div>
             <div id="admin-servers"></div>
-            <form id="server-form" class="row-form">
-              <input name="name" placeholder="名称，如 gpu-01（中文/空格也行）" required maxlength="64">
-              <input name="host" placeholder="内网地址，如 10.0.0.11" maxlength="128">
-              <input name="description" placeholder="备注，如 8×A100 80G" maxlength="256">
-              <button class="btn primary">添加服务器</button>
-            </form>
           </div>
           <div class="card wide">
             <h2>成员</h2>
@@ -136,6 +138,8 @@ cat ~/.ssh/id_ed25519.pub   # 复制输出的整行</pre>
                 <label>自动续约：到期前多少小时触发<input type="number" name="auto_renew_before_hours" min="1" max="336" required></label>
                 <label>每次自动延长多少天<input type="number" name="auto_renew_days" min="1" max="60" required></label>
               </div>
+              <label>页面自动刷新间隔（秒）<input type="number" name="refresh_interval_seconds" min="3" max="600" required>
+                <span class="muted small">GPU 日历和管理页按这个间隔自动刷新；GPU 服务器上的 Agent 也按它上报，数据才会同步变新。</span></label>
               <label class="check"><input type="checkbox" name="migration_requires_approval"> 成员发起的文件迁移需要管理员确认</label>
               <label class="check" style="align-items:flex-start"><input type="checkbox" name="require_reservation_to_login" style="margin-top:3px"> <span>仅允许当天预约了该服务器显卡的成员 SSH 登录<br><span class="muted small">打开：没有预约这台服务器的成员不能登录它；关闭：所有成员都能登录，预约只决定能用哪些显卡。账号 / 密码设置和文件迁移不受影响，约 1 分钟内生效。</span></span></label>
               <div><button class="btn primary">保存规则</button></div>
@@ -201,6 +205,21 @@ cat ~/.ssh/id_ed25519.pub   # 复制输出的整行</pre>
         <span class="spacer"></span>
         <button class="btn" value="cancel" formnovalidate>关闭</button>
         <button class="btn primary editable" value="ok">保存修改</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 添加 / 编辑服务器 -->
+  <dialog id="server-dialog">
+    <form id="server-form" class="stack" method="dialog">
+      <h2 id="server-dialog-title">添加服务器</h2>
+      <label>名称<input name="name" placeholder="如 gpu-01（中文 / 空格也行）" required maxlength="64"></label>
+      <label>内网地址<input name="host" placeholder="如 192.168.247.150" maxlength="128"></label>
+      <p class="muted small">内网地址要和 GPU 服务器在校园网里的 IP 一致，公网服务器靠它经 WebVPN 建立隧道。</p>
+      <p class="error" id="server-error"></p>
+      <div class="actions">
+        <button class="btn" value="cancel" formnovalidate>取消</button>
+        <button class="btn primary" id="server-submit" value="ok">保存</button>
       </div>
     </form>
   </dialog>

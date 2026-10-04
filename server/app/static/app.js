@@ -244,16 +244,35 @@ function writeCollapsed() {
 state.collapsed = readCollapsed();
 
 let calSeq = 0;
-async function loadCalendar() {
+async function loadCalendar(quiet = false) {
   const seq = ++calSeq;
   try {
     const data = await api(`/api/calendar?start=${addDays(monthStart(), -45)}&days=${monthDays() + 90}`);
     if (seq !== calSeq) return;  // 期间又切换了月份，丢弃这次结果
+    // 自动刷新时数据没变就不重画：避免悬浮提示、鼠标位置被无谓地打断
+    const sig = monthStart() + JSON.stringify(data);
     state.cal = data;
+    if (sig === state.calSig && $("#calendar").firstChild) return;
+    state.calSig = sig;
     renderCalendar();
   } catch (err) {
-    toast(err.message);
+    if (!quiet) toast(err.message);
   }
+}
+
+// 服务器行：整机 CPU 利用率、内存和磁盘占用（GB）。Agent 离线时只显示最近一次上报时间
+function serverStats(s, seen) {
+  const y = s.system;
+  if (!s.online || !y || y.cpu == null) {
+    return `<div class="srv-stats"><span style="color:var(--warn)">${s.online ? "等待 Agent 上报" : esc(seen)}</span></div>`;
+  }
+  const item = (label, pct, text, tip) =>
+    `<span class="srv-stat ${pct >= 90 ? "hot" : ""}" title="${esc(tip)}">${label}<span class="meter"><i style="width:${Math.min(100, pct)}%"></i></span><b>${text}</b></span>`;
+  const pct = (u, t) => (t ? (u * 100) / t : 0);
+  const parts = [item("CPU", y.cpu, `${Math.round(y.cpu)}%`, `CPU 利用率 ${y.cpu}%（各核平均）`)];
+  if (y.mem_total) parts.push(item("内存", pct(y.mem_used, y.mem_total), `${gb(y.mem_used)}/${gb(y.mem_total)} GB`, `内存已用 ${gb(y.mem_used)} GB，共 ${gb(y.mem_total)} GB（${Math.round(pct(y.mem_used, y.mem_total))}%）`));
+  if (y.disk_total) parts.push(item("磁盘", pct(y.disk_used, y.disk_total), `${gb(y.disk_used)}/${gb(y.disk_total)} GB`, `家目录所在磁盘已用 ${gb(y.disk_used)} GB，共 ${gb(y.disk_total)} GB（${Math.round(pct(y.disk_used, y.disk_total))}%）`));
+  return `<div class="srv-stats">${parts.join("")}</div>`;
 }
 
 const ALERT_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M12 3.2 1.8 20.8h20.4L12 3.2z" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.6v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="17.6" r="1.15" fill="currentColor"/></svg>`;
@@ -344,7 +363,7 @@ function renderCalendar() {
           <span class="srv-title"><span class="chev" aria-hidden="true"></span><span class="dot ${s.online ? "on" : ""}"></span><span class="server-name">${esc(s.name)}</span>
             ${alertGpus.length ? `<span class="alert-ico" title="${esc(`${alertGpus.length} 张卡上有未预约的用户正在使用`)}">${ALERT_ICON}</span>` : ""}</span>
           <span class="muted small srv-host">${esc(s.host)}</span></div>
-        <div class="cal-track"><div class="muted small srv-desc">${esc(s.description)}${s.online ? "" : `　<span style="color:var(--warn)">${esc(seen)}</span>`}</div></div></div>
+        <div class="cal-track">${serverStats(s, seen)}</div></div>
       <div class="srv-body"><div class="srv-inner">`;
     if (!s.gpus.length) {
       html += `<div class="cal-row cal-gpu"><div class="cal-label muted small">等待 Agent 上报显卡…</div><div class="cal-track"></div></div>`;
@@ -412,6 +431,7 @@ function toggleServer(head) {
   const group = head.closest(".cal-server-group");
   const collapsed = group.classList.toggle("collapsed");
   head.setAttribute("aria-expanded", String(!collapsed));
+  state.lastToggle = Date.now();  // 折叠动画进行中不要自动刷新（重画会打断动画）
   if (collapsed) state.collapsed.add(id); else state.collapsed.delete(id);
   writeCollapsed();
 }
@@ -1075,7 +1095,7 @@ function renderOnboarding() {
   skip.classList.toggle("hidden", step === 0 || step === 3);
   next.textContent = step === 3 ? "开始使用" : "下一步";
   if (step === 0) {
-    body.innerHTML = `<h2>欢迎使用${esc(state.config.lab_name)}平台 👋</h2>
+    body.innerHTML = `<h2>欢迎使用${esc(state.config.lab_name)} GPU 管理平台 👋</h2>
       <p>以后大家用<b>自己的账号</b>登录 GPU 服务器，不再共用 ubuntu 等公共账号。先给自己起一个 Linux 用户名（所有服务器通用，之后也可以修改）：</p>
       <input id="ob-username" placeholder="小写字母开头，如 zhangsan" value="${esc(me.linux_username || "")}">`;
   } else if (step === 1) {
@@ -1148,17 +1168,38 @@ $("#onboard-later").onclick = () => {
 
 // ---------------- 管理 ----------------
 
+// 管理页里会随时间变化的几张表（服务器、成员、迁移记录）；设置类表单只在打开页面时填一次，
+// 自动刷新不碰它们，免得覆盖管理员正在输入的内容
+async function fetchAdminTables() {
+  const [servers, users, migrations, tunnel] = await Promise.all([
+    api("/api/admin/servers"), api("/api/admin/users"), api("/api/admin/migrations"),
+    api("/api/admin/tunnel").catch(() => ({ enabled: false })),
+  ]);
+  return { servers, users, migrations, tunnel };
+}
+function renderAdminTables({ servers, users, migrations, tunnel }) {
+  state.users = users;
+  state.tunnelEnabled = tunnel.enabled;
+  renderAdminServers(servers, tunnel);
+  renderAdminUsers(users);
+  $("#admin-migrations").innerHTML = migrations.length ? migrations.map((t) => taskHtml(t, true)).join("") : `<p class="muted">暂无迁移记录。</p>`;
+}
+let adminSig = "";
+async function refreshAdmin() {
+  try {
+    const t = await fetchAdminTables();
+    const sig = JSON.stringify(t);
+    if (sig === adminSig) return;  // 没有变化就不重画
+    adminSig = sig;
+    renderAdminTables(t);
+  } catch { /* 自动刷新失败时保持现状，下次再试 */ }
+}
+
 async function loadAdmin() {
   try {
-    const [servers, users, settings, migrations, tunnel] = await Promise.all([
-      api("/api/admin/servers"), api("/api/admin/users"), api("/api/admin/settings"), api("/api/admin/migrations"),
-      api("/api/admin/tunnel").catch(() => ({ enabled: false })),
-    ]);
-    state.users = users;
-    state.tunnelEnabled = tunnel.enabled;
-    renderAdminServers(servers, tunnel);
-    renderAdminUsers(users);
-    $("#admin-migrations").innerHTML = migrations.length ? migrations.map((t) => taskHtml(t, true)).join("") : `<p class="muted">暂无迁移记录。</p>`;
+    const [tables, settings] = await Promise.all([fetchAdminTables(), api("/api/admin/settings")]);
+    adminSig = JSON.stringify(tables);
+    renderAdminTables(tables);
     const f = $("#welcome-form");
     for (const k of ["welcome_title", "welcome_markdown", "welcome_links"]) f[k].value = settings[k];
     const r = $("#rules-form");
@@ -1166,6 +1207,7 @@ async function loadAdmin() {
     r.auto_renew_days.value = settings.auto_renew_days;
     r.migration_requires_approval.checked = settings.migration_requires_approval === "1";
     r.require_reservation_to_login.checked = settings.require_reservation_to_login === "1";
+    r.refresh_interval_seconds.value = settings.refresh_interval_seconds;
   } catch (err) {
     toast(err.message);
   }
@@ -1173,14 +1215,14 @@ async function loadAdmin() {
 
 function renderAdminServers(servers, tunnel) {
   $("#admin-servers").innerHTML = webvpnLine(tunnel) + (servers.length
-    ? `<div class="table-wrap"><table><tr><th>名称</th><th>地址</th><th>状态</th><th>显卡</th><th>Agent</th><th>校园网隧道</th><th>注册命令</th><th></th></tr>
+    ? `<div class="table-wrap"><table><tr><th>名称</th><th>地址</th><th>状态</th><th>显卡</th><th>公共用户名<span class="help" title="迁移前大家共用的 Linux 账号（如 ubuntu）。成员可以把这个账号里的配置、conda 环境和项目文件，迁移到自己的个人账号下。">?</span></th><th>校园网隧道</th><th>注册命令</th><th></th></tr>
       ${servers.map((s) => {
         const models = [...new Set(s.gpus.map((g) => g.name.replace(/^NVIDIA /, "")))].join(", ");
-        return `<tr><td><b>${esc(s.name)}</b><div class="muted small">${esc(s.description)}</div></td><td>${esc(s.host)}</td>
-          <td><span class="dot ${s.online ? "on" : ""}" style="display:inline-block"></span> ${s.online ? "在线" : "离线"}
+        return `<tr><td><b>${esc(s.name)}</b></td><td>${esc(s.host)}</td>
+          <td title="${esc(`主机名 ${s.hostname || "-"}\nAgent 版本 ${s.agent_version || "-"}`)}"><span class="dot ${s.online ? "on" : ""}" style="display:inline-block"></span> ${s.online ? "在线" : "离线"}
             <div class="muted small">${s.last_seen_at ? s.last_seen_at.replace("T", " ") : "从未连接"}</div></td>
           <td>${s.gpus.length} × ${esc(models || "-")}</td>
-          <td class="small">${esc(s.hostname || "-")}<div class="muted">${esc(s.agent_version || "")}</div></td>
+          <td>${s.legacy_users?.length ? s.legacy_users.map((u) => `<code>${esc(u)}</code>`).join(" ") : `<span class="muted">-</span>`}</td>
           <td class="small">${tunnelCell(s.tunnel)}</td>
           <td class="small">${registerCell(s)}</td>
           <td style="white-space:nowrap">
@@ -1192,11 +1234,7 @@ function renderAdminServers(servers, tunnel) {
     : `<p class="muted">还没有服务器。添加后这里会给出一条注册命令，照着执行即可把 GPU 接入平台。</p>`);
   $$("[data-install-server]").forEach((b) => (b.onclick = () => showInstallDialog(servers.find((x) => x.id === Number(b.dataset.installServer)))));
   $$("[data-edit-server]").forEach((b) => (b.onclick = async () => {
-    const s = servers.find((x) => x.id === Number(b.dataset.editServer));
-    const name = prompt("名称", s.name); if (name === null) return;
-    const host = prompt("内网地址", s.host); if (host === null) return;
-    const description = prompt("备注", s.description); if (description === null) return;
-    try { await api(`/api/admin/servers/${s.id}`, { method: "PATCH", body: { name, host, description } }); loadAdmin(); } catch (err) { toast(err.message); }
+    openServerDialog(servers.find((x) => x.id === Number(b.dataset.editServer)));
   }));
   $$("[data-token-server]").forEach((b) => (b.onclick = async () => {
     if (!confirm("重置后旧 Token 立即失效。重置完会在这一行的「注册命令」里给出新命令，重新执行一次即可（会自动覆盖安装，账号和数据不受影响）。继续？")) return;
@@ -1272,16 +1310,40 @@ function showInstallDialog(s) {
 }
 $("#install-close").onclick = () => $("#install-dialog").close();
 
-$("#server-form").addEventListener("submit", async (e) => {
+// 添加 / 编辑服务器（同一个弹窗）
+const serverDialog = $("#server-dialog");
+const serverForm = $("#server-form");
+let editingServer = null;
+function openServerDialog(s) {
+  editingServer = s || null;
+  serverForm.reset();
+  $("#server-error").textContent = "";
+  $("#server-dialog-title").textContent = s ? "编辑服务器" : "添加服务器";
+  if (s) { serverForm.name.value = s.name; serverForm.host.value = s.host; }
+  serverDialog.showModal();
+}
+$("#add-server").onclick = () => openServerDialog(null);
+serverForm.addEventListener("submit", async (e) => {
+  if (e.submitter?.value === "cancel") return;
   e.preventDefault();
-  const f = e.target;
+  const body = { name: serverForm.name.value.trim(), host: serverForm.host.value.trim() };
+  $("#server-submit").disabled = true;
   try {
-    await api("/api/admin/servers", { method: "POST", body: { name: f.name.value.trim(), host: f.host.value, description: f.description.value } });
-    f.reset();
-    toast("已添加，请点该行「注册命令」里的「查看命令」");
-    loadAdmin();
+    const r = editingServer
+      ? await api(`/api/admin/servers/${editingServer.id}`, { method: "PATCH", body })
+      : await api("/api/admin/servers", { method: "POST", body });
+    serverDialog.close();
+    await loadAdmin();
+    if (!editingServer) {  // 新添加的服务器：直接弹出它的注册命令
+      toast("已添加，请在新服务器上执行注册命令");
+      showInstallDialog(r.server);
+    } else {
+      toast("已保存");
+    }
   } catch (err) {
-    toast(err.message);
+    $("#server-error").textContent = err.message;
+  } finally {
+    $("#server-submit").disabled = false;
   }
 });
 
@@ -1319,6 +1381,7 @@ $("#rules-form").addEventListener("submit", async (e) => {
         auto_renew_days: f.auto_renew_days.value,
         migration_requires_approval: f.migration_requires_approval.checked ? "1" : "0",
         require_reservation_to_login: f.require_reservation_to_login.checked ? "1" : "0",
+        refresh_interval_seconds: f.refresh_interval_seconds.value,
       },
     });
     state.config = await api("/api/config");
@@ -1346,8 +1409,8 @@ $("#welcome-test").onclick = async () => {
 
 async function boot() {
   state.config = await api("/api/config");
-  document.title = `${state.config.lab_name}平台`;
-  $("#brand").textContent = $("#login-title").textContent = document.title;
+  document.title = `${state.config.lab_name} GPU 管理平台`;
+  $("#brand-name").textContent = $("#login-title").textContent = state.config.lab_name;
   { const [y, m] = state.config.today.split("-").map(Number); state.month = { y, m }; }
   try {
     state.me = await api("/api/me", { allow401: true });
@@ -1376,10 +1439,25 @@ async function boot() {
   let later = false;
   try { later = sessionStorage.getItem("lab-onboard-later") === "1"; } catch {}
   if (!state.me.onboarded && !later) openOnboarding();
-  // 每分钟刷新一次日历（GPU 利用率由 Agent 每分钟上报）
-  setInterval(() => {
-    if (!document.hidden && activeTab() === "calendar" && !$("dialog[open]")) loadCalendar();
-  }, 60000);
+  scheduleRefresh();
+}
+
+// “GPU 日历”和“管理”两页按管理员设置的间隔自动刷新数据（不是刷新网页）。
+// 页面在后台、有弹窗打开、正在看悬浮提示、折叠动画进行中时跳过这一轮。
+state.lastToggle = 0;
+function scheduleRefresh() {
+  const secs = Math.max(3, Number(state.config?.refresh_interval) || 10);
+  setTimeout(async () => {
+    try {
+      if (!document.hidden && !$("dialog[open]") && !tipAnchor && Date.now() - state.lastToggle > 600) {
+        const tab = activeTab();
+        if (tab === "calendar") await loadCalendar(true);
+        else if (tab === "admin") await refreshAdmin();
+      }
+    } finally {
+      scheduleRefresh();
+    }
+  }, secs * 1000);
 }
 
 boot();

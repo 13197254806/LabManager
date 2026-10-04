@@ -47,7 +47,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -166,6 +166,9 @@ class Agent(object):
         self.candidates = None     # 后台扫描的可迁移文件 / 目录
         self.legacy = None         # 旧共享账号里可复制的配置和 conda 环境
         self.home_free = None
+        self.interval = max(5, int(cfg.get("interval", 60)))  # 同步间隔（秒）；平台设置了刷新间隔就以平台为准
+        self._cpu_prev = None
+        self._last_summary = None
         self.migration = None      # 正在执行的 Migration
         self.finished = set()      # 本进程内已经执行完的迁移 id
         self.pending_migrations = False
@@ -395,8 +398,54 @@ class Agent(object):
 
     # ---------------- 与云端同步 ----------------
 
+    # ---------------- 整机资源（CPU / 内存 / 磁盘），显示在日历的服务器行 ----------------
+
+    @staticmethod
+    def _cpu_times():
+        with open("/proc/stat") as f:
+            parts = [int(x) for x in f.readline().split()[1:]]
+        idle = parts[3] + (parts[4] if len(parts) > 4 else 0)  # idle + iowait
+        return sum(parts), idle
+
+    def collect_system(self):
+        """CPU 利用率（%，与上次采样之间的平均值）、内存 / 磁盘用量（MiB）。磁盘取家目录所在的分区。
+        任何一项读不到就省略，不影响其他上报。"""
+        out = {}
+        try:
+            cur = self._cpu_times()
+            if self._cpu_prev is None:  # 第一次没有上一次的采样：隔一小会儿现采一次
+                self._cpu_prev = cur
+                time.sleep(0.3)
+                cur = self._cpu_times()
+            dt, di = cur[0] - self._cpu_prev[0], cur[1] - self._cpu_prev[1]
+            self._cpu_prev = cur
+            if dt > 0:
+                out["cpu"] = round(max(0.0, min(100.0, 100.0 * (dt - di) / dt)), 1)
+        except (IOError, OSError, ValueError, IndexError):
+            pass
+        try:
+            mem = {}
+            with open("/proc/meminfo") as f:
+                for line in f:
+                    k, _, v = line.partition(":")
+                    if k in ("MemTotal", "MemAvailable"):
+                        mem[k] = int(v.split()[0]) // 1024  # kB → MiB
+            if "MemTotal" in mem and "MemAvailable" in mem:
+                out["mem_total"] = mem["MemTotal"]
+                out["mem_used"] = mem["MemTotal"] - mem["MemAvailable"]
+        except (IOError, OSError, ValueError):
+            pass
+        try:
+            st = os.statvfs(self.home_base)
+            out["disk_total"] = st.f_blocks * st.f_frsize // (1024 * 1024)
+            out["disk_used"] = (st.f_blocks - st.f_bfree) * st.f_frsize // (1024 * 1024)
+        except OSError:
+            pass
+        return out
+
     def sync(self):
-        payload = {"hostname": socket.gethostname(), "agent_version": VERSION, "gpus": self.collect_gpus()}
+        payload = {"hostname": socket.gethostname(), "agent_version": VERSION, "gpus": self.collect_gpus(),
+                   "system": self.collect_system()}
         if self.accounts is not None:
             payload["accounts"] = self.accounts
             self._sent_accounts = self.accounts
@@ -605,9 +654,16 @@ class Agent(object):
         state = self.sync()
         users = state.get("users") or []
         self.require_reservation = bool(state.get("require_reservation_to_login"))
-        log.info("同步成功：%s %s，成员 %d 人，今日有 GPU 预约 %d 人，%s", state.get("server"), state.get("date"),
-                 len(users), sum(1 for u in users if u.get("active")),
-                 "仅预约者可登录" if self.require_reservation else "所有成员可登录")
+        try:  # 平台上设置的刷新间隔（秒）
+            self.interval = max(5, min(600, int(state.get("interval"))))
+        except (TypeError, ValueError):
+            pass
+        summary = "%s %s，成员 %d 人，今日有 GPU 预约 %d 人，%s" % (
+            state.get("server"), state.get("date"), len(users), sum(1 for u in users if u.get("active")),
+            "仅预约者可登录" if self.require_reservation else "所有成员可登录")
+        # 同步很频繁：内容有变化才写 INFO，否则只写 DEBUG，避免日志被刷屏
+        log.log(logging.INFO if summary != self._last_summary else logging.DEBUG, "同步成功：%s", summary)
+        self._last_summary = summary
         self.reconcile(users)
         if self.accounts != getattr(self, "_sent_accounts", None):
             self.sync()  # 账号状态有变化（新建、改名、出错），立即上报给平台
@@ -1349,7 +1405,6 @@ def main():
             agent.migration.join()
         return
     threading.Thread(target=agent.candidate_loop, daemon=True, name="candidates").start()
-    interval = int(cfg.get("interval", 60))
     while True:
         try:
             agent.once()
@@ -1359,7 +1414,7 @@ def main():
             log.error("同步失败（保持当前状态）: %s", e)
         # 迁移进行中时缩短间隔，让新任务和状态更快生效
         busy = (agent.migration and agent.migration.is_alive()) or agent.pending_migrations
-        agent.wake.wait(10 if busy else interval)
+        agent.wake.wait(min(10, agent.interval) if busy else agent.interval)
         agent.wake.clear()
 
 

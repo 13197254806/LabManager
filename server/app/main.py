@@ -8,9 +8,9 @@ from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
-from . import api, auth, jobs
+from . import api, auth, jobs, services
 from .config import settings
-from .db import init_db
+from .db import SessionLocal, init_db
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
@@ -23,6 +23,12 @@ AGENT_FILES = {"install.sh", "lab_agent.py", "lab-gpus", "lab-gpu.sh", "lab_migr
 @asynccontextmanager
 async def lifespan(_app):
     init_db()
+    # 把历史上遗留的、首尾相接的同一人同一张卡的预约合并成一条（已合并的数据不受影响，可重复执行）
+    with SessionLocal() as db, services.booking_lock:
+        merged = services.merge_reservations(db)
+        db.commit()
+    if merged:
+        logging.getLogger("startup").info("已合并 %d 条首尾相接的预约", len(merged))
     jobs.start()  # 自动续约、到期提醒
     yield
 

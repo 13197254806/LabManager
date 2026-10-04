@@ -104,6 +104,43 @@ def overlapping(db: Session, start: date, end: date, gpu_ids=None, server_id=Non
     return list(db.scalars(q).unique())
 
 
+def merge_reservations(db: Session, user_id: int | None = None, gpu_id: int | None = None) -> dict[int, int]:
+    """把同一个人在同一张卡上首尾相接（或重叠）的有效预约合并成一条，不提交事务。
+    保留最早的那条，开始日期取最早、结束日期取最晚；用途备注和自动续约以这段连续预约里
+    第一条还没结束的预约为准（都已结束则沿用最早那条）。返回 {被合并删除的预约 id: 保留的预约 id}。"""
+    q = select(Reservation).where(Reservation.status == "active").order_by(
+        Reservation.user_id, Reservation.gpu_id, Reservation.start_date, Reservation.id
+    )
+    if user_id is not None:
+        q = q.where(Reservation.user_id == user_id)
+    if gpu_id is not None:
+        q = q.where(Reservation.gpu_id == gpu_id)
+    d = today()
+    chains: list[list[Reservation]] = []
+    last_end: date | None = None
+    for r in db.scalars(q):
+        prev = chains[-1][0] if chains else None
+        if prev and (prev.user_id, prev.gpu_id) == (r.user_id, r.gpu_id) and r.start_date <= last_end + timedelta(days=1):
+            chains[-1].append(r)
+            last_end = max(last_end, r.end_date)
+        else:
+            chains.append([r])
+            last_end = r.end_date
+    mapping: dict[int, int] = {}
+    for chain in chains:
+        if len(chain) < 2:
+            continue
+        keep = chain[0]
+        head = next((r for r in chain if r.end_date >= d), keep)
+        keep.end_date = max(r.end_date for r in chain)
+        keep.note, keep.auto_renew = head.note, head.auto_renew
+        keep.renew_count = sum(r.renew_count for r in chain)
+        for r in chain[1:]:
+            mapping[r.id] = keep.id
+            db.delete(r)
+    return mapping
+
+
 def first_blocked_day(others: list[Reservation], user_id: int, start: date, end: date):
     """在 start~end 里找第一个不能再加这位用户预约的日子。others 是这张卡上别的预约。
     返回 (日期, 原因, 当天已有预约的人数) 或 None。原因：mine=这个人在这张卡上已有预约，full=共用人数已满。"""
@@ -205,12 +242,15 @@ DEFAULT_SETTINGS = {
     # 每行一个按钮：按钮文字|链接。{base_url} 会被替换为平台地址
     "welcome_links": "打开实验室平台|{base_url}\n新人指南|https://example.feishu.cn/wiki/xxxx",
     # 自动续约：到期前多少小时触发，每次延长多少天
-    "auto_renew_before_hours": "24",
+    # 默认：预约结束当天 20:00（距到期 4 小时）自动续约 7 天
+    "auto_renew_before_hours": "4",
     "auto_renew_days": "7",
     # 成员发起的文件迁移是否需要管理员确认（1/0）
     "migration_requires_approval": "0",
     # 1：没有预约某台服务器显卡的成员，当天不能 SSH 登录这台服务器；0：所有成员都能登录，预约只决定能用哪些卡
     "require_reservation_to_login": "0",
+    # 网页自动刷新（GPU 日历、管理页）的间隔；Agent 也按这个间隔上报，让页面上的数据足够新（秒）
+    "refresh_interval_seconds": "10",
 }
 
 
@@ -339,6 +379,7 @@ def run_auto_renew(db: Session) -> int:
     renewed: dict[int, list[tuple[Reservation, date, date]]] = {}
     failed: dict[int, list[tuple[Reservation, str]]] = {}
     step = timedelta(days=days)
+    touched: set[tuple[int, int]] = set()
     with booking_lock:
         candidates = [r for r in overlapping(db, d, d + timedelta(days=3650)) if r.auto_renew and r.user.enabled]
         for r in candidates:
@@ -362,10 +403,14 @@ def run_auto_renew(db: Session) -> int:
                 r.end_date = new_end
                 r.renew_count += 1
                 renewed.setdefault(r.user_id, []).append((r, old_end, wanted))
+                touched.add((r.user_id, r.gpu_id))
             else:
                 # 一天都续不了：关闭自动续约，避免每分钟重试，并通知本人
                 r.auto_renew = False
                 failed.setdefault(r.user_id, []).append((r, reason))
+        db.flush()
+        for uid, gid in touched:  # 续到与自己的另一条预约首尾相接时，合并成一条
+            merge_reservations(db, uid, gid)
         db.commit()
 
     for items in renewed.values():

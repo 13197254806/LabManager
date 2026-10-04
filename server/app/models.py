@@ -68,6 +68,8 @@ class Server(Base):
     # 旧共享账号（如 ubuntu）里可复制给成员的配置、软件、conda 环境
     legacy_json: Mapped[str] = mapped_column(Text, default="[]")
     home_free: Mapped[int | None] = mapped_column(BigInteger)
+    # Agent 上报的整机资源：{"cpu": 12.3, "mem_used": MiB, "mem_total": MiB, "disk_used": MiB, "disk_total": MiB}
+    sysinfo_json: Mapped[str] = mapped_column(Text, default="{}")
 
     gpus: Mapped[list["GPU"]] = relationship(
         back_populates="server", cascade="all, delete-orphan", order_by="GPU.index"
@@ -90,6 +92,10 @@ class Server(Base):
     @property
     def legacy(self) -> list[dict]:
         return _loads(self.legacy_json, [])
+
+    @property
+    def sysinfo(self) -> dict:
+        return _loads(self.sysinfo_json, {})
 
 
 def _loads(text, default):
