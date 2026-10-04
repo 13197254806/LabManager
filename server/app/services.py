@@ -178,7 +178,8 @@ def check_capacity(db: Session, gpu_ids: list[int], start: date, end: date, user
 
 def book_long_term(db: Session, owner: User, gpus: list[GPU], note: str = "") -> list[int]:
     """长期使用：从今天起预约一个周期（auto_renew_days 天），之后到期前自动延长。
-    今天已经预约了的部分不重复预约，只补上没有预约的日子，并和后面自己已有的预约合并成一条。
+    这张卡上自己已有的临时预约被覆盖：今天起的部分取消，已经开始的预约只保留今天之前的历史；
+    自己已有的长期使用预约保持不变，只补上没有预约的日子，最后合并成一条。
     某张卡今天就满员（或被自己占着以外的原因无法预约）时抛 ValueError，整个操作不生效。返回预约 id。"""
     d = today()
     cycle = min(max(1, get_int_setting(db, "auto_renew_days")), settings.max_reservation_days)
@@ -186,6 +187,13 @@ def book_long_term(db: Session, owner: User, gpus: list[GPU], note: str = "") ->
     ids: list[int] = []
     problems = []
     for g in gpus:
+        for r in overlapping(db, d, d + timedelta(days=3650), gpu_ids=[g.id]):
+            if r.user_id == owner.id and not r.auto_renew:
+                if r.start_date >= d:
+                    r.status = "cancelled"
+                else:
+                    r.end_date = d - timedelta(days=1)
+        db.flush()
         rs = overlapping(db, d, d + timedelta(days=3650), gpu_ids=[g.id])
         mine = [r for r in rs if r.user_id == owner.id]
         others = [r for r in rs if r.user_id != owner.id]

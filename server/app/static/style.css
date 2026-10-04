@@ -227,8 +227,10 @@ th { color: var(--muted); font-weight: 500; white-space: nowrap; }
 dialog { border: 1px solid var(--line); border-radius: 12px; padding: 20px; width: min(480px, calc(100vw - 32px)); background: var(--panel); color: var(--text); }
 dialog::backdrop { background: rgba(0, 0, 0, .35); }
 .gpu-picks { display: flex; flex-wrap: wrap; gap: 6px; }
-.gpu-picks label { flex-direction: row; align-items: center; gap: 6px; border: 1px solid var(--line-strong); border-radius: 6px; padding: 4px 10px; cursor: pointer; color: var(--text); }
-.gpu-picks input { width: auto; min-height: 0; }
+.gpu-picks { gap: 4px 12px; }
+.gpu-picks label { flex-direction: row; align-items: center; gap: 6px; min-width: 88px; padding: 3px 0; cursor: pointer; color: var(--text); font-size: 14px; }
+.gpu-picks input { width: auto; min-height: 0; margin: 0; padding: 0; border: 0; background: none; }
+.gpu-picks input:focus:not(:focus-visible) { outline: none; }
 .gpu-picks label.busy { opacity: .45; cursor: not-allowed; }
 .copyable { user-select: all; }
 .install-cmd { margin: 0; padding: 10px 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 6px; font-size: 12.5px; white-space: pre-wrap; word-break: break-all; user-select: all; }
@@ -337,11 +339,6 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 .proc-table tr > :last-child { padding-right: 0; }
 .proc-empty { color: var(--muted); font-size: 12px; }
 
-/* 临时使用 / 长期使用 二选一 */
-.mode-pick { display: flex; gap: 8px; }
-.mode-pick label { flex: 1; display: flex; flex-direction: row; align-items: center; justify-content: center; gap: 6px; padding: 8px 10px; border: 1px solid var(--line-strong); border-radius: var(--radius); cursor: pointer; background: var(--panel); }
-.mode-pick label:has(input:checked) { border-color: var(--primary); color: var(--primary); background: var(--hover); font-weight: 600; }
-.mode-pick input { margin: 0; width: auto; min-height: 0; }
 /* 磁盘占用情况（悬停显示各用户占用） */
 .srv-stat .disk-detail { color: var(--primary); cursor: pointer; margin-left: -2px; }
 .srv-stat .disk-detail:hover { text-decoration: underline; }

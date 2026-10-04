@@ -54,9 +54,6 @@
             <button class="btn" id="next" title="下个月">›</button>
             <span class="range" id="range-label"></span>
           </div>
-          <div class="group">
-            <button class="btn primary" id="new-booking">+ 预约 GPU</button>
-          </div>
         </div>
         <p class="hint" id="cal-hint"></p>
         <div class="cal-wrap"><div id="calendar" class="calendar"></div></div>
@@ -165,15 +162,17 @@
         <div class="label">显卡（可多选）</div>
         <div id="booking-gpus" class="gpu-picks"></div>
       </div>
-      <div class="mode-pick" role="radiogroup" aria-label="使用方式">
-        <label><input type="radio" name="mode" value="temp" checked> 临时使用</label>
-        <label><input type="radio" name="mode" value="long"> 长期使用</label>
+      <div>
+        <div class="label">使用方式</div>
+        <div class="gpu-picks" role="radiogroup" aria-label="使用方式">
+          <label><input type="radio" name="mode" value="temp" checked> 临时使用</label>
+          <label><input type="radio" name="mode" value="long"> 长期使用</label>
+        </div>
       </div>
       <div class="two temp-only">
         <label>开始日期（含）<input type="date" name="start_date" required></label>
         <label>结束日期（含）<input type="date" name="end_date" required></label>
       </div>
-      <p class="muted small long-only hidden" id="long-rule"></p>
       <label class="admin-only hidden">替谁预约（管理员）<select name="user_id" id="booking-user"></select></label>
       <label>用途备注<input name="note" maxlength="256" placeholder="例如：xx 论文消融实验"></label>
       <p class="muted small" id="booking-rule"></p>

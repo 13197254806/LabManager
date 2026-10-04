@@ -356,7 +356,7 @@ function renderCalendar() {
   $("#month-btn").textContent = `${MONTH_CN[state.month.m - 1]}月`;
   const full = (iso) => { const [y, m, d] = iso.split("-").map(Number); return `${y}年${m}月${d}日`; };
   $("#range-label").textContent = `${full(vStart)} – ${full(vEnd)}`;
-  $("#cal-hint").textContent = `点击日历格子或右上角的「+ 预约 GPU」按钮进行预约；同一张卡每天最多 ${state.config.max_gpu_sharers} 人使用。`;
+  $("#cal-hint").textContent = `点击日历格子进行预约；同一张卡每天最多 ${state.config.max_gpu_sharers} 人使用。`;
   const root = $("#calendar");
   root.style.setProperty("--days", days);
   state.bars = [];
@@ -462,7 +462,6 @@ function toggleServer(head) {
 
 $("#prev").onclick = () => setMonth(state.month.y, state.month.m - 1);
 $("#next").onclick = () => setMonth(state.month.y, state.month.m + 1);
-$("#new-booking").onclick = () => openBooking({});
 
 // 年 / 月选择
 const monthDialog = $("#month-dialog");
@@ -502,6 +501,7 @@ function gpuLoad(start, end) {
   const out = {};
   for (const r of state.cal?.reservations || []) {
     if (r.start_date > end || r.end_date < start) continue;
+    if (bookingMode() === "long" && r.user_id === owner) continue;  // 长期使用会覆盖自己在这张卡上的临时预约
     const o = (out[r.gpu_id] ||= { rs: [], names: new Set(), mine: false, peak: 0 });
     o.rs.push(r);
     o.names.add(r.user_name);
@@ -529,7 +529,9 @@ function syncBookingMode() {
   $$(".temp-only", bookingForm).forEach((el) => el.classList.toggle("hidden", long));
   $$(".long-only", bookingForm).forEach((el) => el.classList.toggle("hidden", !long));
   bookingForm.start_date.required = bookingForm.end_date.required = !long;
-  $("#long-rule").textContent = `从今天起预约 ${Math.min(state.config.auto_renew_days, state.config.max_reservation_days)} 天，并在到期前 ${state.config.auto_renew_before_hours} 小时自动再延长 ${state.config.auto_renew_days} 天，直到你改为临时使用或释放。今天已经预约的部分不会重复预约，后面几天已有的预约会合并成一条。`;
+  $("#booking-rule").textContent = long
+    ? `规则：从今天起预约 ${Math.min(state.config.auto_renew_days, state.config.max_reservation_days)} 天，并在到期前 ${state.config.auto_renew_before_hours} 小时自动再延长 ${state.config.auto_renew_days} 天，直到你改为临时使用或释放。这些显卡上你已有的临时预约会被覆盖（今天之前的使用记录保留）。同一张卡同一天最多 ${state.config.max_gpu_sharers} 人共用。`
+    : `规则：单次最长 ${state.config.max_reservation_days} 天，最多提前 ${state.config.max_advance_days} 天；按自然日计算，开始当天 00:00 起可使用所选显卡，结束日 24:00 收回。同一张卡同一天最多 ${state.config.max_gpu_sharers} 人共用。`;
 }
 const reloadPicks = () => renderGpuPicks($$("input[name=gpu]:checked", bookingForm).map((i) => Number(i.value)));
 $$("input[name=mode]", bookingForm).forEach((i) => (i.onchange = () => { syncBookingMode(); reloadPicks(); }));
@@ -563,7 +565,6 @@ async function openBooking({ serverId, gpuId, date }) {
   bookingForm.start_date.min = bookingForm.end_date.min = state.me.is_admin ? "" : today;
   $$(".renew-rule").forEach((el) => (el.textContent = renewRuleText()));
   syncBookingMode();
-  $("#booking-rule").textContent = `规则：单次最长 ${state.config.max_reservation_days} 天，最多提前 ${state.config.max_advance_days} 天；按自然日计算，开始当天 00:00 起可使用所选显卡，结束日 24:00 收回。同一张卡同一天最多 ${state.config.max_gpu_sharers} 人共用。`;
   if (state.me.is_admin) {
     const users = state.users.length ? state.users : (state.users = await api("/api/admin/users"));
     $("#booking-user").innerHTML = users

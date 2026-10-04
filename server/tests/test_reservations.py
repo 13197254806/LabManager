@@ -326,7 +326,7 @@ def test_refresh_interval_setting_and_system_report(admin, alice, server):
 def test_long_term_booking_starts_today_and_merges(alice, server, db):
     g = gpu_ids(alice)
     d = today()
-    # 后面紧挨着已有一条临时预约：长期使用要和它合并成一条
+    # 后面已有的临时预约会被长期使用覆盖掉（取消），不会合并进来
     assert book(alice, g[:1], d + timedelta(days=7), d + timedelta(days=9), note="后面的").status_code == 200
     r = alice.post("/api/reservations", json={"gpu_ids": g[:1], "long_term": True})
     assert r.status_code == 200, r.text
@@ -334,7 +334,7 @@ def test_long_term_booking_starts_today_and_merges(alice, server, db):
     db.expire_all()
     rows = db.query(Reservation).filter(Reservation.status == "active").all()
     assert len(rows) == 1
-    assert (rows[0].start_date, rows[0].end_date) == (d, d + timedelta(days=9))
+    assert (rows[0].start_date, rows[0].end_date) == (d, d + timedelta(days=6))
     assert rows[0].auto_renew is True
     # 今天已经预约了：再选长期使用只是把它标成长期使用，不会重复预约
     r2 = alice.post("/api/reservations", json={"gpu_ids": g[:1], "long_term": True})
@@ -374,3 +374,19 @@ def test_started_reservation_start_date_is_locked(admin, alice, server):
         assert r.status_code == 400
     # 结束日期仍可修改
     assert alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d + timedelta(days=4))}).status_code == 200
+
+
+def test_long_term_overrides_temp_but_keeps_history(alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    uid = alice.get("/api/me").json()["id"]
+    # 已经进行了 3 天、还要持续到 5 天后的临时预约（直接写库，网页上不能预约过去的日期）
+    db.add(Reservation(user_id=uid, gpu_id=g[0], start_date=d - timedelta(days=3), end_date=d + timedelta(days=5)))
+    db.commit()
+    assert alice.post("/api/reservations", json={"gpu_ids": g[:1], "long_term": True}).status_code == 200
+    db.expire_all()
+    rows = db.query(Reservation).filter(Reservation.status == "active").all()
+    # 今天之前的历史保留，今天起变成长期使用，合并成一条
+    assert len(rows) == 1
+    assert (rows[0].start_date, rows[0].end_date) == (d - timedelta(days=3), d + timedelta(days=6))
+    assert rows[0].auto_renew is True
