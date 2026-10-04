@@ -47,7 +47,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.4.0"
+VERSION = "0.5.0"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -259,12 +259,18 @@ class Agent(object):
                 if len(r) < 3 or r[0] not in by_uuid:
                     continue
                 pid = self._num(r[1])
-                user = "?"
+                user, path = "?", ""
                 try:
                     user = pwd.getpwuid(os.stat("/proc/%d" % pid).st_uid).pw_name
                 except (OSError, KeyError, TypeError):
                     pass
-                by_uuid[r[0]]["processes"].append({"pid": pid, "user": user, "used_memory": self._num(r[2])})
+                for link in ("cwd", "exe"):  # 进程所在的目录；读不到时退回可执行文件路径
+                    try:
+                        path = os.readlink("/proc/%d/%s" % (pid, link))
+                        break
+                    except (OSError, TypeError):
+                        pass
+                by_uuid[r[0]]["processes"].append({"pid": pid, "user": user, "used_memory": self._num(r[2]), "path": path[:512]})
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
             log.warning("查询 GPU 进程失败: %s", e)
         return gpus

@@ -61,6 +61,7 @@ def res_out(r: Reservation, me: User) -> dict:
         "gpu_index": r.gpu.index,
         "user_id": r.user_id,
         "user_name": r.user.name,
+        "user_avatar": r.user.avatar_url,
         "linux_username": r.user.linux_username,
         "start_date": r.start_date.isoformat(),
         "end_date": r.end_date.isoformat(),
@@ -768,6 +769,7 @@ class ProcessIn(BaseModel):
     pid: int
     user: str = ""
     used_memory: int | None = None
+    path: str = ""
 
 
 class GPUIn(BaseModel):

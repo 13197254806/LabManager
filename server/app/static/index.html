@@ -36,7 +36,7 @@
       </nav>
       <button class="mig-chip hidden" id="mig-chip" title="查看文件迁移进度"></button>
       <div class="me">
-        <span id="me-name"></span>
+        <span id="me-avatar-box"></span><span id="me-name"></span>
         <button class="btn ghost small" id="logout">退出</button>
       </div>
     </header>
@@ -58,14 +58,14 @@
             <button class="btn primary" id="new-booking">+ 预约 GPU</button>
           </div>
         </div>
-        <p class="hint">点击空白格子预约，点击色块查看 / 续约 / 释放；点击服务器名可折叠。同一张卡同一天最多可多人共用，并排显示；浅色表示已过去的预约；🔁 表示已开启自动续约。行首显示实时利用率与显存（各服务器每分钟上报）。</p>
+        <p class="hint">点击空白格子预约，点击色块查看 / 续约 / 释放；点击服务器名可折叠。同一张卡同一天最多可多人共用，并排显示；浅色表示已过去的预约。行首显示实时利用率与显存，点「详情」查看占用该卡的进程。</p>
         <div class="cal-wrap"><div id="calendar" class="calendar"></div></div>
       </section>
 
       <!-- 我的账号 -->
       <section id="tab-account" class="tab hidden">
         <div class="cards">
-          <div class="card">
+          <div class="card span-2">
             <h2>服务器账号</h2>
             <div id="linux-account"></div>
           </div>
@@ -88,13 +88,6 @@
             <form id="key-form" class="stack">
               <input name="title" placeholder="备注（可选），例如：我的笔记本" maxlength="64">
               <textarea name="public_key" rows="3" placeholder="粘贴公钥，例如 ssh-ed25519 AAAAC3Nza... you@laptop" required></textarea>
-              <details class="small">
-                <summary>如何生成 / 查看公钥？</summary>
-                <p>在你自己的电脑终端里执行（Windows 用 PowerShell）：</p>
-                <pre>ssh-keygen -t ed25519      # 一路回车即可，已有可跳过
-cat ~/.ssh/id_ed25519.pub   # 复制输出的整行</pre>
-                <p>⚠️ 只粘贴 <code>.pub</code> 结尾的<b>公钥</b>，私钥永远不要发给任何人。</p>
-              </details>
               <button class="btn primary">添加公钥</button>
             </form>
           </div>
@@ -131,7 +124,7 @@ cat ~/.ssh/id_ed25519.pub   # 复制输出的整行</pre>
             <h2>文件迁移记录</h2>
             <div id="admin-migrations"></div>
           </div>
-          <div class="card">
+          <div class="card span-2">
             <h2>预约与迁移规则</h2>
             <form id="rules-form" class="stack">
               <div class="two">
@@ -145,7 +138,7 @@ cat ~/.ssh/id_ed25519.pub   # 复制输出的整行</pre>
               <div><button class="btn primary">保存规则</button></div>
             </form>
           </div>
-          <div class="card">
+          <div class="card span-2">
             <h2>新人欢迎卡片</h2>
             <p class="muted small">新成员加入飞书企业或机器人所在的群时，机器人会私聊发送这张卡片。正文支持飞书 lark_md 语法。</p>
             <form id="welcome-form" class="stack">

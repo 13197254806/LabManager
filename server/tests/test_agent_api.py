@@ -83,3 +83,18 @@ def test_cannot_lock_self_out(alice):
     assert alice.post("/api/me/keys", json={"title": "", "public_key": key}).status_code == 200
     assert alice.delete("/api/me/password").status_code == 200
     assert alice.put("/api/me/password", json={"password": "short"}).status_code == 400
+
+
+def test_process_path_and_avatar_reported(admin, alice, server):
+    _, token = server
+    agent = TestClient(app)
+    body = {"gpus": [{"index": 0, "uuid": "u0", "name": "A", "memory_total": 10, "memory_used": 5, "utilization": 1,
+                      "processes": [{"pid": 7, "user": "alice", "used_memory": 3, "path": "/home/alice/proj"}]}]}
+    assert agent.post("/api/agent/sync", json=body, headers=agent_headers(token)).status_code == 200
+    gpu = admin.get("/api/calendar").json()["servers"][0]["gpus"][0]
+    assert gpu["processes"] == [{"pid": 7, "user": "alice", "used_memory": 3, "path": "/home/alice/proj"}]
+    gid = gpu["id"]
+    d = str(today())
+    assert alice.post("/api/reservations", json={"gpu_ids": [gid], "start_date": d, "end_date": d}).status_code == 200
+    res = admin.get("/api/calendar").json()["reservations"][0]
+    assert "user_avatar" in res

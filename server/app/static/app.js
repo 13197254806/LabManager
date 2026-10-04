@@ -26,6 +26,15 @@ function diffDays(a, b) {
 function hue(id) {
   return (id * 137.508) % 360;
 }
+
+// 头像：优先用飞书头像，没有或加载失败时用姓名首字
+function avatarHtml(name, url, id) {
+  const ch = esc((name || "?").trim().slice(0, 1).toUpperCase());
+  const style = `--h:${hue(id ?? 0)}`;
+  return url
+    ? `<img class="avatar" src="${esc(url)}" alt="" referrerpolicy="no-referrer" style="${style}" onerror="this.outerHTML='<span class=&quot;avatar&quot; style=&quot;${style}&quot;>${ch}</span>'">`
+    : `<span class="avatar" style="${style}">${ch}</span>`;
+}
 function gb(mib) {
   return mib == null ? "?" : (mib / 1024).toFixed(mib >= 10240 ? 0 : 1);
 }
@@ -92,11 +101,13 @@ const tipEl = $("#tip");
 let tipAnchor = null, tipShowTimer, tipHideTimer;
 function tipHideNow() { clearTimeout(tipShowTimer); clearTimeout(tipHideTimer); tipAnchor = null; popHide(tipEl); }
 function tipHideLater(ms = 250) { clearTimeout(tipShowTimer); clearTimeout(tipHideTimer); tipHideTimer = setTimeout(tipHideNow, ms); }
+const TIP_SEL = "[title], [data-tip], [data-tip-html]";
 function tipShow(anchor) {
-  const text = anchor.dataset.tip;
-  if (!text) return;
+  const text = anchor.dataset.tip, html = anchor.dataset.tipHtml;
+  if (!text && !html) return;
   tipAnchor = anchor;
-  tipEl.textContent = text;
+  tipEl.classList.toggle("rich", !!html);
+  if (html) tipEl.innerHTML = html; else tipEl.textContent = text;  // html 由调用方负责转义
   popShow(tipEl);
   const r = anchor.getBoundingClientRect(), t = tipEl.getBoundingClientRect();
   const left = Math.min(Math.max(8, r.left + r.width / 2 - t.width / 2), window.innerWidth - t.width - 8);
@@ -107,20 +118,20 @@ function tipShow(anchor) {
 }
 document.addEventListener("mouseover", (e) => {
   if (tipEl.contains(e.target)) return;
-  const a = e.target.closest?.("[title], [data-tip]");
+  const a = e.target.closest?.(TIP_SEL);
   if (!a) return tipAnchor && tipHideLater();
   if (a.hasAttribute("title")) {  // 把 title 摘下来，避免浏览器再弹自带的提示
     if (a.title) a.dataset.tip = a.title;
     a.removeAttribute("title");
   }
-  if (!a.dataset.tip) return;
+  if (!a.dataset.tip && !a.dataset.tipHtml) return;
   if (a === tipAnchor) return clearTimeout(tipHideTimer);
   clearTimeout(tipHideTimer); clearTimeout(tipShowTimer);
   tipShowTimer = setTimeout(() => tipShow(a), tipAnchor ? 0 : 300);
 });
 document.addEventListener("mouseout", (e) => {
-  if (e.relatedTarget && (tipEl.contains(e.relatedTarget) || e.target.closest?.("[data-tip]")?.contains(e.relatedTarget))) return;
-  if (e.target.closest?.("[data-tip]") || tipEl.contains(e.target)) tipHideLater();
+  if (e.relatedTarget && (tipEl.contains(e.relatedTarget) || e.target.closest?.("[data-tip], [data-tip-html]")?.contains(e.relatedTarget))) return;
+  if (e.target.closest?.("[data-tip], [data-tip-html]") || tipEl.contains(e.target)) tipHideLater();
 });
 tipEl.addEventListener("mouseenter", () => clearTimeout(tipHideTimer));
 tipEl.addEventListener("mouseleave", () => tipHideLater());
@@ -260,12 +271,10 @@ async function loadCalendar(quiet = false) {
   }
 }
 
-// 服务器行：整机 CPU 利用率、内存和磁盘占用（GB）。Agent 离线时只显示最近一次上报时间
-function serverStats(s, seen) {
+// 服务器行：整机 CPU 利用率、内存和磁盘占用（GB）。离线或 Agent 还没上报时不显示
+function serverStats(s) {
   const y = s.system;
-  if (!s.online || !y || y.cpu == null) {
-    return `<div class="srv-stats"><span style="color:var(--warn)">${s.online ? "等待 Agent 上报" : esc(seen)}</span></div>`;
-  }
+  if (!s.online || !y || y.cpu == null) return "";  // 拿不到数据就不显示
   const item = (label, pct, text, tip) =>
     `<span class="srv-stat ${pct >= 90 ? "hot" : ""}" title="${esc(tip)}">${label}<span class="meter"><i style="width:${Math.min(100, pct)}%"></i></span><b>${text}</b></span>`;
   const pct = (u, t) => (t ? (u * 100) / t : 0);
@@ -275,12 +284,19 @@ function serverStats(s, seen) {
   return `<div class="srv-stats">${parts.join("")}</div>`;
 }
 
+// 占用某张显卡的进程：每个进程一行（Linux 用户名、进程号、位置、显存），位置是进程所在目录
+function procTable(procs) {
+  if (!procs.length) return `<div class="proc-empty">当前没有进程占用这张显卡</div>`;
+  const rows = procs.map((p) => `<tr><td>${esc(p.user || "?")}</td><td>${p.pid}</td><td class="path">${esc(p.path || "-")}</td><td>${p.used_memory == null ? "-" : `${gb(p.used_memory)} GB`}</td></tr>`).join("");
+  return `<table class="proc-table"><tr><th>Linux 用户名</th><th>进程号</th><th>位置</th><th>显存占用</th></tr>${rows}</table>`;
+}
+
 const ALERT_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M12 3.2 1.8 20.8h20.4L12 3.2z" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.6v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="17.6" r="1.15" fill="currentColor"/></svg>`;
 
 // 把一张卡上的预约整理成要画的色块：
 //  - 同一个人首尾相接的预约合并成一条“连续预约”；
 //  - 今天之前的部分单独画成浅色块，今天起的部分正常显示；
-//  - 备注、自动续约以连续预约里第一条还没结束的（非浅色）预约为准；
+//  - 自动续约、备注以连续预约里第一条还没结束的（非浅色）预约为准（只在悬停提示里显示）；
 //  - 多人共用同一张卡时，每条连续预约占一条“车道”，在同一行里上下并排。
 function buildBlocks(list, today, vStart, vEnd) {
   const byUser = {};
@@ -294,7 +310,7 @@ function buildBlocks(list, today, vStart, vEnd) {
         cur.items.push(r);
         if (r.end_date > cur.end) cur.end = r.end_date;
       } else {
-        cur = { user_id: r.user_id, user_name: r.user_name, linux_username: r.linux_username, start: r.start_date, end: r.end_date, items: [r] };
+        cur = { user_id: r.user_id, user_name: r.user_name, user_avatar: r.user_avatar, linux_username: r.linux_username, start: r.start_date, end: r.end_date, items: [r] };
         chains.push(cur);
       }
     }
@@ -354,33 +370,29 @@ function renderCalendar() {
   cal.reservations.forEach((r) => (byGpu[r.gpu_id] ||= []).push(r));
 
   for (const s of cal.servers) {
-    const seen = s.last_seen_at ? `最近上报 ${s.last_seen_at.replace("T", " ").slice(5, 16)}` : "Agent 未连接";
     const alertGpus = s.gpus.filter((g) => g.alerts.length);
     const collapsed = state.collapsed.has(s.id);
     html += `<div class="cal-server-group ${collapsed ? "collapsed" : ""}" data-srv="${s.id}">
       <div class="cal-row cal-server" data-toggle-srv="${s.id}" role="button" tabindex="0" aria-expanded="${!collapsed}">
-        <div class="cal-label" title="${esc(`${s.name} ${s.host}\n${seen}\n点击${collapsed ? "展开" : "折叠"}`)}">
+        <div class="cal-label">
           <span class="srv-title"><span class="chev" aria-hidden="true"></span><span class="dot ${s.online ? "on" : ""}"></span><span class="server-name">${esc(s.name)}</span>
             ${alertGpus.length ? `<span class="alert-ico" title="${esc(`${alertGpus.length} 张卡上有未预约的用户正在使用`)}">${ALERT_ICON}</span>` : ""}</span>
           <span class="muted small srv-host">${esc(s.host)}</span></div>
-        <div class="cal-track">${serverStats(s, seen)}</div></div>
+        <div class="cal-track">${serverStats(s)}</div></div>
       <div class="srv-body"><div class="srv-inner">`;
-    if (!s.gpus.length) {
-      html += `<div class="cal-row cal-gpu"><div class="cal-label muted small">等待 Agent 上报显卡…</div><div class="cal-track"></div></div>`;
-    }
     for (const g of s.gpus) {
       const util = g.utilization ?? 0;
       const stat = s.online && g.memory_total != null
         ? `<span class="meter" title="利用率 ${util}%"><i style="width:${util}%"></i></span>${util}% · ${gb(g.memory_used)}/${gb(g.memory_total)}G`
         : `<span>离线</span>`;
-      const procs = g.processes.map((p) => `${p.user || "?"}(pid ${p.pid}, ${gb(p.used_memory)}G)`).join("\n");
+      const detail = s.online && g.memory_total != null ? `<span class="gpu-detail" data-tip-html="${esc(procTable(g.processes))}">详情</span>` : "";
       const alert = g.alerts.length
         ? `<span class="alert-ico" title="${esc(`这些用户未预约，但正在使用 GPU：\n${g.alerts.map((a) => `• ${a}`).join("\n")}`)}">${ALERT_ICON}</span>`
         : "";
       const { blocks, lanes } = buildBlocks(byGpu[g.id] || [], today, vStart, vEnd);
-      html += `<div class="cal-row cal-gpu"><div class="cal-label gpu-label" title="${esc(procs || "无进程")}">
+      html += `<div class="cal-row cal-gpu"><div class="cal-label gpu-label">
         <div class="gpu-main"><span class="gpu-title"><b>GPU${g.index}</b> · ${esc(g.name.replace(/^NVIDIA /, ""))}</span>
-        <span class="gpu-stat">${stat}</span></div>${alert}</div>
+        <span class="gpu-stat">${stat}</span></div>${alert}${detail}</div>
         <div class="cal-track lanes-${Math.min(lanes, 3)}" style="--lanes:${lanes}">`;
       dates.forEach((d, i) => {
         html += `<div class="cal-cell ${cellClass(d)}" style="grid-column:${i + 1}" data-server="${s.id}" data-gpu="${g.id}" data-date="${d}"></div>`;
@@ -393,7 +405,7 @@ function renderCalendar() {
           + `${head?.auto_renew ? "\n🔁 自动续约" : ""}${head?.note ? `\n${head.note}` : ""}${b.past ? "\n（已结束的部分）" : ""}`;
         html += `<div class="bar ${mine ? "mine" : ""} ${b.past ? "past" : ""} ${b.cutL ? "cut-l" : ""} ${b.cutR ? "cut-r" : ""}"
           style="grid-column:${b.c1}/${b.c2 + 1};grid-row:${b.lane + 1};--h:${hue(c.user_id)}" data-bar="${n}" title="${esc(tip)}">
-          <span>${!b.past && head?.auto_renew ? "🔁 " : ""}${esc(c.user_name)}</span>${!b.past && head?.note ? `<small>${esc(head.note)}</small>` : ""}</div>`;
+          ${avatarHtml(c.user_name, c.user_avatar, c.user_id)}<span>${esc(c.user_name)}</span></div>`;
       }
       html += `</div></div>`;
     }
@@ -669,7 +681,7 @@ async function renderAccount() {
         : a?.state === "error" ? `<div class="small" style="color:var(--danger)">${esc(a.message)}</div>` : "";
       return `<tr><td>${esc(s.name)}</td><td><code>ssh ${esc(a?.username || me.linux_username)}@${esc(s.host || s.name)}</code>${local}</td><td>${st}</td></tr>`;
     }).join("");
-    box.innerHTML = `<div class="group" style="margin-bottom:8px">用户名 <code>${esc(me.linux_username)}</code>　UID <code>${me.uid}</code>
+    box.innerHTML = `<div class="group" style="margin-bottom:8px">Linux 用户名 <code>${esc(me.linux_username)}</code>
         <button class="btn small" id="rename-btn">修改</button></div>
       <p class="muted small">${state.config.require_reservation_to_login
         ? "只有在<b>当天预约了该服务器显卡</b>时才能登录（需在实验室内网）。"
@@ -1428,6 +1440,7 @@ async function boot() {
   const local = ["localhost", "127.0.0.1", "[::1]"].includes(location.hostname);
   $("#http-banner").classList.toggle("hidden", location.protocol === "https:" || local);
   $("#me-name").textContent = state.me.name;
+  $("#me-avatar-box").innerHTML = avatarHtml(state.me.name, state.me.avatar_url, state.me.id);
   $$(".admin-only").forEach((el) => el.classList.toggle("hidden", !state.me.is_admin));
   renderBanner();
   let tab = "calendar";
