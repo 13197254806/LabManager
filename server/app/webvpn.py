@@ -411,12 +411,23 @@ class WebVPNClient:
         raise RuntimeError(f"登录失败：{msg.strip() or res}")
 
     def logged_in(self):
-        """已登录时访问门户不会跳到 /login。"""
-        try:
-            with self.opener.open(self.portal + "/", timeout=self.timeout) as r:
-                return "/login" not in r.geturl()
-        except OSError:
-            return False
+        """已登录时访问门户不会跳到 /login。
+        返回 True / False；网络错误（代理抖动、超时、5xx）时无法判断，返回 None——调用方应保持现状，
+        不要当作会话失效去重新登录（每次重新登录都占用每小时的限速名额，还会把所有隧道断一遍）。"""
+        last = None
+        for i in range(3):
+            try:
+                with self.opener.open(self.portal + "/", timeout=self.timeout) as r:
+                    return "/login" not in r.geturl()
+            except urllib.error.HTTPError as e:
+                if e.code < 500:  # 401 / 403 等：门户明确拒绝，会话已失效
+                    return False
+                last = e
+            except Exception as e:  # noqa: BLE001  URLError / 超时 / 连接被重置 / http.client 异常
+                last = e
+            time.sleep(2)
+        self._log("会话检查遇到网络错误，暂时无法判断：%r" % (last,))
+        return None
 
 
 def _self_test():

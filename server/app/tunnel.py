@@ -36,6 +36,7 @@ import argparse
 import json
 import logging
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -250,7 +251,7 @@ class Tunnels:
                 log.error("WebVPN 账号或密码错误，停止自动登录（避免锁定）：%s", e)
                 set_login_status("bad_credentials", error="账号或密码错误，请更新 deploy/.env 里的 WEBVPN_USER/WEBVPN_PASSWORD")
                 while not self.stopping:  # 不可重试：等 .env 改好、容器被重建
-                    time.sleep(3600)
+                    self._sleep(3600)
                 return False
             except webvpn.Banned as e:
                 log.warning("%s；等待 6 分钟后再试", e)
@@ -359,9 +360,11 @@ class Tunnels:
         refresh_targets()
         self.start_all()
         while not self.stopping:
-            time.sleep(CHECK_INTERVAL)
+            self._sleep(CHECK_INTERVAL)
+            if self.stopping:
+                break
             refresh_targets()  # 平台里新增/删除服务器后自动生效
-            if not self.client.logged_in():
+            if self.client.logged_in() is False:
                 # WebVPN 会话失效（被挤或超时）：重新登录，换新 Cookie 重连全部
                 log.info("WebVPN 会话失效，重新登录")
                 self.stop_all()
@@ -385,7 +388,17 @@ class Tunnels:
 def cmd_run(_args):
     os.makedirs(TUNNEL_DIR, exist_ok=True)
     # GPU 列表从平台数据库动态读取：没有服务器时登录 WebVPN 空转，等平台里添加后自动连上
-    Tunnels().run()
+    t = Tunnels()
+
+    def stop(_signum, _frame):  # docker stop：让主循环尽快退出，并带走 chisel 子进程
+        t.stopping = True
+
+    signal.signal(signal.SIGTERM, stop)
+    signal.signal(signal.SIGINT, stop)
+    try:
+        t.run()
+    finally:
+        t.stop_all()
 
 
 def cmd_status(_args):

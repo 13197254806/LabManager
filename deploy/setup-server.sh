@@ -122,8 +122,8 @@ if [[ ",${COMPOSE_PROFILES:-}," == *",campus,"* ]]; then
 cat <<EOF
   2. 查看 WebVPN 是否登录成功：  docker compose logs -f tunnel     （看到"WebVPN 登录成功"即可）
      滑块验证码会自动识别，无需人工。只有账号或密码错误才会停下（改好 .env 保存即自动重试）。
-  3. 在平台「管理 → GPU 服务器」添加 gpu_01 等服务器（填内网地址，名称与 .env 的 TUNNEL_TARGETS 一致），
-     点「显示安装命令」拿到命令，到你自己的 Mac 上（有 aTrust）执行：
+  3. 在平台「管理 → GPU 服务器」添加 gpu_01 等服务器（填内网地址即可，隧道会自动从平台读取服务器列表），
+     点该行「注册命令」里的「查看命令」拿到 Token，到你自己的 Mac 上（有 aTrust）执行：
        bash tools/add-gpu.sh ${BASE_URL:-http://你的平台地址} <Token> --user ubuntu
      （会提示输入 GPU 服务器上 ubuntu 账号的密码，由你自己输入）
   4. 查看隧道状态：  docker compose exec tunnel python -m app.tunnel status

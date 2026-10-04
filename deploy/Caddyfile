@@ -5,7 +5,7 @@
 }
 
 # 临时入口：域名还不能用时（如备案中），用 http://公网IP 访问（不加密）。
-# 在 .env 里设置 HTTP_SITE=http://122.51.221.158 开启；删掉这一行即关闭（默认值只匹配 localhost，等于不开放）
+# 在 .env 里设置 HTTP_SITE=http://<公网IP> 开启；删掉这一行即关闭（默认值只匹配 localhost，等于不开放）
 {$HTTP_SITE:http://localhost} {
 	encode gzip
 	reverse_proxy web:8000

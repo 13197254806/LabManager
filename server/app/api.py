@@ -174,6 +174,8 @@ def set_password(body: PasswordIn, user: User = Depends(current_user), db: Sessi
 
 @router.delete("/me/password")
 def clear_password(user: User = Depends(current_user), db: Session = Depends(get_db)):
+    if not user.ssh_keys:
+        raise HTTPException(400, "你还没有添加 SSH 公钥，关闭密码登录后将无法登录服务器。请先添加公钥")
     user.password_hash = None
     user.password_updated_at = now()
     db.commit()
@@ -296,7 +298,9 @@ def _check_rules(user: User, start: date, end: date, is_new_start: bool):
         return
     if is_new_start and start < today():
         raise HTTPException(400, "不能预约过去的日期")
-    if (end - start).days + 1 > settings.max_reservation_days:
+    # 已经开始的预约按“从今天起还剩几天”计算：自动续约会把总时长延到上限以上，
+    # 不能因此改个备注、关自动续约，或在到期前继续延长，就被“最长 N 天”拦住
+    if (end - max(start, today())).days + 1 > settings.max_reservation_days:
         raise HTTPException(400, f"单次预约最长 {settings.max_reservation_days} 天，到期前可以续约")
     if start > today() + timedelta(days=settings.max_advance_days):
         raise HTTPException(400, f"最多提前 {settings.max_advance_days} 天预约")
@@ -829,6 +833,7 @@ def agent_sync(
             g = GPU(server_id=server.id, index=gi.index)
             db.add(g)
             server.gpus.append(g)
+            existing[gi.index] = g
         g.uuid, g.name = gi.uuid[:64], gi.name[:64]
         g.memory_total, g.memory_used, g.utilization = gi.memory_total, gi.memory_used, gi.utilization
         g.processes_json = json.dumps([p.model_dump() for p in gi.processes])
