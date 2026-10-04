@@ -132,3 +132,94 @@ def test_auto_renew_disabled_when_nothing_can_be_renewed(admin, alice, server, d
     db.expire_all()
     r = db.get(Reservation, rid)
     assert r.end_date == d and not r.auto_renew  # 关闭自动续约，不会每分钟重试
+
+
+# ---------------- 多人共用同一张卡 ----------------
+
+
+def _users(n):
+    """创建 n 个普通用户（alice 之外），返回已登录的客户端列表。"""
+    from conftest import make_client
+
+    out = []
+    for i in range(n):
+        c = make_client(f"user{i}")
+        assert c.put("/api/me/linux-username", json={"username": f"user{i}"}).status_code == 200
+        out.append(c)
+    return out
+
+
+def test_gpu_can_be_shared_up_to_limit(admin, alice, server, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "max_gpu_sharers", 3)
+    g = gpu_ids(alice)
+    d = today()
+    u1, u2 = _users(2)
+    assert book(alice, g[:1], d, d + timedelta(days=2)).status_code == 200
+    assert book(u1, g[:1], d, d + timedelta(days=1)).status_code == 200
+    assert book(u2, g[:1], d + timedelta(days=1), d + timedelta(days=3)).status_code == 200
+    # 第 4 个人：第 2 天已经有 3 人
+    r = book(admin, g[:1], d + timedelta(days=1), d + timedelta(days=1))
+    assert r.status_code == 409 and "最多 3 人共用" in r.json()["detail"]
+    # 错开到没满的日子可以
+    assert book(admin, g[:1], d + timedelta(days=4), d + timedelta(days=4)).status_code == 200
+
+
+def test_same_user_cannot_double_book_a_gpu(alice, server, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "max_gpu_sharers", 3)
+    g = gpu_ids(alice)
+    d = today()
+    assert book(alice, g[:1], d, d + timedelta(days=2)).status_code == 200
+    r = book(alice, g[:1], d + timedelta(days=2), d + timedelta(days=3))
+    assert r.status_code == 409 and "已经有一条预约" in r.json()["detail"]
+    # 首尾相接（不重叠）可以：日历上会合并成一条
+    assert book(alice, g[:1], d + timedelta(days=3), d + timedelta(days=4)).status_code == 200
+
+
+def test_editing_a_shared_reservation_is_checked_against_others(admin, alice, server, monkeypatch):
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "max_gpu_sharers", 2)
+    g = gpu_ids(alice)
+    d = today()
+    rid = book(alice, g[:1], d, d + timedelta(days=1)).json()[0]["id"]
+    assert book(admin, g[:1], d + timedelta(days=2), d + timedelta(days=3)).status_code == 200
+    # 延长到第 4 天：此时只有 alice 和 admin 两人同时在，没超过上限
+    assert alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d + timedelta(days=3))}).status_code == 200
+
+
+def test_auto_renew_with_shared_gpu(admin, alice, server, db, monkeypatch):
+    """自动续约只在共用人数已满的日子前停下，没满就照常续。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "max_gpu_sharers", 2)
+    g = gpu_ids(alice)
+    d = today()
+    u1, = _users(1)
+    rid = book(alice, g[:1], d, d, auto_renew=True).json()[0]["id"]
+    assert book(admin, g[:1], d + timedelta(days=1), d + timedelta(days=10)).status_code == 200  # 第 2 天起 2 人共用里的 1 人
+    assert book(u1, g[:1], d + timedelta(days=3), d + timedelta(days=10)).status_code == 200  # 第 4 天起 admin+u1 已满 2 人
+    assert services.run_auto_renew(db) == 1
+    db.expire_all()
+    r = db.get(Reservation, rid)
+    assert r.end_date == d + timedelta(days=2) and r.auto_renew  # 第 4 天起已满 → 只续到前一天
+
+
+def test_config_and_login_switch(admin, alice, server):
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    cfg = alice.get("/api/config").json()
+    assert cfg["max_gpu_sharers"] == 1 and cfg["require_reservation_to_login"] is False
+    _, token = server
+    sync = lambda: TestClient(app).post("/api/agent/sync", json={"gpus": []}, headers=agent_headers(token)).json()
+    assert sync()["require_reservation_to_login"] is False  # 默认关：所有成员都能登录
+    assert admin.put("/api/admin/settings", json={"require_reservation_to_login": "1"}).status_code == 200
+    assert alice.get("/api/config").json()["require_reservation_to_login"] is True
+    assert sync()["require_reservation_to_login"] is True
+    assert admin.put("/api/admin/settings", json={"require_reservation_to_login": "0"}).status_code == 200
+    assert sync()["require_reservation_to_login"] is False
+    assert admin.put("/api/admin/settings", json={"require_reservation_to_login": "2"}).status_code == 400

@@ -13,6 +13,7 @@ os.environ.update(
     TUNNEL_DIR=f"{_tmp}/tunnel",
     MAX_RESERVATION_DAYS="14",
     MAX_ADVANCE_DAYS="30",
+    MAX_GPU_SHARERS="1",  # 默认测试按“一张卡同一天只属于一个人”；多人共用的用例单独调整
 )
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 

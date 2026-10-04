@@ -330,9 +330,9 @@ $ROOT_LINE
 # 成员可以用平台上设置的密码或登记的公钥登录
 PasswordAuthentication yes
 PubkeyAuthentication yes
-# 平台成员（lab-users）、root / 旧共享账号 / 管理员（lab-admin）可以登录。登录不需要预约，预约只决定能用哪些显卡；
-# 被停用的成员由 Agent 让账号过期，同样登录不了
-AllowGroups lab-users lab-admin
+# lab-active 里的成员、root / 旧共享账号 / 管理员（lab-admin）可以登录。
+# lab-active 由 Agent 按平台上的“预约才能登录”开关维护：关闭时是所有成员，开启时是今天有预约的成员
+AllowGroups lab-active lab-admin
 
 # 成员只认在实验室平台登记的公钥（自己往 ~/.ssh 里加的不生效，防止把账号借给别人）
 Match Group lab-users
@@ -340,7 +340,7 @@ Match Group lab-users
 Match all
 SSHD
     if reload_sshd; then
-        info "sshd 已更新：root 远程登录=$ROOT_LOGIN；旧共享账号照常登录；成员可用密码或公钥登录（不需要预约，预约只决定能用哪些显卡）"
+        info "sshd 已更新：root 远程登录=$ROOT_LOGIN；旧共享账号照常登录；成员可用密码或公钥登录（是否要求预约由平台「管理」里的开关决定）"
     else
         rm -f "$SSHD_DROPIN"
         die "sshd 配置校验失败，已回滚"

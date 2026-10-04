@@ -110,53 +110,86 @@ main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 .toolbar { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
 .toolbar select { width: auto; }
 .range { font-weight: 500; margin-left: 4px; }
+.month-btn { min-width: 64px; font-weight: 600; }
+.year-bar { display: flex; align-items: center; justify-content: space-between; }
+.month-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; }
 .hint { color: var(--muted); font-size: 12px; margin: 0 0 8px; }
 .cal-wrap { background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); overflow-x: auto; }
-.calendar { --label-w: 230px; --col-w: 72px; min-width: calc(var(--label-w) + var(--days) * var(--col-w)); }
+.calendar { --label-w: 210px; --col-w: 24px; --row-h: 54px; min-width: calc(var(--label-w) + var(--days) * var(--col-w)); }
 .cal-row { display: flex; border-bottom: 1px solid var(--line); min-height: 44px; }
-.cal-row:last-child { border-bottom: 0; }
 .cal-label {
   position: sticky; left: 0; z-index: 3; width: var(--label-w); flex: 0 0 var(--label-w);
   background: var(--panel); border-right: 1px solid var(--line); padding: 6px 10px;
   display: flex; flex-direction: column; justify-content: center; gap: 2px; min-width: 0;
 }
-.cal-track { flex: 1; display: grid; grid-template-columns: repeat(var(--days), minmax(var(--col-w), 1fr)); position: relative; }
-.cal-cell { grid-row: 1; border-right: 1px solid var(--line); cursor: pointer; }
+/* 一张卡的所有预约共用一行：行高固定，同一天有几个人就把行高平分成几条“车道” */
+.cal-track { flex: 1; display: grid; grid-template-columns: repeat(var(--days), minmax(var(--col-w), 1fr)); grid-template-rows: repeat(var(--lanes, 1), minmax(0, 1fr)); position: relative; min-width: 0; }
+.cal-cell { grid-row: 1 / -1; border-right: 1px solid var(--line); cursor: pointer; }
 .cal-cell:last-child { border-right: 0; }
 .cal-cell.weekend { background: var(--weekend); }
 .cal-cell.today { background: var(--today); }
 .cal-cell.past { cursor: default; }
 .cal-cell:not(.past):hover { background: var(--hover); }
-.cal-head .cal-cell { cursor: default; text-align: center; font-size: 12px; color: var(--muted); padding: 4px 0; line-height: 1.3; }
+.cal-head { border-bottom-color: var(--line-strong); }
+.cal-head .cal-cell { cursor: default; text-align: center; color: var(--muted); padding: 4px 0 3px; line-height: 1.25; }
 .cal-head .cal-cell b { display: block; font-size: 14px; color: var(--text); font-weight: 500; }
+.cal-head .cal-cell small { display: block; font-size: 10px; }
 .cal-head .cal-cell.today b { color: var(--primary); }
 .cal-head .cal-cell:hover { background: inherit; }
 .cal-head .cal-cell.today:hover { background: var(--today); }
-.cal-server { background: var(--bg); min-height: 36px; }
-.cal-server .cal-label { background: var(--bg); }
+
+/* 服务器分组：点击服务器行折叠 / 展开，GPU 行用 grid-template-rows 0fr↔1fr 做高度动画（overflow: clip 不影响左列的 sticky） */
+.cal-server-group { border-bottom: 1px solid var(--line); }
+.cal-server-group:last-child { border-bottom: 0; }
+.cal-server { background: var(--bg); min-height: 40px; border-bottom: 0; cursor: pointer; user-select: none; }
+.cal-server:hover { filter: brightness(.97); }
+.cal-server:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
+.cal-server .cal-label { background: var(--bg); gap: 0; align-items: stretch; }
 .cal-server .cal-track { background: var(--bg); }
-.server-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
-.cal-server .cal-label { flex-direction: column; align-items: stretch; gap: 0; }
+.srv-body { display: grid; grid-template-rows: 1fr; transition: grid-template-rows .28s ease; border-top: 1px solid var(--line); }
+.srv-inner { min-height: 0; overflow: clip; transition: opacity .2s ease; }
+.srv-inner .cal-row:last-child { border-bottom: 0; }
+.collapsed .srv-body { grid-template-rows: 0fr; border-top-color: transparent; }
+.collapsed .srv-inner { opacity: 0; }
 .srv-title { display: flex; align-items: center; gap: 8px; min-width: 0; }
-.srv-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 16px; }
-.srv-desc { grid-column: 1 / -1; padding: 8px 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.chev { width: 7px; height: 7px; flex: none; border-right: 1.5px solid var(--muted); border-bottom: 1.5px solid var(--muted); transform: translateY(-1px) rotate(45deg); transition: transform .25s ease; margin: 0 1px 0 2px; }
+.collapsed .chev { transform: translateX(-1px) rotate(-45deg); }
+.server-name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.srv-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; padding-left: 32px; }
+.srv-desc { grid-column: 1 / -1; padding: 10px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
 .dot.on { background: var(--ok); }
+
+/* GPU 行：所有行同高、左列同宽；利用率放左侧两行，未预约使用的提示图标固定在右侧 */
+.cal-gpu { height: var(--row-h); min-height: 0; }
+.gpu-label { flex-direction: row; align-items: center; justify-content: space-between; gap: 6px; }
+.gpu-main { display: flex; flex-direction: column; gap: 3px; min-width: 0; }
 .gpu-title { font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gpu-stat { display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); white-space: nowrap; }
 .meter { width: 44px; height: 5px; border-radius: 3px; background: var(--line); overflow: hidden; flex: none; }
 .meter i { display: block; height: 100%; background: var(--primary); }
-.alert { color: var(--warn); font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; cursor: help; }
+.alert-ico { display: inline-flex; align-items: center; flex: none; color: var(--warn); cursor: help; }
+
 .bar {
-  grid-row: 1; z-index: 2; margin: 5px 3px; border-radius: 6px; padding: 2px 8px; cursor: pointer;
+  z-index: 2; margin: 4px 1px; border-radius: 6px; padding: 2px 6px; cursor: pointer;
   font-size: 12px; line-height: 1.35; overflow: hidden; white-space: nowrap; text-overflow: ellipsis;
   background: hsl(var(--h), 70%, var(--bar-l)); color: var(--bar-text);
   border: 1px solid hsl(var(--h), 55%, calc(var(--bar-l) - 18%));
   display: flex; flex-direction: column; justify-content: center; min-width: 0;
 }
+.bar > span { overflow: hidden; text-overflow: ellipsis; }
 .bar.mine { box-shadow: inset 0 0 0 1.5px hsl(var(--h), 70%, 40%); font-weight: 600; }
 .bar small { font-weight: 400; opacity: .75; overflow: hidden; text-overflow: ellipsis; }
 .bar:hover { filter: brightness(.96); }
+/* 今天之前的预约：同样的颜色，但更浅 */
+.bar.past { opacity: .42; font-weight: 400; }
+/* 被截断（延续到本月之外 / 与相邻的浅色块相接）的一侧不画圆角 */
+.bar.cut-l { border-top-left-radius: 0; border-bottom-left-radius: 0; margin-left: 0; border-left-width: 0; }
+.bar.cut-r { border-top-right-radius: 0; border-bottom-right-radius: 0; margin-right: 0; border-right-width: 0; }
+/* 多人共用：车道变窄，只留一行名字 */
+.lanes-2 .bar, .lanes-3 .bar { margin-top: 2px; margin-bottom: 2px; flex-direction: row; align-items: center; padding: 0 5px; line-height: 1.1; }
+.lanes-2 .bar small, .lanes-3 .bar small { display: none; }
+.lanes-3 .bar { font-size: 10.5px; margin-top: 1px; margin-bottom: 1px; padding: 0 4px; }
 .empty { padding: 32px; text-align: center; color: var(--muted); }
 
 /* 卡片页 */
@@ -255,7 +288,7 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
   .brand { display: none; }
   #me-name { display: none; }
   main { padding: 12px; }
-  .calendar { --label-w: 128px; --col-w: 56px; }
+  .calendar { --label-w: 128px; --col-w: 26px; }
   .gpu-stat .meter { display: none; }
   .row-form, .two { grid-template-columns: 1fr; }
   .cards { grid-template-columns: 1fr; }

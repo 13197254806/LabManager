@@ -104,6 +104,41 @@ def overlapping(db: Session, start: date, end: date, gpu_ids=None, server_id=Non
     return list(db.scalars(q).unique())
 
 
+def first_blocked_day(others: list[Reservation], user_id: int, start: date, end: date):
+    """在 start~end 里找第一个不能再加这位用户预约的日子。others 是这张卡上别的预约。
+    返回 (日期, 原因, 当天已有预约的人数) 或 None。原因：mine=这个人在这张卡上已有预约，full=共用人数已满。"""
+    d = start
+    while d <= end:
+        day = [r for r in others if r.start_date <= d <= r.end_date]
+        if any(r.user_id == user_id for r in day):
+            return d, "mine", len(day)
+        if len(day) >= settings.max_gpu_sharers:
+            return d, "full", len(day)
+        d += timedelta(days=1)
+    return None
+
+
+def check_capacity(db: Session, gpu_ids: list[int], start: date, end: date, user_id: int, exclude_id: int | None = None):
+    """同一张卡同一天最多 max_gpu_sharers 人共用，且同一个人不能在同一张卡同一天重复预约。冲突时抛 ValueError。"""
+    rs = [r for r in overlapping(db, start, end, gpu_ids=gpu_ids) if r.id != exclude_id]
+    problems = []
+    for gid in gpu_ids:
+        mine = [r for r in rs if r.gpu_id == gid]
+        hit = first_blocked_day(mine, user_id, start, end)
+        if not hit:
+            continue
+        day, why, n = hit
+        g = mine[0].gpu if mine else None
+        label = f"{g.server.name} GPU{g.index}" if g else f"GPU #{gid}"
+        if why == "mine":
+            problems.append(f"{label} 在 {day} 你已经有一条预约了（可以直接修改它的日期）")
+        else:
+            names = "、".join(sorted({r.user.name for r in mine if r.start_date <= day <= r.end_date}))
+            problems.append(f"{label} 在 {day} 已有 {n} 人预约（{names}），最多 {settings.max_gpu_sharers} 人共用")
+    if problems:
+        raise ValueError("时间冲突：" + "；".join(problems))
+
+
 def gpu_alerts(gpu: GPU, holders: set[str]) -> list[str]:
     """GPU 上有进程、但进程属主不是今天预约这张卡的人 → 返回这些用户名。"""
     users = {p.get("user") or "?" for p in gpu.processes}
@@ -174,6 +209,8 @@ DEFAULT_SETTINGS = {
     "auto_renew_days": "7",
     # 成员发起的文件迁移是否需要管理员确认（1/0）
     "migration_requires_approval": "0",
+    # 1：没有预约某台服务器显卡的成员，当天不能 SSH 登录这台服务器；0：所有成员都能登录，预约只决定能用哪些卡
+    "require_reservation_to_login": "0",
 }
 
 
@@ -244,7 +281,10 @@ def send_welcome(db: Session, open_id: str, force: bool = False, raise_errors: b
 def notify_booked(db: Session, user_id: int, res_ids: list[int], action: str):
     user = db.get(User, user_id)
     rs = [db.get(Reservation, i) for i in res_ids]
-    md = describe(rs) + "\n\n预约当天 00:00 起，登录对应服务器后会自动只看到你预约的显卡；到期后次日 00:00 这些卡不再分配给你。"
+    if get_setting(db, "require_reservation_to_login") == "1":
+        md = describe(rs) + "\n\n预约当天 00:00 起可以 SSH 登录对应服务器并使用所选显卡，到期后次日 00:00 关闭登录权限。"
+    else:
+        md = describe(rs) + "\n\n预约当天 00:00 起，登录对应服务器后会自动只看到你预约的显卡；到期后次日 00:00 这些卡不再分配给你。"
     if any(r.auto_renew for r in rs):
         md += "\n已开启**自动续约**：到期前会自动延长，并通知你。"
     feishu.send_card(
@@ -282,7 +322,9 @@ def send_expiry_reminders(db: Session) -> int:
         user = items[0].user
         if not claim_notice(db, f"expire:{d}:{user.id}"):
             continue
-        md = describe(items) + "\n\n以上预约将在 **今晚 24:00** 到期，之后这些卡不再分配给你（登录和文件不受影响，已在运行的程序也不会被强制结束）。\n需要继续使用请在平台上延长预约。"
+        after = ("之后无法再 SSH 登录这些服务器" if get_setting(db, "require_reservation_to_login") == "1"
+                 else "之后这些卡不再分配给你（登录和文件不受影响）")
+        md = describe(items) + f"\n\n以上预约将在 **今晚 24:00** 到期，{after}，已在运行的程序不会被强制结束。\n需要继续使用请在平台上延长预约。"
         feishu.send_card(user.open_id, feishu.build_card("⏰ GPU 预约今天到期", md, [("去续约", settings.base_url)], template="orange"))
         sent += 1
     return sent
@@ -309,11 +351,13 @@ def run_auto_renew(db: Session) -> int:
             wanted = old_end + step * ((t + before - deadline) // step + 1)
             new_end = wanted
             reason = ""
-            clash = [c for c in overlapping(db, old_end + timedelta(days=1), new_end, gpu_ids=[r.gpu_id]) if c.id != r.id]
-            if clash:
-                first = min(clash, key=lambda c: c.start_date)
-                new_end = first.start_date - timedelta(days=1)
-                reason = f"{first.user.name} 已预约了 {first.start_date} 起的这张卡"
+            others = [c for c in overlapping(db, old_end + timedelta(days=1), new_end, gpu_ids=[r.gpu_id]) if c.id != r.id]
+            hit = first_blocked_day(others, r.user_id, old_end + timedelta(days=1), new_end)
+            if hit:
+                day, why, n = hit
+                new_end = day - timedelta(days=1)
+                reason = (f"{day} 起你在这张卡上已有另一条预约" if why == "mine"
+                          else f"{day} 起这张卡已有 {n} 人预约（最多 {settings.max_gpu_sharers} 人共用）")
             if new_end > old_end:
                 r.end_date = new_end
                 r.renew_count += 1
@@ -330,7 +374,7 @@ def run_auto_renew(db: Session) -> int:
         partial = any(r.end_date < wanted for r, _old, wanted in items)
         md = "以下预约已自动续约：\n" + "\n".join(lines)
         if partial:
-            md += "\n\n部分预约因后面已有他人预约，只延长到了冲突前一天。"
+            md += "\n\n部分预约因后面这张卡的共用人数已满，只延长到了冲突前一天。"
         md += "\n\n不再需要时请及时释放，或在平台上关闭自动续约。"
         feishu.send_card(user.open_id, feishu.build_card("🔁 GPU 已自动续约", md, [("管理预约", settings.base_url)], template="green"))
     for items in failed.values():
@@ -384,12 +428,14 @@ def notify_admins_migration(db: Session, task_id: int):
 
 def free_gpus_text(db: Session) -> str:
     d = today()
-    busy = {r.gpu_id: r.user.name for r in overlapping(db, d, d)}
+    busy: dict[int, list[str]] = {}
+    for r in overlapping(db, d, d):
+        busy.setdefault(r.gpu_id, []).append(r.user.name)
     lines = [f"📅 {d.isoformat()} GPU 占用情况："]
     for s in db.scalars(select(Server).order_by(Server.name)):
         cells = []
         for g in s.gpus:
-            cells.append(f"GPU{g.index}:{busy[g.id] if g.id in busy else '空闲'}")
+            cells.append(f"GPU{g.index}:{'、'.join(busy[g.id]) if g.id in busy else '空闲'}")
         status = "" if s.online else "（离线）"
         lines.append(f"• {s.name}{status}  " + "  ".join(cells))
     return "\n".join(lines)

@@ -112,6 +112,8 @@ def public_config(db: Session = Depends(get_db)):
         "feishu_enabled": settings.feishu_enabled,
         "max_reservation_days": settings.max_reservation_days,
         "max_advance_days": settings.max_advance_days,
+        "max_gpu_sharers": settings.max_gpu_sharers,
+        "require_reservation_to_login": services.get_setting(db, "require_reservation_to_login") == "1",
         "today": today().isoformat(),
     }
 
@@ -263,7 +265,7 @@ def delete_key(key_id: int, user: User = Depends(current_user), db: Session = De
 
 @router.get("/calendar")
 def calendar(start: date | None = None, days: int = 14, user: User = Depends(current_user), db: Session = Depends(get_db)):
-    days = max(1, min(days, 62))
+    days = max(1, min(days, 366))
     start = start or today()
     end = start + timedelta(days=days - 1)
     servers = db.scalars(select(Server).options(joinedload(Server.gpus)).order_by(Server.name)).unique().all()
@@ -306,13 +308,11 @@ def _check_rules(user: User, start: date, end: date, is_new_start: bool):
         raise HTTPException(400, f"最多提前 {settings.max_advance_days} 天预约")
 
 
-def _check_conflicts(db: Session, gpu_ids: list[int], start: date, end: date, exclude_id: int | None = None):
-    clash = [r for r in services.overlapping(db, start, end, gpu_ids=gpu_ids) if r.id != exclude_id]
-    if clash:
-        msg = "；".join(
-            f"{r.gpu.server.name} GPU{r.gpu.index} 已被 {r.user.name} 预约（{r.start_date}~{r.end_date}）" for r in clash
-        )
-        raise HTTPException(409, f"时间冲突：{msg}")
+def _check_conflicts(db: Session, gpu_ids: list[int], start: date, end: date, user_id: int, exclude_id: int | None = None):
+    try:
+        services.check_capacity(db, gpu_ids, start, end, user_id, exclude_id)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
 
 
 class ReservationIn(BaseModel):
@@ -342,7 +342,7 @@ def create_reservation(
         raise HTTPException(404, "GPU 不存在")
     _check_rules(user, body.start_date, body.end_date, is_new_start=True)
     with _booking_lock:
-        _check_conflicts(db, body.gpu_ids, body.start_date, body.end_date)
+        _check_conflicts(db, body.gpu_ids, body.start_date, body.end_date, owner.id)
         rs = [
             Reservation(
                 user_id=owner.id, gpu_id=g.id, start_date=body.start_date, end_date=body.end_date,
@@ -387,7 +387,7 @@ def update_reservation(
         if start != r.start_date and r.start_date <= today() and not user.is_admin:
             raise HTTPException(400, "预约已经开始，不能修改开始日期")
         _check_rules(user, start, end, is_new_start=start != r.start_date)
-        _check_conflicts(db, [r.gpu_id], start, end, exclude_id=r.id)
+        _check_conflicts(db, [r.gpu_id], start, end, r.user_id, exclude_id=r.id)
         changed = (start, end) != (r.start_date, r.end_date)
         r.start_date, r.end_date = start, end
         if body.note is not None:
@@ -525,9 +525,12 @@ def admin_delete_server(sid: int, _: User = Depends(admin_user), db: Session = D
 
 SETTING_KEYS = (
     "welcome_title", "welcome_markdown", "welcome_links",
-    "auto_renew_before_hours", "auto_renew_days", "migration_requires_approval",
+    "auto_renew_before_hours", "auto_renew_days", "migration_requires_approval", "require_reservation_to_login",
 )
-INT_SETTINGS = {"auto_renew_before_hours": (1, 24 * 14), "auto_renew_days": (1, 60), "migration_requires_approval": (0, 1)}
+INT_SETTINGS = {
+    "auto_renew_before_hours": (1, 24 * 14), "auto_renew_days": (1, 60),
+    "migration_requires_approval": (0, 1), "require_reservation_to_login": (0, 1),
+}
 
 
 @router.get("/admin/settings")
@@ -861,6 +864,8 @@ def agent_sync(
         "server": server.name,
         "date": d.isoformat(),
         "users": users,
+        # 开启时：当天没有预约这台服务器显卡的成员不能 SSH 登录；关闭时所有成员都能登录
+        "require_reservation_to_login": services.get_setting(db, "require_reservation_to_login") == "1",
         "migrations": services.pending_migrations(db, server),
     }
 

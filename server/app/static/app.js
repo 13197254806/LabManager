@@ -159,9 +159,9 @@ async function copyText(text, quiet = false) {
 const state = {
   config: null,
   me: null,
-  start: null,
-  days: 14,
+  month: null,
   cal: null,
+  bars: [],
   users: [], // 管理员才有
   migrations: [],
 };
@@ -221,33 +221,109 @@ function renderBanner() {
 
 // ---------------- 日历 ----------------
 
+// 日历永远按“月”展示：state.month = {y, m}。为了把首尾相接的预约合并成一条、并让合并后的备注与自动续约
+// 在翻月时保持一致，向服务器多取前后各一段时间的预约。
+const MONTH_CN = ["一", "二", "三", "四", "五", "六", "七", "八", "九", "十", "十一", "十二"];
+const pad2 = (n) => String(n).padStart(2, "0");
+const monthStart = () => `${state.month.y}-${pad2(state.month.m)}-01`;
+const monthDays = () => new Date(state.month.y, state.month.m, 0).getDate();
+function setMonth(y, m) {
+  const dt = new Date(y, m - 1, 1);
+  state.month = { y: dt.getFullYear(), m: dt.getMonth() + 1 };
+  loadCalendar();
+}
+
+// 折叠的服务器记在浏览器里（只是个人习惯，读写失败也不影响使用）
+const COLLAPSE_KEY = "lab-cal-collapsed";
+function readCollapsed() {
+  try { return new Set(JSON.parse(localStorage.getItem(COLLAPSE_KEY) || "[]")); } catch { return new Set(); }
+}
+function writeCollapsed() {
+  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...state.collapsed])); } catch {}
+}
+state.collapsed = readCollapsed();
+
+let calSeq = 0;
 async function loadCalendar() {
+  const seq = ++calSeq;
   try {
-    state.cal = await api(`/api/calendar?start=${state.start}&days=${state.days}`);
+    const data = await api(`/api/calendar?start=${addDays(monthStart(), -45)}&days=${monthDays() + 90}`);
+    if (seq !== calSeq) return;  // 期间又切换了月份，丢弃这次结果
+    state.cal = data;
     renderCalendar();
   } catch (err) {
     toast(err.message);
   }
 }
 
+const ALERT_ICON = `<svg viewBox="0 0 24 24" width="17" height="17" aria-hidden="true"><path d="M12 3.2 1.8 20.8h20.4L12 3.2z" fill="currentColor" fill-opacity=".16" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 9.6v5" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="12" cy="17.6" r="1.15" fill="currentColor"/></svg>`;
+
+// 把一张卡上的预约整理成要画的色块：
+//  - 同一个人首尾相接的预约合并成一条“连续预约”；
+//  - 今天之前的部分单独画成浅色块，今天起的部分正常显示；
+//  - 备注、自动续约以连续预约里第一条还没结束的（非浅色）预约为准；
+//  - 多人共用同一张卡时，每条连续预约占一条“车道”，在同一行里上下并排。
+function buildBlocks(list, today, vStart, vEnd) {
+  const byUser = {};
+  list.forEach((r) => (byUser[r.user_id] ||= []).push(r));
+  const chains = [];
+  for (const rs of Object.values(byUser)) {
+    rs.sort((a, b) => (a.start_date < b.start_date ? -1 : a.start_date > b.start_date ? 1 : 0));
+    let cur = null;
+    for (const r of rs) {
+      if (cur && diffDays(cur.end, r.start_date) <= 1) {
+        cur.items.push(r);
+        if (r.end_date > cur.end) cur.end = r.end_date;
+      } else {
+        cur = { user_id: r.user_id, user_name: r.user_name, linux_username: r.linux_username, start: r.start_date, end: r.end_date, items: [r] };
+        chains.push(cur);
+      }
+    }
+  }
+  const visible = chains.filter((c) => c.start <= vEnd && c.end >= vStart).sort((a, b) => (a.start < b.start ? -1 : a.start > b.start ? 1 : 0));
+  const laneEnds = [];
+  const blocks = [];
+  for (const c of visible) {
+    c.head = c.items.find((r) => r.end_date >= today) || null;
+    let lane = laneEnds.findIndex((e) => e < c.start);
+    if (lane < 0) lane = laneEnds.length;
+    laneEnds[lane] = c.end;
+    const segs = [];
+    if (c.start < today) segs.push({ past: true, s: c.start, e: c.end < today ? c.end : addDays(today, -1) });
+    if (c.end >= today) segs.push({ past: false, s: c.start > today ? c.start : today, e: c.end });
+    for (const g of segs) {
+      const s = g.s < vStart ? vStart : g.s, e = g.e > vEnd ? vEnd : g.e;
+      if (s > e) continue;
+      blocks.push({
+        chain: c, lane, past: g.past, c1: diffDays(vStart, s) + 1, c2: diffDays(vStart, e) + 1,
+        cutL: g.s < vStart || (!g.past && c.start < today), cutR: g.e > vEnd || (g.past && c.end >= today),
+      });
+    }
+  }
+  return { blocks, lanes: Math.max(1, laneEnds.length) };
+}
+
 function renderCalendar() {
   const { cal } = state;
-  const days = cal.days;
-  const end = addDays(cal.start, days - 1);
-  $("#range-label").textContent = `${cal.start.slice(5).replace("-", "/")} – ${end.slice(5).replace("-", "/")}`;
+  const vStart = monthStart(), days = monthDays(), vEnd = addDays(vStart, days - 1);
+  const today = cal.today;
+  $("#month-btn").textContent = `${MONTH_CN[state.month.m - 1]}月`;
+  const full = (iso) => { const [y, m, d] = iso.split("-").map(Number); return `${y}年${m}月${d}日`; };
+  $("#range-label").textContent = `${full(vStart)} – ${full(vEnd)}`;
   const root = $("#calendar");
   root.style.setProperty("--days", days);
+  state.bars = [];
 
-  const dates = Array.from({ length: days }, (_, i) => addDays(cal.start, i));
+  const dates = Array.from({ length: days }, (_, i) => addDays(vStart, i));
   const cellClass = (d) => {
     const wd = parseDate(d).getDay();
-    return [wd === 0 || wd === 6 ? "weekend" : "", d === cal.today ? "today" : "", d < cal.today ? "past" : ""].join(" ");
+    return [wd === 0 || wd === 6 ? "weekend" : "", d === today ? "today" : "", d < today ? "past" : ""].join(" ");
   };
 
   let html = `<div class="cal-row cal-head"><div class="cal-label muted small">服务器 / 显卡</div><div class="cal-track">`;
   dates.forEach((d, i) => {
     const dt = parseDate(d);
-    html += `<div class="cal-cell ${cellClass(d)}" style="grid-column:${i + 1}"><b>${dt.getMonth() + 1}/${dt.getDate()}</b>周${WEEK[dt.getDay()]}</div>`;
+    html += `<div class="cal-cell ${cellClass(d)}" style="grid-column:${i + 1}"><b>${dt.getDate()}</b><small>周${WEEK[dt.getDay()]}</small></div>`;
   });
   html += `</div></div>`;
 
@@ -260,12 +336,18 @@ function renderCalendar() {
 
   for (const s of cal.servers) {
     const seen = s.last_seen_at ? `最近上报 ${s.last_seen_at.replace("T", " ").slice(5, 16)}` : "Agent 未连接";
-    html += `<div class="cal-row cal-server"><div class="cal-label" title="${esc(`${s.name} ${s.host}\n${seen}`)}">
-      <span class="srv-title"><span class="dot ${s.online ? "on" : ""}"></span><span class="server-name">${esc(s.name)}</span></span>
-      <span class="muted small srv-host">${esc(s.host)}</span></div>
-      <div class="cal-track"><div class="muted small srv-desc">${esc(s.description)}${s.online ? "" : `　<span style="color:var(--warn)">${esc(seen)}</span>`}</div></div></div>`;
+    const alertGpus = s.gpus.filter((g) => g.alerts.length);
+    const collapsed = state.collapsed.has(s.id);
+    html += `<div class="cal-server-group ${collapsed ? "collapsed" : ""}" data-srv="${s.id}">
+      <div class="cal-row cal-server" data-toggle-srv="${s.id}" role="button" tabindex="0" aria-expanded="${!collapsed}">
+        <div class="cal-label" title="${esc(`${s.name} ${s.host}\n${seen}\n点击${collapsed ? "展开" : "折叠"}`)}">
+          <span class="srv-title"><span class="chev" aria-hidden="true"></span><span class="dot ${s.online ? "on" : ""}"></span><span class="server-name">${esc(s.name)}</span>
+            ${alertGpus.length ? `<span class="alert-ico" title="${esc(`${alertGpus.length} 张卡上有未预约的用户正在使用`)}">${ALERT_ICON}</span>` : ""}</span>
+          <span class="muted small srv-host">${esc(s.host)}</span></div>
+        <div class="cal-track"><div class="muted small srv-desc">${esc(s.description)}${s.online ? "" : `　<span style="color:var(--warn)">${esc(seen)}</span>`}</div></div></div>
+      <div class="srv-body"><div class="srv-inner">`;
     if (!s.gpus.length) {
-      html += `<div class="cal-row"><div class="cal-label muted small">等待 Agent 上报显卡…</div><div class="cal-track"></div></div>`;
+      html += `<div class="cal-row cal-gpu"><div class="cal-label muted small">等待 Agent 上报显卡…</div><div class="cal-track"></div></div>`;
     }
     for (const g of s.gpus) {
       const util = g.utilization ?? 0;
@@ -274,66 +356,133 @@ function renderCalendar() {
         : `<span>离线</span>`;
       const procs = g.processes.map((p) => `${p.user || "?"}(pid ${p.pid}, ${gb(p.used_memory)}G)`).join("\n");
       const alert = g.alerts.length
-        ? `<span class="alert" title="今天未预约这张卡、却在上面运行程序的用户：\n${esc(procs)}">⚠ 未预约使用：${esc(g.alerts.join(", "))}</span>`
+        ? `<span class="alert-ico" title="${esc(`这些用户未预约，但正在使用 GPU：\n${g.alerts.map((a) => `• ${a}`).join("\n")}`)}">${ALERT_ICON}</span>`
         : "";
-      html += `<div class="cal-row"><div class="cal-label" title="${esc(procs || "无进程")}">
-        <span class="gpu-title"><b>GPU${g.index}</b> · ${esc(g.name.replace(/^NVIDIA /, ""))}</span>
-        <span class="gpu-stat">${stat}</span>${alert}</div><div class="cal-track">`;
+      const { blocks, lanes } = buildBlocks(byGpu[g.id] || [], today, vStart, vEnd);
+      html += `<div class="cal-row cal-gpu"><div class="cal-label gpu-label" title="${esc(procs || "无进程")}">
+        <div class="gpu-main"><span class="gpu-title"><b>GPU${g.index}</b> · ${esc(g.name.replace(/^NVIDIA /, ""))}</span>
+        <span class="gpu-stat">${stat}</span></div>${alert}</div>
+        <div class="cal-track lanes-${Math.min(lanes, 3)}" style="--lanes:${lanes}">`;
       dates.forEach((d, i) => {
         html += `<div class="cal-cell ${cellClass(d)}" style="grid-column:${i + 1}" data-server="${s.id}" data-gpu="${g.id}" data-date="${d}"></div>`;
       });
-      for (const r of byGpu[g.id] || []) {
-        const c1 = Math.max(0, diffDays(cal.start, r.start_date)) + 1;
-        const c2 = Math.min(days - 1, diffDays(cal.start, r.end_date)) + 1;
-        const mine = r.user_id === state.me.id;
-        html += `<div class="bar ${mine ? "mine" : ""}" style="grid-column:${c1}/${c2 + 1};--h:${hue(r.user_id)}" data-res="${r.id}"
-          title="${esc(`${r.user_name}（${r.linux_username || "-"}）\n${r.start_date} ~ ${r.end_date}${r.auto_renew ? "（自动续约）" : ""}\n${r.note}`)}">
-          <span>${r.auto_renew ? "🔁 " : ""}${esc(r.user_name)}</span>${r.note ? `<small>${esc(r.note)}</small>` : ""}</div>`;
+      for (const b of blocks) {
+        const c = b.chain, head = c.head;
+        const mine = c.user_id === state.me.id;
+        const n = state.bars.push(b) - 1;
+        const tip = `${c.user_name}（${c.linux_username || "-"}）\n${c.start} ~ ${c.end}${c.items.length > 1 ? `（${c.items.length} 段连续预约）` : ""}`
+          + `${head?.auto_renew ? "\n🔁 自动续约" : ""}${head?.note ? `\n${head.note}` : ""}${b.past ? "\n（已结束的部分）" : ""}`;
+        html += `<div class="bar ${mine ? "mine" : ""} ${b.past ? "past" : ""} ${b.cutL ? "cut-l" : ""} ${b.cutR ? "cut-r" : ""}"
+          style="grid-column:${b.c1}/${b.c2 + 1};grid-row:${b.lane + 1};--h:${hue(c.user_id)}" data-bar="${n}" title="${esc(tip)}">
+          <span>${!b.past && head?.auto_renew ? "🔁 " : ""}${esc(c.user_name)}</span>${!b.past && head?.note ? `<small>${esc(head.note)}</small>` : ""}</div>`;
       }
       html += `</div></div>`;
     }
+    html += `</div></div></div>`;
   }
   root.innerHTML = html;
 }
 
 $("#calendar").addEventListener("click", (e) => {
   const bar = e.target.closest(".bar");
-  if (bar) return openDetail(state.cal.reservations.find((r) => r.id === Number(bar.dataset.res)));
+  if (bar) {
+    const b = state.bars[Number(bar.dataset.bar)];
+    // 合并后的色块由多条预约组成：按点击的位置找到那一天对应的预约
+    const rect = bar.parentElement.getBoundingClientRect();
+    const col = Math.min(monthDays() - 1, Math.max(0, Math.floor(((e.clientX - rect.left) / rect.width) * monthDays())));
+    const day = addDays(monthStart(), col);
+    const r = b.chain.items.find((x) => x.start_date <= day && day <= x.end_date) || b.chain.head || b.chain.items[0];
+    return openDetail(r);
+  }
   const cell = e.target.closest(".cal-cell[data-gpu]");
   if (cell && !cell.classList.contains("past")) {
-    openBooking({ serverId: Number(cell.dataset.server), gpuId: Number(cell.dataset.gpu), date: cell.dataset.date });
+    return openBooking({ serverId: Number(cell.dataset.server), gpuId: Number(cell.dataset.gpu), date: cell.dataset.date });
   }
+  const head = e.target.closest("[data-toggle-srv]");
+  if (head) toggleServer(head);
+});
+$("#calendar").addEventListener("keydown", (e) => {
+  const head = e.target.closest?.("[data-toggle-srv]");
+  if (head && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleServer(head); }
 });
 
-$("#prev").onclick = () => { state.start = addDays(state.start, -state.days); loadCalendar(); };
-$("#next").onclick = () => { state.start = addDays(state.start, state.days); loadCalendar(); };
-$("#go-today").onclick = () => { state.start = state.config.today; loadCalendar(); };
-$("#days").onchange = (e) => { state.days = Number(e.target.value); loadCalendar(); };
+// 折叠 / 展开一台服务器：只切换 class，由 CSS 过渡负责动画（不重画日历，动画才不会被打断）
+function toggleServer(head) {
+  const id = Number(head.dataset.toggleSrv);
+  const group = head.closest(".cal-server-group");
+  const collapsed = group.classList.toggle("collapsed");
+  head.setAttribute("aria-expanded", String(!collapsed));
+  if (collapsed) state.collapsed.add(id); else state.collapsed.delete(id);
+  writeCollapsed();
+}
+
+$("#prev").onclick = () => setMonth(state.month.y, state.month.m - 1);
+$("#next").onclick = () => setMonth(state.month.y, state.month.m + 1);
 $("#new-booking").onclick = () => openBooking({});
+
+// 年 / 月选择
+const monthDialog = $("#month-dialog");
+let pickYear = 0;
+function renderMonthPicker() {
+  $("#year-label").textContent = `${pickYear} 年`;
+  $("#month-grid").innerHTML = MONTH_CN.map((n, i) => {
+    const cur = pickYear === state.month.y && i + 1 === state.month.m;
+    return `<button type="button" class="btn ${cur ? "primary" : ""}" data-pick-month="${i + 1}">${n}月</button>`;
+  }).join("");
+}
+$("#month-btn").onclick = () => { pickYear = state.month.y; renderMonthPicker(); monthDialog.showModal(); };
+$("#year-prev").onclick = () => { pickYear--; renderMonthPicker(); };
+$("#year-next").onclick = () => { pickYear++; renderMonthPicker(); };
+$("#month-grid").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-pick-month]");
+  if (!b) return;
+  monthDialog.close();
+  setMonth(pickYear, Number(b.dataset.pickMonth));
+});
+$("#month-this").onclick = () => {
+  const [y, m] = state.config.today.split("-").map(Number);
+  monthDialog.close();
+  setMonth(y, m);
+};
+$("#month-close").onclick = () => monthDialog.close();
 
 // ---------------- 预约弹窗 ----------------
 
 const bookingDialog = $("#booking-dialog");
 const bookingForm = $("#booking-form");
 
-function busyMap(start, end) {
-  // 根据当前已加载的日历数据标出冲突（只是提示，最终以服务端校验为准）
-  const m = {};
+// 根据当前已加载的日历数据标出每张卡在所选日期范围内的占用情况（只是提示，最终以服务端校验为准）：
+// peak = 范围内某一天最多有几个人同时预约；mine = 预约人自己在这张卡上已有预约；names = 涉及的人
+function gpuLoad(start, end) {
+  const owner = state.me.is_admin && bookingForm.user_id.value ? Number(bookingForm.user_id.value) : state.me.id;
+  const out = {};
   for (const r of state.cal?.reservations || []) {
-    if (r.start_date <= end && r.end_date >= start) m[r.gpu_id] = r.user_name;
+    if (r.start_date > end || r.end_date < start) continue;
+    const o = (out[r.gpu_id] ||= { rs: [], names: new Set(), mine: false, peak: 0 });
+    o.rs.push(r);
+    o.names.add(r.user_name);
+    if (r.user_id === owner) o.mine = true;
   }
-  return m;
+  for (const o of Object.values(out)) {
+    for (let d = start, n = 0; d <= end && n < 400; d = addDays(d, 1), n++) {
+      o.peak = Math.max(o.peak, o.rs.filter((r) => r.start_date <= d && d <= r.end_date).length);
+    }
+  }
+  return out;
 }
 
 function renderGpuPicks(selected = []) {
   const s = state.cal.servers.find((x) => x.id === Number(bookingForm.server.value));
-  const busy = busyMap(bookingForm.start_date.value, bookingForm.end_date.value || bookingForm.start_date.value);
+  const load = gpuLoad(bookingForm.start_date.value, bookingForm.end_date.value || bookingForm.start_date.value);
+  const cap = state.config.max_gpu_sharers;
   $("#booking-gpus").innerHTML = (s?.gpus || [])
     .map((g) => {
-      const b = busy[g.id];
-      return `<label class="${b ? "busy" : ""}" title="${b ? `已被 ${esc(b)} 预约` : ""}">
-        <input type="checkbox" name="gpu" value="${g.id}" ${selected.includes(g.id) && !b ? "checked" : ""} ${b ? "disabled" : ""}>
-        GPU${g.index}${b ? ` · ${esc(b)}` : ""}</label>`;
+      const o = load[g.id];
+      const blocked = !!o && (o.mine || o.peak >= cap);
+      const tip = !o ? "" : o.mine ? "你在这段时间已经预约了这张卡" : `${[...o.names].join("、")} 已预约${o.peak >= cap ? `，人数已满（最多 ${cap} 人共用）` : `，还可以再有 ${cap - o.peak} 人共用`}`;
+      return `<label class="${blocked ? "busy" : ""}" title="${esc(tip)}">
+        <input type="checkbox" name="gpu" value="${g.id}" ${selected.includes(g.id) && !blocked ? "checked" : ""} ${blocked ? "disabled" : ""}>
+        GPU${g.index}${o ? ` · ${o.mine ? "你已预约" : `${o.peak}/${cap} 人`}` : ""}</label>`;
     })
     .join("") || `<span class="muted small">该服务器还没有上报显卡</span>`;
 }
@@ -349,7 +498,7 @@ async function openBooking({ serverId, gpuId, date }) {
   bookingForm.end_date.value = date || today;
   bookingForm.start_date.min = bookingForm.end_date.min = state.me.is_admin ? "" : today;
   $$(".renew-rule").forEach((el) => (el.textContent = renewRuleText()));
-  $("#booking-rule").textContent = `规则：单次最长 ${state.config.max_reservation_days} 天，最多提前 ${state.config.max_advance_days} 天；按自然日计算，开始当天 00:00 开放登录，结束日 24:00 关闭。`;
+  $("#booking-rule").textContent = `规则：单次最长 ${state.config.max_reservation_days} 天，最多提前 ${state.config.max_advance_days} 天；按自然日计算，开始当天 00:00 起可使用所选显卡，结束日 24:00 收回。同一张卡同一天最多 ${state.config.max_gpu_sharers} 人共用。`;
   if (state.me.is_admin) {
     const users = state.users.length ? state.users : (state.users = await api("/api/admin/users"));
     $("#booking-user").innerHTML = users
@@ -362,6 +511,7 @@ async function openBooking({ serverId, gpuId, date }) {
 }
 
 bookingForm.server.onchange = () => renderGpuPicks();
+bookingForm.user_id.onchange = () => renderGpuPicks($$("input[name=gpu]:checked", bookingForm).map((i) => Number(i.value)));
 bookingForm.start_date.onchange = () => {
   if (bookingForm.end_date.value < bookingForm.start_date.value) bookingForm.end_date.value = bookingForm.start_date.value;
   renderGpuPicks($$("input[name=gpu]:checked", bookingForm).map((i) => Number(i.value)));
@@ -408,7 +558,8 @@ function openDetail(r) {
   $("#detail-info").innerHTML = `${esc(r.user_name)}（${esc(r.linux_username || "-")}）<br>${r.start_date} ~ ${r.end_date}`
     + `${r.auto_renew ? `<br>🔁 已开启自动续约${r.renew_count ? `（已续约 ${r.renew_count} 次）` : ""}` : ""}${r.note ? `<br>${esc(r.note)}` : ""}`;
   $("#detail-error").textContent = "";
-  $$(".editable", detailForm).forEach((el) => el.classList.toggle("hidden", !r.editable));
+  const editable = r.editable && r.end_date >= today;  // 已结束的预约只能查看
+  $$(".editable", detailForm).forEach((el) => el.classList.toggle("hidden", !editable));
   $$(".renew-rule").forEach((el) => (el.textContent = renewRuleText()));
   detailForm.start_date.value = r.start_date;
   detailForm.end_date.value = r.end_date;
@@ -445,7 +596,7 @@ $("#detail-release").onclick = async () => {
   const r = detailRes;
   const msg = r.start_date >= state.config.today
     ? "确定取消这条预约吗？"
-    : "确定立即释放吗？今天起这张卡会让给别人，你将不能再使用它（若没有其他预约）。";
+    : `确定立即释放吗？今天起这张卡会让给别人，你将不能再使用它${state.config.require_reservation_to_login ? "，也无法再登录该服务器" : ""}（若没有其他预约）。`;
   if (!confirm(msg)) return;
   try {
     await api(`/api/reservations/${r.id}`, { method: "DELETE" });
@@ -500,7 +651,9 @@ async function renderAccount() {
     }).join("");
     box.innerHTML = `<div class="group" style="margin-bottom:8px">用户名 <code>${esc(me.linux_username)}</code>　UID <code>${me.uid}</code>
         <button class="btn small" id="rename-btn">修改</button></div>
-      <p class="muted small">随时都可以登录服务器（需在实验室内网），不需要预约；预约只决定你能用哪些显卡。登录后执行 <code>lab-gpus</code> 查看今天分配给你的显卡。</p>
+      <p class="muted small">${state.config.require_reservation_to_login
+        ? "只有在<b>当天预约了该服务器显卡</b>时才能登录（需在实验室内网）。"
+        : "随时都可以登录服务器（需在实验室内网），不需要预约；预约只决定你能用哪些显卡。"}登录后执行 <code>lab-gpus</code> 查看今天分配给你的显卡。</p>
       ${servers.length ? `<div class="table-wrap"><table><tr><th>服务器</th><th>登录命令</th><th>账号状态</th></tr>${rows}</table></div>` : `<p class="muted">暂无服务器</p>`}`;
     $("#rename-btn").onclick = openRename;
   }
@@ -946,7 +1099,7 @@ function renderOnboarding() {
     const running = state.migrations.some((t) => ["queued", "running", "pending_approval"].includes(t.status));
     body.innerHTML = `<h2>设置完成 🎉</h2>
       <ul>
-        <li>在「GPU 日历」上点空白格子即可预约显卡，预约当天起可以使用所选显卡（没有预约也能登录服务器、迁移文件，只是看不到显卡）。</li>
+        <li>在「GPU 日历」上点空白格子即可预约显卡，预约当天起可以使用所选显卡${state.config.require_reservation_to_login ? "，也只有预约当天才能登录对应服务器" : "（没有预约也能登录服务器、迁移文件，只是看不到显卡）"}。</li>
         <li>登录命令：<code>ssh ${esc(me.linux_username)}@服务器地址</code>${me.has_password ? "，输入你刚设置的密码" : ""}。</li>
         ${running ? "<li>文件迁移正在后台进行，进度见顶部的 📦。</li>" : ""}
       </ul>`;
@@ -1012,6 +1165,7 @@ async function loadAdmin() {
     r.auto_renew_before_hours.value = settings.auto_renew_before_hours;
     r.auto_renew_days.value = settings.auto_renew_days;
     r.migration_requires_approval.checked = settings.migration_requires_approval === "1";
+    r.require_reservation_to_login.checked = settings.require_reservation_to_login === "1";
   } catch (err) {
     toast(err.message);
   }
@@ -1164,6 +1318,7 @@ $("#rules-form").addEventListener("submit", async (e) => {
         auto_renew_before_hours: f.auto_renew_before_hours.value,
         auto_renew_days: f.auto_renew_days.value,
         migration_requires_approval: f.migration_requires_approval.checked ? "1" : "0",
+        require_reservation_to_login: f.require_reservation_to_login.checked ? "1" : "0",
       },
     });
     state.config = await api("/api/config");
@@ -1193,7 +1348,7 @@ async function boot() {
   state.config = await api("/api/config");
   document.title = `${state.config.lab_name}平台`;
   $("#brand").textContent = $("#login-title").textContent = document.title;
-  state.start = state.config.today;
+  { const [y, m] = state.config.today.split("-").map(Number); state.month = { y, m }; }
   try {
     state.me = await api("/api/me", { allow401: true });
   } catch {

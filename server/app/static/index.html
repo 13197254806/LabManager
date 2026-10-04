@@ -44,21 +44,16 @@
       <section id="tab-calendar" class="tab">
         <div class="toolbar">
           <div class="group">
-            <button class="btn" id="prev" title="上一段">‹</button>
-            <button class="btn" id="go-today">今天</button>
-            <button class="btn" id="next" title="下一段">›</button>
+            <button class="btn" id="prev" title="上个月">‹</button>
+            <button class="btn month-btn" id="month-btn" title="选择年 / 月"></button>
+            <button class="btn" id="next" title="下个月">›</button>
             <span class="range" id="range-label"></span>
           </div>
           <div class="group">
-            <select id="days">
-              <option value="7">7 天</option>
-              <option value="14" selected>14 天</option>
-              <option value="28">28 天</option>
-            </select>
             <button class="btn primary" id="new-booking">+ 预约 GPU</button>
           </div>
         </div>
-        <p class="hint">点击空白格子预约，点击色块查看 / 续约 / 释放。🔁 表示已开启自动续约。行首显示实时利用率与显存（各服务器每分钟上报）。</p>
+        <p class="hint">点击空白格子预约，点击色块查看 / 续约 / 释放；点击服务器名可折叠。同一张卡同一天最多可多人共用，并排显示；浅色表示已过去的预约；🔁 表示已开启自动续约。行首显示实时利用率与显存（各服务器每分钟上报）。</p>
         <div class="cal-wrap"><div id="calendar" class="calendar"></div></div>
       </section>
 
@@ -142,6 +137,7 @@ cat ~/.ssh/id_ed25519.pub   # 复制输出的整行</pre>
                 <label>每次自动延长多少天<input type="number" name="auto_renew_days" min="1" max="60" required></label>
               </div>
               <label class="check"><input type="checkbox" name="migration_requires_approval"> 成员发起的文件迁移需要管理员确认</label>
+              <label class="check" style="align-items:flex-start"><input type="checkbox" name="require_reservation_to_login" style="margin-top:3px"> <span>仅允许当天预约了该服务器显卡的成员 SSH 登录<br><span class="muted small">打开：没有预约这台服务器的成员不能登录它；关闭：所有成员都能登录，预约只决定能用哪些显卡。账号 / 密码设置和文件迁移不受影响，约 1 分钟内生效。</span></span></label>
               <div><button class="btn primary">保存规则</button></div>
             </form>
           </div>
@@ -207,6 +203,19 @@ cat ~/.ssh/id_ed25519.pub   # 复制输出的整行</pre>
         <button class="btn primary editable" value="ok">保存修改</button>
       </div>
     </form>
+  </dialog>
+
+  <!-- 选择年 / 月 -->
+  <dialog id="month-dialog">
+    <div class="stack">
+      <div class="year-bar"><button class="btn" id="year-prev" type="button" title="上一年">‹</button><b id="year-label"></b><button class="btn" id="year-next" type="button" title="下一年">›</button></div>
+      <div class="month-grid" id="month-grid"></div>
+      <div class="actions">
+        <button class="btn" id="month-this" type="button">回到本月</button>
+        <span class="spacer"></span>
+        <button class="btn" id="month-close" type="button">关闭</button>
+      </div>
+    </div>
   </dialog>
 
   <!-- 修改用户名 -->

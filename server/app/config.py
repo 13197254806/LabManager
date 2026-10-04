@@ -34,6 +34,8 @@ class Settings:
     # 预约规则（管理员不受限）
     max_reservation_days = int(_env("MAX_RESERVATION_DAYS", "14"))
     max_advance_days = int(_env("MAX_ADVANCE_DAYS", "30"))
+    # 同一张 GPU 同一天最多几个人共用
+    max_gpu_sharers = max(1, int(_env("MAX_GPU_SHARERS", "3")))
     # 每天几点提醒“今天到期”
     reminder_hour = int(_env("REMINDER_HOUR", "20"))
 

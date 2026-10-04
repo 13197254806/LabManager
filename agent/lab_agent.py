@@ -6,7 +6,8 @@
   2. 取回“这台机器此刻应该是什么状态”，在本机对齐：
      - 为每位成员维护 Linux 账号（按 uid 识别：平台上改了用户名，这里就改名并移动家目录）
      - 同步登录密码（平台只下发 sha512-crypt 哈希）和 SSH 公钥
-     - 今天有预约的成员加入 lab-active 组（只用来让管理员看出谁今天有预约，登录不受它限制），否则移出
+     - 维护 lab-active 组（sshd 只允许该组和 lab-admin 登录）：平台上“预约才能登录”开关关闭时，
+       所有成员都在组里；开启时，只有今天预约了本机显卡的成员在组里
      - 写 /etc/lab-gpu/<用户名>，登录时据此设置 CUDA_VISIBLE_DEVICES：预约了哪些卡就能看到哪些，
        没有预约则文件为空、看不到任何卡。登录本身不需要预约
      - 被停用的成员：锁定账号，保留家目录
@@ -50,7 +51,7 @@ VERSION = "0.3.0"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
-GROUP_ACTIVE = "lab-active"   # 今天有 GPU 预约的账号（仅供查看，sshd 不依赖它）
+GROUP_ACTIVE = "lab-active"   # 今天允许 SSH 登录的账号（是否要求有预约，由平台上的开关决定）
 GROUP_ADMIN = "lab-admin"     # 本机管理员和 root（由安装脚本设置，Agent 不改动）
 PROTECTED_GROUPS = ("sudo", "admin", "wheel", GROUP_ADMIN)
 KEYS_DIR = "/etc/ssh/lab_authorized_keys"
@@ -568,8 +569,9 @@ class Agent(object):
             else:
                 self.remove_file(key_path)
 
-            active = bool(u.get("active"))
-            self.set_group(local, GROUP_ACTIVE, active)
+            active = bool(u.get("active"))  # 今天预约了本机的显卡
+            # 登录权限：开关关闭时所有成员都能登录；开启时只有今天有预约的成员能登录
+            self.set_group(local, GROUP_ACTIVE, active or not getattr(self, "require_reservation", False))
             gpu_path = os.path.join(GPU_DIR, local)
             gpus = [str(int(i)) for i in u.get("gpus") or []]
             # 没有预约：写空文件，登录后 CUDA_VISIBLE_DEVICES 为空、看不到任何卡（登录和文件迁移不受影响）
@@ -602,8 +604,10 @@ class Agent(object):
     def once(self):
         state = self.sync()
         users = state.get("users") or []
-        log.info("同步成功：%s %s，成员 %d 人，今日有 GPU 预约 %d 人", state.get("server"), state.get("date"),
-                 len(users), sum(1 for u in users if u.get("active")))
+        self.require_reservation = bool(state.get("require_reservation_to_login"))
+        log.info("同步成功：%s %s，成员 %d 人，今日有 GPU 预约 %d 人，%s", state.get("server"), state.get("date"),
+                 len(users), sum(1 for u in users if u.get("active")),
+                 "仅预约者可登录" if self.require_reservation else "所有成员可登录")
         self.reconcile(users)
         if self.accounts != getattr(self, "_sent_accounts", None):
             self.sync()  # 账号状态有变化（新建、改名、出错），立即上报给平台
