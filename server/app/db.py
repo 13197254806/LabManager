@@ -49,6 +49,7 @@ def init_db():
 
 # 轻量级“迁移”：给已存在的表补上新增的列（SQLite 的 create_all 不会改已有表）。
 _EXTRA_COLUMNS = {
+    "users": {"tenant_key": "VARCHAR(64)"},
     "servers": {"token": "VARCHAR(64)", "sysinfo_json": "TEXT DEFAULT '{}'",
                 "browse_roots_json": "TEXT DEFAULT '[]'"},
 }

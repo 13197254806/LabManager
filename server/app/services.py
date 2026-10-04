@@ -322,6 +322,8 @@ DEFAULT_SETTINGS = {
     "require_reservation_to_login": "0",
     # 网页自动刷新（GPU 日历、管理页）的间隔；Agent 也按这个间隔上报，让页面上的数据足够新（秒）
     "refresh_interval_seconds": "10",
+    # 1：只允许和管理员同一个飞书组织的成员登录（FEISHU_TENANT_KEY 配置了就以它为准）
+    "restrict_to_admin_tenant": "1",
 }
 
 

@@ -551,11 +551,11 @@ def admin_delete_server(sid: int, _: User = Depends(admin_user), db: Session = D
 SETTING_KEYS = (
     "welcome_title", "welcome_markdown", "welcome_links",
     "auto_renew_before_hours", "auto_renew_days", "migration_requires_approval", "require_reservation_to_login",
-    "refresh_interval_seconds",
+    "refresh_interval_seconds", "restrict_to_admin_tenant",
 )
 INT_SETTINGS = {
     "auto_renew_before_hours": (1, 24 * 14), "auto_renew_days": (1, 60),
-    "migration_requires_approval": (0, 1), "require_reservation_to_login": (0, 1),
+    "migration_requires_approval": (0, 1), "require_reservation_to_login": (0, 1), "restrict_to_admin_tenant": (0, 1),
     "refresh_interval_seconds": (3, 600),
 }
 

@@ -16,6 +16,7 @@ class User(Base):
     union_id: Mapped[str | None] = mapped_column(String(64))
     name: Mapped[str] = mapped_column(String(64))
     avatar_url: Mapped[str | None] = mapped_column(String(512))
+    tenant_key: Mapped[str | None] = mapped_column(String(64))  # 飞书组织标识，登录时记录
     linux_username: Mapped[str | None] = mapped_column(String(32), unique=True)
     # 服务器登录密码的 sha512-crypt 哈希（明文从不落库）；为空表示只能用公钥登录
     password_hash: Mapped[str | None] = mapped_column(String(256))

@@ -76,7 +76,7 @@ CATALOG = [
     ("git", "Git 配置（.gitconfig）", "config", [".gitconfig", ".config/git"]),
     ("vim", "Vim 配置（.vimrc、.vim）", "config", [".vimrc", ".vim"]),
     ("tmux", "tmux / screen 配置", "config", [".tmux.conf", ".screenrc"]),
-    ("condarc", "conda / pip 配置（.condarc、pip.conf）", "config", [".condarc", ".config/pip", ".pip"]),
+    ("condarc", "Conda / Pip 配置（.condarc、pip.conf）", "config", [".condarc", ".config/pip", ".pip"]),
     ("ssh_config", "SSH 客户端配置（.ssh/config、known_hosts）", "config", [".ssh/config", ".ssh/known_hosts"]),
     ("jupyter", "Jupyter / IPython 配置", "config", [".jupyter", ".ipython"]),
     ("local_bin", "用户级命令行工具（~/.local/bin、~/bin）", "software", [".local/bin", "bin"]),

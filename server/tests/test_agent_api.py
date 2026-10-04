@@ -139,3 +139,32 @@ def test_browse_times_out_without_agent(admin, alice, server, monkeypatch):
     orig = browse.broker.ask
     monkeypatch.setattr(browse.broker, "ask", lambda *a, **k: orig(a[0], a[1], a[2], timeout=0.2))
     assert alice.post(f"/api/servers/{sid}/browse", json={"op": "list", "path": ""}).status_code == 504
+
+
+def test_login_restricted_to_admin_tenant(monkeypatch):
+    from app import auth
+    from app.db import SessionLocal
+    from app.models import User
+
+    def callback(open_id, tenant):
+        with SessionLocal() as db:
+            info = {"open_id": open_id, "tenant_key": tenant}
+            return auth._tenant_allowed(db, info), db
+
+    # 还没有任何用户：第一个人放行并成为管理员，记下组织
+    assert callback("ou_admin", "T1")[0]
+    with SessionLocal() as db:
+        auth._login(type("R", (), {"session": {}})(), db, {"open_id": "ou_admin", "name": "a", "tenant_key": "T1"})
+        assert db.query(User).one().is_admin
+    assert callback("ou_member", "T1")[0]          # 同组织放行
+    assert not callback("ou_outsider", "T2")[0]    # 其他组织（个人飞书号）拒绝
+    assert not callback("ou_nobody", None)[0]
+    # 开关关闭后不再限制
+    with SessionLocal() as db:
+        from app import services
+        services.set_setting(db, "restrict_to_admin_tenant", "0")
+        db.commit()
+    assert callback("ou_outsider", "T2")[0]
+    # 环境变量优先
+    monkeypatch.setattr(auth.settings, "feishu_tenant_key", "T9", raising=False)
+    assert not callback("ou_admin", "T1")[0]

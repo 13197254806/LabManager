@@ -6,7 +6,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from . import feishu
+from . import feishu, services
 from .config import settings
 from .db import get_db
 from .models import User
@@ -40,12 +40,32 @@ def _login(request: Request, db: Session, info: dict) -> User:
     user.name = info.get("name") or user.name
     user.union_id = info.get("union_id") or user.union_id
     user.avatar_url = info.get("avatar_url") or user.avatar_url
+    user.tenant_key = info.get("tenant_key") or user.tenant_key
     db.commit()
     if not user.enabled:
         raise HTTPException(403, "你的账号已被管理员停用")
     request.session.clear()
     request.session["uid"] = user.id
     return user
+
+
+def _tenant_allowed(db: Session, info: dict) -> bool:
+    """只允许实验室自己的飞书组织登录。
+    优先用环境变量 FEISHU_TENANT_KEY；没配置时，以管理员登录时记下的组织为准（「管理 → 规则」里可关闭）。
+    还不知道管理员的组织时，只放行已经有账号的人（他们登录后会记下组织），陌生人一律拒绝。"""
+    tenant = info.get("tenant_key")
+    if settings.feishu_tenant_key:
+        return tenant == settings.feishu_tenant_key
+    if services.get_setting(db, "restrict_to_admin_tenant") != "1":
+        return True
+    allowed = {
+        t for t in db.scalars(select(User.tenant_key).where(User.is_admin.is_(True), User.enabled.is_(True))) if t
+    }
+    if allowed:
+        return tenant in allowed
+    if db.scalar(select(User.id).limit(1)) is None:  # 还没有任何人：第一个登录的人成为管理员
+        return True
+    return db.scalar(select(User.id).where(User.open_id == info.get("open_id"))) is not None
 
 
 def _redirect_uri() -> str:
@@ -70,7 +90,8 @@ def callback(request: Request, code: str = "", state: str = "", db: Session = De
     except feishu.FeishuError as e:
         log.warning("飞书登录失败: %s", e)
         return HTMLResponse(f'飞书登录失败：{e}。<a href="/auth/login">重试</a>', status_code=400)
-    if settings.feishu_tenant_key and info.get("tenant_key") != settings.feishu_tenant_key:
+    if not _tenant_allowed(db, info):
+        log.warning("拒绝登录：%s 来自其他飞书组织（tenant_key=%s）", info.get("name"), info.get("tenant_key"))
         return HTMLResponse("仅限本实验室飞书组织的成员使用", status_code=403)
     _login(request, db, info)
     return RedirectResponse("/")

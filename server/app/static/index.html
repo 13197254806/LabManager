@@ -131,6 +131,7 @@
               <label>页面自动刷新间隔（秒）<input type="number" name="refresh_interval_seconds" min="3" max="600" required>
                 <span class="muted small">GPU 日历和管理页按这个间隔自动刷新；GPU 服务器上的 Agent 也按它上报，数据才会同步变新。</span></label>
               <label class="check"><input type="checkbox" name="migration_requires_approval"> 成员发起的文件迁移需要管理员确认</label>
+              <label class="check" style="align-items:flex-start"><input type="checkbox" name="restrict_to_admin_tenant" style="margin-top:3px"> <span>仅允许和管理员同一个飞书组织的成员登录平台<br><span class="muted small">打开：其他飞书组织的人（包括个人飞书号）即使授权也不能登录；以管理员最近一次登录时的组织为准。关闭：只要能通过飞书应用授权就能登录。</span></span></label>
               <label class="check" style="align-items:flex-start"><input type="checkbox" name="require_reservation_to_login" style="margin-top:3px"> <span>仅允许当天预约了该服务器显卡的成员 SSH 登录<br><span class="muted small">打开：没有预约这台服务器的成员不能登录它；关闭：所有成员都能登录，预约只决定能用哪些显卡。账号 / 密码设置和文件迁移不受影响，约 1 分钟内生效。</span></span></label>
               <div><button class="btn primary">保存规则</button></div>
             </form>

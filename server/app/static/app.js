@@ -959,9 +959,14 @@ $("#mig-chip").onclick = () => {
 const CFG_GROUPS = {
   config: { title: "配置文件", hint: "默认全选，文件里的旧家目录路径会自动改成你的家目录", checked: true },
   software: { title: "用户级软件", hint: "", checked: false },
-  cache: { title: "缓存", hint: "体积较大，需要时再选", checked: false },
-  credential: { title: "共享账号的凭据", hint: "这些是大家共用的密钥 / 令牌，建议以后换成自己的；不选则不会复制", checked: false },
+  cache: { title: "缓存", hint: "", checked: false },
+  credential: { title: "共享账号的凭据", hint: "", checked: false },
 };
+// 在界面上从上到下的顺序（Conda 在最前面，单独处理）
+const CFG_ORDER = ["cache", "software", "config", "credential"];
+// 选项名称里原来带的相对路径去掉，改为按实际找到的文件显示绝对路径
+const cfgName = (c) => (c.key === "condarc" ? "Conda / Pip 配置" : c.label.replace(/[（(][^）)]*[）)]/, "").trim());
+const cfgPaths = (lg, c) => (c.paths || []).map((p) => `${lg.home.replace(/\/$/, "")}/${p}`).join("、");
 const MODE_NAMES = { move: "移动", copy: "复制", link: "原地保留" };
 
 async function renderPicker(container, onSubmitted) {
@@ -1000,28 +1005,30 @@ async function renderPicker(container, onSubmitted) {
       for (const c of lg.configs) (groups[c.group] ||= []).push(c);
       html += `<div class="pk-section" data-legacy="${li}">
         <h3>① 从共享账号 <code>${esc(lg.user)}</code> 复制环境与配置 <span class="muted small">（复制，原账号不受影响）</span></h3>`;
-      for (const [g, meta] of Object.entries(CFG_GROUPS)) {
-        if (!groups[g]) continue;
-        html += `<div class="label">${meta.title}${meta.hint ? ` <span class="muted small">· ${meta.hint}</span>` : ""}</div><div class="cfg-grid">`;
-        html += groups[g].map((c) => `<label class="check cfg ${g === "credential" ? "cred" : ""}"><input type="checkbox" data-cfg="${esc(c.key)}" ${meta.checked ? "checked" : ""}>
-          <span>${esc(c.label)} <span class="muted small">${fmtBytes(c.size)}</span></span></label>`).join("");
-        html += `</div>`;
-      }
+      const home = lg.home.replace(/\/$/, "");
+      if (lg.conda.length) html += `<div class="label">Conda</div>`;
       for (const [ci, c] of lg.conda.entries()) {
         const isUser = c.name === ".conda";
         if (!isUser) {
-          html += `<div class="label">Conda</div><div class="cfg-grid">
-            <label class="check"><input type="checkbox" data-conda="${ci}" data-base="1" checked>
-              <span>conda 本体 <code>~/${esc(c.name)}</code> <span class="muted small">${fmtBytes(c.base_size)} · 不含环境，之后自己 conda create</span></span></label></div>`;
+          html += `<div class="cfg-grid"><label class="check"><input type="checkbox" data-conda="${ci}" data-base="1" checked>
+              <span>Conda 本体（<code>${esc(`${home}/${c.name}`)}</code>） <span class="muted small">${fmtBytes(c.base_size)}</span></span></label></div>`;
         }
         if (c.envs.length) {
-          html += `<div class="env-head"><span>${isUser ? "<code>~/.conda/envs</code> 里" : `<code>~/${esc(c.name)}/envs</code> 里`}的已有环境（可选，复制后自动修正路径）</span>
+          html += `<div class="env-head"><span>Conda 环境（<code>${esc(`${home}/${c.name}/envs`)}</code>，迁移时自动修正路径问题）</span>
             <button type="button" class="link-btn" data-expand>展开</button></div>
             <div class="cfg-grid hidden" style="margin-top:6px">${c.envs.map((e) => `<label class="check"><input type="checkbox" data-conda="${ci}" data-env="${esc(e.name)}">
               <span>${esc(e.name)} <span class="muted small">${fmtBytes(e.size)}</span></span></label>`).join("")}</div>`;
         }
       }
       if (!lg.conda.length) html += `<p class="muted small">共享账号家目录里没有找到 conda。</p>`;
+      for (const g of CFG_ORDER) {
+        const meta = CFG_GROUPS[g];
+        if (!groups[g]) continue;
+        html += `<div class="label">${meta.title}${meta.hint ? ` <span class="muted small">· ${meta.hint}</span>` : ""}</div><div class="cfg-grid">`;
+        html += groups[g].map((c) => `<label class="check cfg ${g === "credential" ? "cred" : ""}"><input type="checkbox" data-cfg="${esc(c.key)}" ${meta.checked ? "checked" : ""}>
+          <span>${esc(cfgName(c))}（<code>${esc(cfgPaths(lg, c))}</code>） <span class="muted small">${fmtBytes(c.size)}</span></span></label>`).join("");
+        html += `</div>`;
+      }
       html += `<p class="muted small">提示：apt 安装的软件（git、vim、tmux、gcc、CUDA 等）是全系统共享的，新账号直接可用，不需要迁移。</p></div>`;
     }
     html += `<div class="pk-section"><h3>② 迁移我的文件和目录</h3>
@@ -1365,6 +1372,7 @@ async function loadAdmin() {
     r.auto_renew_days.value = settings.auto_renew_days;
     r.migration_requires_approval.checked = settings.migration_requires_approval === "1";
     r.require_reservation_to_login.checked = settings.require_reservation_to_login === "1";
+    r.restrict_to_admin_tenant.checked = settings.restrict_to_admin_tenant === "1";
     r.refresh_interval_seconds.value = settings.refresh_interval_seconds;
   } catch (err) {
     toast(err.message);
@@ -1539,6 +1547,7 @@ $("#rules-form").addEventListener("submit", async (e) => {
         auto_renew_days: f.auto_renew_days.value,
         migration_requires_approval: f.migration_requires_approval.checked ? "1" : "0",
         require_reservation_to_login: f.require_reservation_to_login.checked ? "1" : "0",
+        restrict_to_admin_tenant: f.restrict_to_admin_tenant.checked ? "1" : "0",
         refresh_interval_seconds: f.refresh_interval_seconds.value,
       },
     });
