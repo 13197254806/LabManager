@@ -197,13 +197,31 @@ UNIT
     systemctl restart lab-chisel
     info "已启动 chisel 服务端，监听 $CHISEL_PORT"
 
-    # 防火墙：只放行 WebVPN 出口网段访问 chisel 端口（GPU 默认 ufw deny，不放行就连不进来）
+    # 防火墙：只放行 WebVPN 出口网段访问 chisel 端口。依次处理 ufw / firewalld / iptables（有哪个启用就配哪个）
+    OPENED=0
     if command -v ufw >/dev/null && ufw status 2>/dev/null | grep -q "Status: active"; then
         ufw allow from "$CHISEL_ALLOW" to any port "$CHISEL_PORT" proto tcp comment "lab chisel (WebVPN)" >/dev/null
-        info "已放行 $CHISEL_ALLOW 访问 $CHISEL_PORT/tcp"
-    else
-        warn "没有检测到启用的 ufw：请自行放行来源 $CHISEL_ALLOW 访问本机 $CHISEL_PORT/tcp，否则隧道连不进来"
+        info "ufw：已放行 $CHISEL_ALLOW 访问 $CHISEL_PORT/tcp"; OPENED=1
     fi
+    if command -v firewall-cmd >/dev/null && firewall-cmd --state >/dev/null 2>&1; then
+        firewall-cmd --permanent --add-rich-rule="rule family=ipv4 source address=$CHISEL_ALLOW port port=$CHISEL_PORT protocol=tcp accept" >/dev/null
+        firewall-cmd --reload >/dev/null
+        info "firewalld：已放行 $CHISEL_ALLOW 访问 $CHISEL_PORT/tcp"; OPENED=1
+    fi
+    # iptables：只有 INPUT 默认丢弃、或链里有 REJECT/DROP 规则时才需要加；规则不会持久化，重启后由 lab-chisel 服务重新加
+    if command -v iptables >/dev/null && iptables -S INPUT 2>/dev/null | grep -qE '^-P INPUT (DROP|REJECT)|^-A INPUT .*-j (DROP|REJECT)'; then
+        RULE="-s $CHISEL_ALLOW -p tcp --dport $CHISEL_PORT -j ACCEPT"
+        # shellcheck disable=SC2086
+        iptables -C INPUT $RULE 2>/dev/null || iptables -I INPUT 1 $RULE
+        mkdir -p /etc/systemd/system/lab-chisel.service.d
+        cat > /etc/systemd/system/lab-chisel.service.d/firewall.conf <<FW
+[Service]
+ExecStartPre=-/bin/sh -c 'iptables -C INPUT $RULE 2>/dev/null || iptables -I INPUT 1 $RULE'
+FW
+        systemctl daemon-reload
+        info "iptables：已放行 $CHISEL_ALLOW 访问 $CHISEL_PORT/tcp（每次 lab-chisel 启动时自动补上）"; OPENED=1
+    fi
+    [ "$OPENED" -eq 1 ] || info "本机没有启用 ufw / firewalld，也没有 iptables 拦截规则，无需放行 $CHISEL_PORT/tcp"
 fi
 
 # ---------- 3. 安装文件 ----------
@@ -243,17 +261,28 @@ json.dump(cfg, open(path, "w"), indent=2)
 umask 022
 
 # ---------- 4. 首次同步 ----------
+TUNNEL_OK=1
 if [ -n "$CHISEL_PORT" ]; then
     info "等待公网服务器经 WebVPN 建立隧道（最多 3 分钟）..."
     for i in $(seq 1 90); do
         curl -fsS -m 5 --noproxy '*' "$SERVER_URL/healthz" >/dev/null 2>&1 && break
-        [ "$i" -eq 90 ] && die "隧道一直没有建立：在公网服务器上执行 docker compose logs tunnel 查看原因"
+        if [ "$i" -eq 90 ]; then
+            TUNNEL_OK=0
+            warn "3 分钟内隧道还没建立。Agent 仍会装好并每分钟重试，隧道通了就会自动同步，不需要重跑本命令。"
+            warn "排查：在公网服务器的 deploy 目录执行 docker compose exec tunnel python -m app.tunnel status 看错误原因；"
+            warn "      docker compose logs --tail 50 tunnel 看 chisel 的连接日志；并确认平台「管理 → GPU 服务器」里这台的内网地址就是本机内网 IP。"
+            break
+        fi
         sleep 2
     done
-    info "隧道已连通"
+    if [ "$TUNNEL_OK" -eq 1 ]; then info "隧道已连通"; fi
 fi
-info "首次同步（会创建成员账号）..."
-python3 /opt/lab-agent/lab_agent.py --once || die "同步失败：请检查本机能否访问 $SERVER_URL，以及 token 是否正确"
+if [ "$TUNNEL_OK" -eq 1 ]; then
+    info "首次同步（会创建成员账号）..."
+    python3 /opt/lab-agent/lab_agent.py --once || die "同步失败：请检查本机能否访问 $SERVER_URL，以及 token 是否正确"
+else
+    warn "隧道未通，跳过首次同步；lab-agent 服务会在隧道通后自动同步（创建成员账号）"
+fi
 
 cat > /etc/systemd/system/lab-agent.service <<'UNIT'
 [Unit]

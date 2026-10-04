@@ -72,25 +72,29 @@ function toast(msg) {
   toastTimer = setTimeout(() => el.classList.add("hidden"), 3500);
 }
 
-// 复制文本。navigator.clipboard 只在 HTTPS / localhost 可用；平台用 http+IP 访问时退回 execCommand。
-async function copyText(text) {
+// 复制文本，成功返回 true。navigator.clipboard 只在 HTTPS / localhost 可用；平台用 http+IP 访问时退回 execCommand。
+// 弹窗（showModal）打开时页面其余部分是 inert 的，临时输入框必须放进弹窗里才能聚焦、选中，否则复制会静默失败。
+async function copyText(text, quiet = false) {
+  const done = (ok) => { if (!quiet) toast(ok ? "已复制" : "复制失败，请手动选中复制"); return ok; };
   try {
     if (navigator.clipboard && window.isSecureContext) {
       await navigator.clipboard.writeText(text);
-      return toast("已复制");
+      return done(true);
     }
   } catch {}
+  const host = document.querySelector("dialog[open]") || document.body;
+  const ta = document.createElement("textarea");
   try {
-    const ta = document.createElement("textarea");
     ta.value = text;
-    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0";
-    document.body.appendChild(ta);
-    ta.focus(); ta.select();
-    const ok = document.execCommand("copy");
-    document.body.removeChild(ta);
-    toast(ok ? "已复制" : "复制失败，请手动选中复制");
+    ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;width:1px;height:1px;opacity:0";
+    host.appendChild(ta);
+    ta.focus(); ta.select(); ta.setSelectionRange(0, text.length);
+    return done(document.execCommand("copy"));
   } catch {
-    toast("复制失败，请手动选中复制");
+    return done(false);
+  } finally {
+    ta.remove();
   }
 }
 
@@ -1030,7 +1034,13 @@ function showInstallDialog(s) {
   $("#install-title").textContent = `注册命令 · ${s.name}`;
   $("#install-cmd").textContent = cmd;
   $("#install-notes").innerHTML = notes.map((n) => `<li>${esc(n)}</li>`).join("");
-  $("#install-copy").onclick = () => copyText(cmd);
+  const btn = $("#install-copy");
+  btn.textContent = "复制命令";
+  // 弹窗盖住了页面上的提示条，反馈直接显示在按钮上
+  btn.onclick = async () => {
+    btn.textContent = (await copyText(cmd, true)) ? "已复制 ✓" : "复制失败，请手动选中命令";
+    setTimeout(() => (btn.textContent = "复制命令"), 2000);
+  };
   $("#install-dialog").showModal();
 }
 $("#install-close").onclick = () => $("#install-dialog").close();

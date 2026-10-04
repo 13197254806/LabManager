@@ -267,6 +267,8 @@ class Tunnels:
         connected = False
         for line in iter(p.stdout.readline, ""):
             line = line.strip()
+            if line:
+                log.info("[%s] chisel: %s", name, line[-300:])  # 写进容器日志，docker compose logs tunnel 能看到失败原因
             if "Connected" in line:
                 connected = True
                 log.info("[%s] 隧道已建立", name)
