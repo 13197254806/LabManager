@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
@@ -38,7 +38,19 @@ app.add_middleware(
 )
 app.include_router(auth.router)
 app.include_router(api.router)
-app.mount("/static", StaticFiles(directory=STATIC), name="static")
+
+
+class RevalidatingStaticFiles(StaticFiles):
+    """静态文件每次都向服务器确认是否有更新（没改动时只返回 304）。
+    否则浏览器会按 Last-Modified 启发式缓存 js / css，部署后还在用旧版本。"""
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        resp.headers["Cache-Control"] = "no-cache"
+        return resp
+
+
+app.mount("/static", RevalidatingStaticFiles(directory=STATIC), name="static")
 
 
 @app.get("/healthz")
@@ -48,7 +60,11 @@ def healthz():
 
 @app.get("/")
 def index():
-    return FileResponse(STATIC / "index.html", headers={"Cache-Control": "no-cache"})
+    # 给 js / css 的地址带上文件修改时间：部署后地址变了，浏览器一定会取新文件（包括已缓存了旧版本的）
+    html = (STATIC / "index.html").read_text(encoding="utf-8")
+    for name in ("style.css", "app.js"):
+        html = html.replace(f"/static/{name}\"", f"/static/{name}?v={int((STATIC / name).stat().st_mtime)}\"")
+    return HTMLResponse(html, headers={"Cache-Control": "no-cache"})
 
 
 @app.get("/agent/{name}")
