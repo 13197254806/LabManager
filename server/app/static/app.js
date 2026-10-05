@@ -453,7 +453,7 @@ function renderCalendar() {
             ${alertGpus.length ? `<span class="alert-ico" title="${esc(`${alertGpus.length} 张卡上有未预约的用户正在使用`)}">${ALERT_ICON}</span>` : ""}</span>
           <span class="srv-host"><span class="mono">${esc(s.host)}</span>${s.gpus.length ? `<span class="srv-free ${freeN ? "" : "none"}">${freeN ? `今天空闲 ${freeN}` : "今天已满"}</span>` : ""}</span></div>
         <div class="cal-track">${serverStats(s)}</div></div>
-      <div class="srv-body"><div class="srv-inner">`;
+      <div class="srv-body"><div class="srv-inner">${pastN > 0 ? `<div class="past-zone" style="width:calc((100% - var(--label-w)) * ${pastN} / ${days})"></div>` : ""}`;
     for (const g of s.gpus) {
       const util = g.utilization ?? 0;
       const live = s.online && g.memory_total != null;
@@ -484,19 +484,31 @@ function renderCalendar() {
           <div class="tt-row">${c.start} ~ ${c.end}${c.items.length > 1 ? `（${c.items.length} 段连续预约）` : ""}</div>${head?.note ? `<div class="tt-row">${esc(head.note)}</div>` : ""}${tags ? `<div class="tt-tags">${tags}</div>` : ""}`;
         // 与后面正在生效的部分相连的“已结束”淡色段不再重复头像和名字
         const inner = b.past && b.cutR ? "" : `${avatarHtml(c.user_name, c.user_avatar, c.user_id)}<span class="nm">${esc(c.user_name)}</span>${head?.note ? `<span class="note">· ${esc(head.note)}</span>` : ""}${head?.auto_renew ? icon("renew", "renew") : ""}`;
-        html += `<div class="bar ${mine ? "mine" : ""} ${b.past ? "past" : ""} ${b.cutL ? "cut-l" : ""} ${b.cutR ? "cut-r" : ""}"
-          style="grid-column:${b.c1}/${b.c2 + 1};grid-row:${b.lane + 1};--h:${hue(c.user_id)}" data-bar="${n}" data-tip-html="${esc(tip)}">${inner}</div>`;
+        // 右边缘可以拖动改结束日期：整条连续预约的最后一段、有权限修改、结束日期就在本月里（右边缘看得见）、还没结束
+        const last = c.items.reduce((a, r) => (r.end_date >= a.end_date ? r : a), c.items[0]);
+        const resizable = !b.past && !b.cutR && last.editable && last.end_date >= today;
+        const resize = resizable ? ` data-resize="${last.id}" data-end="${last.end_date}" data-min="${last.start_date > today ? last.start_date : today}"` : "";
+        html += `<div class="bar ${mine ? "mine" : ""} ${b.past ? "past" : ""} ${b.cutL ? "cut-l" : ""} ${b.cutR ? "cut-r" : ""} ${resizable ? "can-resize" : ""}"
+          style="grid-column:${b.c1}/${b.c2 + 1};grid-row:${b.lane + 1};--h:${hue(c.user_id)}" data-bar="${n}"${resize} data-tip-html="${esc(tip)}">${inner}${resizable ? `<span class="resize-handle" aria-hidden="true"></span>` : ""}</div>`;
       }
-      if (pastN > 0) html += `<div class="past-zone" style="grid-column:1/${pastN + 1}"></div>`;
       if (todayIdx >= 0 && todayIdx < days) html += `<div class="today-zone" style="grid-column:${todayIdx + 1}"></div>`;
       html += `</div></div>`;
     }
     html += `</div></div></div>`;
   }
   root.innerHTML = html;
+  alignStripes();
+}
+
+// 各台服务器的斜线层是分开的两块：让花纹相对整张日历对齐（折叠 / 展开后后面的服务器位置变了，要重新对齐）
+function alignStripes() {
+  const root = $("#calendar");
+  const top = root.getBoundingClientRect().top;
+  $$(".past-zone", root).forEach((z) => { z.style.backgroundPositionY = `${-Math.round(z.getBoundingClientRect().top - top)}px`; });
 }
 
 $("#calendar").addEventListener("click", (e) => {
+  if (e.target.closest(".resize-handle")) return;  // 拖拽结束时的那一下 click，不要当成点色块
   const bar = e.target.closest(".bar");
   if (bar) {
     const b = state.bars[Number(bar.dataset.bar)];
@@ -519,6 +531,68 @@ $("#calendar").addEventListener("keydown", (e) => {
   if (head && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleServer(head); }
 });
 
+// 拖动预约块右边缘改结束日期：按住右边缘左右拖，随鼠标吸附到某一天，松手后提交；
+// 冲突 / 超出规则时服务端会拒绝，色块恢复原样并提示原因。按 Esc 取消。
+let drag = null;
+const dragTip = document.createElement("div");
+dragTip.className = "drag-tip hidden";
+document.body.appendChild(dragTip);
+
+function dragEnd() {
+  drag?.bar.classList.remove("resizing");
+  document.body.classList.remove("dragging-bar");
+  dragTip.classList.add("hidden");
+  state.dragging = false;
+  drag = null;
+}
+$("#calendar").addEventListener("pointerdown", (e) => {
+  const handle = e.target.closest(".resize-handle");
+  if (!handle || e.button > 0) return;
+  const bar = handle.closest(".bar"), track = bar.parentElement;
+  const b = state.bars[Number(bar.dataset.bar)], vStart = monthStart();
+  drag = {
+    bar, track, vStart, id: Number(bar.dataset.resize), c1: b.c1, days: monthDays(),
+    minIdx: diffDays(vStart, bar.dataset.min), origIdx: diffDays(vStart, bar.dataset.end), curIdx: diffDays(vStart, bar.dataset.end),
+  };
+  handle.setPointerCapture(e.pointerId);
+  bar.classList.add("resizing");
+  document.body.classList.add("dragging-bar");
+  state.dragging = true;  // 拖动期间不要自动刷新
+  e.preventDefault();
+  e.stopPropagation();
+});
+document.addEventListener("pointermove", (e) => {
+  if (!drag) return;
+  const rect = drag.track.getBoundingClientRect();
+  const idx = Math.max(drag.minIdx, Math.min(drag.days - 1, Math.floor((e.clientX - rect.left) / (rect.width / drag.days))));
+  if (idx !== drag.curIdx) {
+    drag.curIdx = idx;
+    drag.bar.style.gridColumn = `${drag.c1}/${idx + 2}`;
+  }
+  const day = addDays(drag.vStart, drag.curIdx);
+  dragTip.textContent = `结束日期 ${day}（周${WEEK[parseDate(day).getDay()]}）${drag.curIdx === drag.origIdx ? "" : drag.curIdx > drag.origIdx ? `，延长 ${drag.curIdx - drag.origIdx} 天` : `，缩短 ${drag.origIdx - drag.curIdx} 天`}`;
+  dragTip.classList.remove("hidden");
+  dragTip.style.left = `${Math.min(e.clientX + 14, window.innerWidth - dragTip.offsetWidth - 8)}px`;
+  dragTip.style.top = `${e.clientY + 18}px`;
+});
+document.addEventListener("pointerup", async () => {
+  if (!drag) return;
+  const d = drag;
+  dragEnd();
+  if (d.curIdx === d.origIdx) return;
+  const end = addDays(d.vStart, d.curIdx);
+  try {
+    await api(`/api/reservations/${d.id}`, { method: "PATCH", body: { end_date: end } });
+    toast(`已把结束日期改为 ${end}`);
+    loadCalendar();
+  } catch (err) {
+    toast(err.message);
+    renderCalendar();  // 恢复成拖动之前的样子
+  }
+});
+document.addEventListener("pointercancel", () => { if (drag) { dragEnd(); renderCalendar(); } });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drag) { dragEnd(); renderCalendar(); } });
+
 // 折叠 / 展开一台服务器：只切换 class，由 CSS 过渡负责动画（不重画日历，动画才不会被打断）
 function toggleServer(head) {
   const id = Number(head.dataset.toggleSrv);
@@ -526,6 +600,7 @@ function toggleServer(head) {
   const collapsed = group.classList.toggle("collapsed");
   head.setAttribute("aria-expanded", String(!collapsed));
   state.lastToggle = Date.now();  // 折叠动画进行中不要自动刷新（重画会打断动画）
+  setTimeout(alignStripes, 350);  // 动画结束后重新对齐斜线
   if (collapsed) state.collapsed.add(id); else state.collapsed.delete(id);
   writeCollapsed();
 }
@@ -1902,7 +1977,7 @@ function scheduleRefresh() {
   const secs = Math.max(3, Number(state.config?.refresh_interval) || 10);
   setTimeout(async () => {
     try {
-      if (!document.hidden && !$("dialog[open]") && !tipAnchor && !$(".menu:not(.hidden)") && Date.now() - state.lastToggle > 600) {
+      if (!document.hidden && !$("dialog[open]") && !tipAnchor && !$(".menu:not(.hidden)") && !state.dragging && Date.now() - state.lastToggle > 600) {
         const tab = activeTab();
         if (tab === "calendar") await loadCalendar(true);
         else if (tab === "admin") await refreshAdmin();
