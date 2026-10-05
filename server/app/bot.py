@@ -71,7 +71,9 @@ def on_user_created(data):
 def on_chat_member_added(data):
     ev = _as_dict(data).get("event", {})
     chat_id = ev.get("chat_id")
-    if settings.welcome_chat_ids and chat_id not in settings.welcome_chat_ids:
+    with SessionLocal() as db:
+        allowed = services.welcome_chat_ids(db)  # 管理页「新人欢迎卡片」里设置；留空 = 机器人所在的所有群
+    if allowed and chat_id not in allowed:
         return
     for u in ev.get("users") or []:
         open_id = (u.get("user_id") or {}).get("open_id")

@@ -43,8 +43,9 @@ class Settings:
 
     # Linux UID = UID_BASE + 用户 id，保证多台服务器上 UID 一致
     uid_base = int(_env("UID_BASE", "10000"))
-    # Agent 超过这么多秒没上报就视为离线
-    agent_offline_seconds = int(_env("AGENT_OFFLINE_SECONDS", "180"))
+    # Agent 超过这么多秒没上报就视为离线：下限取这个值；刷新间隔调大时按“3 个间隔”放宽（见 services.sync_runtime）
+    agent_offline_floor = int(_env("AGENT_OFFLINE_SECONDS", "180"))
+    agent_offline_seconds = agent_offline_floor
 
     # 校园网隧道（tunnel 服务，WebVPN + chisel）：配置了 TUNNEL_TARGETS 时，GPU 服务器经隧道访问平台
     tunnel_targets = [t.split("=", 1)[0].strip() for t in _list("TUNNEL_TARGETS") if "=" in t]

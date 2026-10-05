@@ -10,6 +10,8 @@ GPU 服务器在校园内网，不能被公网访问。本程序登录学校 Web
 连接路径：本程序(chisel client) → [家宽代理] → https://webvpn.whut.edu.cn/ws-<端口>/<主机编码>/ → GPU(chisel server)。
 学校 WebVPN 封了云服务器 IP，所以经家宽代理(mihomo，proxy 服务)出口访问，让 WebVPN 看到的是家宽 IP。
 WebVPN 会话 Cookie 过期（被挤或超时）时自动重新登录（含滑块验证码识别），再重连 chisel。
+容器 / 服务器重启后先沿用上次保存的会话（还有效就不用重新登录）；巡检出错不会让进程退出；
+隧道显示已连接、但 Agent 长时间没通过它上报时，会自动重启这一条隧道。
 
 用法：
     python -m app.tunnel run         常驻运行（docker compose 的 tunnel 服务）
@@ -57,6 +59,7 @@ CHISEL_PORT = int(_env("CHISEL_PORT", "9000"))
 # GPU 服务器列表从平台数据库读取（在平台「管理 → GPU 服务器」里添加即可，无需手动维护）。
 # 读库失败时退回 .env 的 TUNNEL_TARGETS（可选）。TARGETS: name -> (host, port)
 TARGETS = {}
+LAST_SEEN = {}  # name -> Agent 最近一次上报的时间（平台时区的 naive datetime），看门狗用
 
 
 def _env_targets():
@@ -71,7 +74,7 @@ def _env_targets():
 
 def refresh_targets():
     """从平台数据库读取填了内网地址的 GPU 服务器。无需手动维护 TUNNEL_TARGETS。"""
-    global TARGETS
+    global TARGETS, LAST_SEEN
     try:
         from sqlalchemy import select
         from app.db import SessionLocal
@@ -79,7 +82,9 @@ def refresh_targets():
         with SessionLocal() as db:
             rows = db.scalars(select(Server)).all()
             TARGETS = {s.name: (s.host.strip(), CHISEL_PORT) for s in rows if (s.host or "").strip()}
+            LAST_SEEN = {s.name: s.last_seen_at for s in rows}
     except Exception as e:  # noqa: BLE001
+        LAST_SEEN = {}
         env_t = _env_targets()
         if env_t:
             TARGETS = env_t
@@ -103,6 +108,9 @@ REMOTE_PLATFORM_PORT = int(_env("REMOTE_PLATFORM_PORT", "18765"))
 CHECK_INTERVAL = int(_env("WEBVPN_CHECK_INTERVAL", "60"))
 
 STATUS = os.path.join(TUNNEL_DIR, "status.json")
+SESSION_FILE = os.path.join(TUNNEL_DIR, "session.json")  # 上次的 WebVPN 会话 Cookie（仅本容器可读）
+# 隧道已连接却迟迟没有 Agent 上报时，多久认为“半死不活”并重启这一条
+SILENT_RESTART_MIN_SECONDS = int(_env("TUNNEL_SILENT_SECONDS", "300"))
 
 
 def now():
@@ -204,6 +212,8 @@ class Tunnels:
         self.probes = {}      # name -> (时间戳, 探测结果)：握手失败后的诊断，每 10 分钟最多探测一次
         self.cookie = ""
         self.stopping = False
+        self.connected_at = {}  # name -> chisel 报告“已连接”的时间戳
+        self.last_kick = {}     # name -> 上次因“Agent 长时间没上报”而重启的时间戳
 
     def _throttle(self):
         """登录前的硬限速：读持久化的尝试时间戳，一小时内超过上限就等到名额释放再试。
@@ -246,6 +256,7 @@ class Tunnels:
                 self.cookie = self.client.cookie_header()
                 log.info("WebVPN 登录成功（%s）", name)
                 set_login_status("logged_in")
+                self.save_session()
                 return True
             except webvpn.WrongCredentials as e:
                 log.error("WebVPN 账号或密码错误，停止自动登录（避免锁定）：%s", e)
@@ -263,6 +274,43 @@ class Tunnels:
                 self._sleep(backoff)
                 backoff = min(backoff * 2, 600)
         return False
+
+    def save_session(self):
+        try:
+            os.makedirs(TUNNEL_DIR, exist_ok=True)
+            tmp = SESSION_FILE + ".tmp"
+            fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w") as f:
+                json.dump({"saved_at": now(), "cookies": self.client.export_cookies()}, f)
+            os.replace(tmp, SESSION_FILE)
+        except OSError as e:
+            log.warning("保存 WebVPN 会话失败（不影响使用，只是重启后需要重新登录）：%s", e)
+
+    def restore_session(self):
+        """重启后先试着沿用上次的会话：还有效就不用重新登录（登录要过滑块验证码，且每小时限次，
+        服务器重启 / 部署更新时反复登录既慢又容易被封）。会话明确失效才重新登录；一时无法确认
+        （网络抖动、代理还没起来）先沿用，真失效了巡检会发现并重登。"""
+        try:
+            with open(SESSION_FILE) as f:
+                data = json.load(f)
+        except (OSError, ValueError):
+            return False
+        client = webvpn.WebVPNClient(WEBVPN_PORTAL, proxy=WEBVPN_PROXY)
+        try:
+            client.import_cookies(data.get("cookies") or [])
+        except (KeyError, TypeError, ValueError):
+            return False
+        if not client.ticket_cookie()[0]:
+            return False
+        state = client.logged_in()
+        if state is False:
+            log.info("上次保存的 WebVPN 会话已失效，重新登录")
+            return False
+        self.client = client
+        self.cookie = client.cookie_header()
+        log.info("沿用上次的 WebVPN 会话（%s）", "仍然有效" if state else "暂时无法确认，先沿用")
+        set_login_status("logged_in")
+        return True
 
     def _sleep(self, secs):
         for _ in range(secs):
@@ -289,6 +337,7 @@ class Tunnels:
 
     def start_one(self, name, host, port):
         self.stop_one(name)
+        self.connected_at.pop(name, None)
         set_status(name, "connecting")
         p = subprocess.Popen(self.chisel_cmd(host, port),
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
@@ -303,6 +352,7 @@ class Tunnels:
                 log.info("[%s] chisel: %s", name, line[-300:])  # 写进容器日志，docker compose logs tunnel 能看到失败原因
             if "Connected" in line:
                 connected = True
+                self.connected_at[name] = time.time()
                 log.info("[%s] 隧道已建立", name)
                 set_status(name, "connected")
             elif "handshake" in line or "Connection error" in line or "ERR" in line:
@@ -343,19 +393,79 @@ class Tunnels:
         self.stop_all()
         self.start_all()
 
-    # --- 主循环：登录 → 起隧道 → 定期校验会话，掉线/过期就重登并重连 ---
+    # --- 看门狗：隧道进程在、也显示“已连接”，但 Agent 长时间没有通过它上报 ---
+    def _refresh_interval(self):
+        try:
+            from app.db import SessionLocal
+            from app.models import Setting
+            with SessionLocal() as db:
+                row = db.get(Setting, "refresh_interval_seconds")
+                return int(row.value) if row else 10
+        except Exception:  # noqa: BLE001
+            return 10
+
+    def watchdog(self):
+        """对端已经断了而本端没发现（半死不活的连接）时，chisel 进程还在、状态也还是“已连接”，
+        但 GPU 上的 Agent 再也连不上平台。判断依据：连上超过一段时间，Agent 仍没上报，就重启这一条。
+        同一台最多每 10 分钟重启一次，不会因为 Agent 本身挂了而反复折腾。"""
+        from app.config import now as platform_now
+        limit = max(SILENT_RESTART_MIN_SECONDS, 5 * self._refresh_interval())
+        t, wall = platform_now(), time.time()
+        for name in list(self.procs):
+            p = self.procs[name]
+            if p.poll() is not None or name not in TARGETS:
+                continue
+            up = self.connected_at.get(name)
+            if not up or wall - up < limit:
+                continue  # 刚连上，给 Agent 一点时间
+            seen = LAST_SEEN.get(name)
+            if seen and (t - seen).total_seconds() < limit:
+                continue  # Agent 在正常上报
+            if wall - self.last_kick.get(name, 0) < 600:
+                continue
+            log.warning("[%s] 隧道显示已连接，但 Agent 超过 %d 秒没有上报，重启这条隧道", name, limit)
+            self.last_kick[name] = wall
+            host, port = TARGETS[name]
+            self.start_one(name, host, port)
+
+    # --- 一轮巡检：校验会话，掉线 / 过期就重登并重连，补起缺失的隧道 ---
+    def tick(self):
+        refresh_targets()  # 平台里新增/删除服务器后自动生效
+        if self.client.logged_in() is False:
+            # WebVPN 会话失效（被挤或超时）：重新登录，换新 Cookie 重连全部
+            log.info("WebVPN 会话失效，重新登录")
+            self.stop_all()
+            if self.login():
+                self.start_all()
+            return
+        # 平台里已删除的服务器：停掉隧道并清理状态
+        for name in list(self.procs):
+            if name not in TARGETS:
+                log.info("[%s] 已从平台移除，停止隧道", name)
+                self.stop_one(name)
+        prune_status()
+        # 新增的、或进程退出的（崩溃/GPU 重启）：启动/重启
+        for name, (host, port) in TARGETS.items():
+            p = self.procs.get(name)
+            if p is None or p.poll() is not None:
+                self.start_one(name, host, port)
+        self.watchdog()
+
+    # --- 主循环：登录（或沿用上次会话）→ 起隧道 → 定期巡检 ---
     def run(self):
         if not CHISEL_SECRET:
             log.error("未设置 CHISEL_SECRET，无法建立隧道（请运行 setup-server.sh 生成）")
             set_login_status("misconfigured", error="缺少 CHISEL_SECRET")
+            self._wait_for_fix()
             return
         if not (WEBVPN_USER and WEBVPN_PASSWORD):
             log.error("未设置 WEBVPN_USER / WEBVPN_PASSWORD")
             set_login_status("misconfigured", error="缺少 WEBVPN_USER/WEBVPN_PASSWORD")
+            self._wait_for_fix()
             return
         refresh_targets()
         prune_status()  # 启动即清理旧条目（即使登录被限速也先清）
-        if not self.login():
+        if not (self.restore_session() or self.login()):
             return
         refresh_targets()
         self.start_all()
@@ -363,25 +473,15 @@ class Tunnels:
             self._sleep(CHECK_INTERVAL)
             if self.stopping:
                 break
-            refresh_targets()  # 平台里新增/删除服务器后自动生效
-            if self.client.logged_in() is False:
-                # WebVPN 会话失效（被挤或超时）：重新登录，换新 Cookie 重连全部
-                log.info("WebVPN 会话失效，重新登录")
-                self.stop_all()
-                if self.login():
-                    self.start_all()
-                continue
-            # 平台里已删除的服务器：停掉隧道并清理状态
-            for name in list(self.procs):
-                if name not in TARGETS:
-                    log.info("[%s] 已从平台移除，停止隧道", name)
-                    self.stop_one(name)
-            prune_status()
-            # 新增的、或进程退出的（崩溃/GPU 重启）：启动/重启
-            for name, (host, port) in TARGETS.items():
-                p = self.procs.get(name)
-                if p is None or p.poll() is not None:
-                    self.start_one(name, host, port)
+            try:
+                self.tick()
+            except Exception:  # noqa: BLE001  任何一轮出错都不能让进程退出：退出会让 Docker 重启容器、重新登录并断掉所有隧道
+                log.exception("隧道巡检出错，下一轮继续")
+
+    def _wait_for_fix(self):
+        """配置缺失时不能直接退出：Docker 会立刻重启容器，形成重启循环。等 .env 改好、容器被重建。"""
+        while not self.stopping:
+            self._sleep(3600)
 
 
 # ---------------- 子命令 ----------------

@@ -1600,11 +1600,12 @@ async function loadAdmin() {
     renderAdminTables(tables);
     if (!welcomeDirty) {
       const f = $("#welcome-form");
-      for (const k of ["welcome_title", "welcome_markdown", "welcome_links"]) f[k].value = settings[k];
+      for (const k of ["welcome_title", "welcome_markdown", "welcome_links", "welcome_chat_ids"]) f[k].value = settings[k];
       renderWelcomePreview();
     }
     if (!rulesDirty) {
       const r = $("#rules-form");
+      for (const k of ["lab_name", "max_reservation_days", "max_advance_days", "max_gpu_sharers", "reminder_hour"]) r[k].value = settings[k];
       r.auto_renew_before_hours.value = settings.auto_renew_before_hours;
       r.auto_renew_days.value = settings.auto_renew_days;
       r.migration_requires_approval.checked = settings.migration_requires_approval === "1";
@@ -1813,6 +1814,11 @@ $("#rules-form").addEventListener("submit", async (e) => {
     await api("/api/admin/settings", {
       method: "PUT",
       body: {
+        lab_name: f.lab_name.value,
+        max_reservation_days: f.max_reservation_days.value,
+        max_advance_days: f.max_advance_days.value,
+        max_gpu_sharers: f.max_gpu_sharers.value,
+        reminder_hour: f.reminder_hour.value,
         auto_renew_before_hours: f.auto_renew_before_hours.value,
         auto_renew_days: f.auto_renew_days.value,
         migration_requires_approval: f.migration_requires_approval.checked ? "1" : "0",
@@ -1822,6 +1828,7 @@ $("#rules-form").addEventListener("submit", async (e) => {
       },
     });
     state.config = await api("/api/config");
+    applyLabName();
     setRulesDirty(false);
     toast("已保存");
   } catch (err) {
@@ -1833,7 +1840,7 @@ $("#welcome-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target;
   try {
-    await api("/api/admin/settings", { method: "PUT", body: { welcome_title: f.welcome_title.value, welcome_markdown: f.welcome_markdown.value, welcome_links: f.welcome_links.value } });
+    await api("/api/admin/settings", { method: "PUT", body: { welcome_title: f.welcome_title.value, welcome_markdown: f.welcome_markdown.value, welcome_links: f.welcome_links.value, welcome_chat_ids: f.welcome_chat_ids.value } });
     welcomeDirty = false;
     toast("已保存");
   } catch (err) {
@@ -1846,10 +1853,15 @@ $("#welcome-test").onclick = async () => {
 
 // ---------------- 启动 ----------------
 
-async function boot() {
-  state.config = await api("/api/config");
+// 平台名称在管理页可改：同步到标题、顶栏和登录页
+function applyLabName() {
   document.title = `${state.config.lab_name} GPU 管理平台`;
   $("#brand-name").textContent = $("#login-title").textContent = state.config.lab_name;
+}
+
+async function boot() {
+  state.config = await api("/api/config");
+  applyLabName();
   { const [y, m] = state.config.today.split("-").map(Number); state.month = { y, m }; }
   try {
     state.me = await api("/api/me", { allow401: true });

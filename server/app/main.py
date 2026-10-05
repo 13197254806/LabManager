@@ -29,6 +29,8 @@ async def lifespan(_app):
         db.commit()
     if merged:
         logging.getLogger("startup").info("已合并 %d 条首尾相接的预约", len(merged))
+    with SessionLocal() as db:
+        services.sync_runtime(db)
     jobs.start()  # 自动续约、到期提醒
     yield
 

@@ -141,7 +141,7 @@ def merge_reservations(db: Session, user_id: int | None = None, gpu_id: int | No
     return mapping
 
 
-def first_blocked_day(others: list[Reservation], user_id: int, start: date, end: date):
+def first_blocked_day(others: list[Reservation], user_id: int, start: date, end: date, cap: int):
     """在 start~end 里找第一个不能再加这位用户预约的日子。others 是这张卡上别的预约。
     返回 (日期, 原因, 当天已有预约的人数) 或 None。原因：mine=这个人在这张卡上已有预约，full=共用人数已满。"""
     d = start
@@ -149,7 +149,7 @@ def first_blocked_day(others: list[Reservation], user_id: int, start: date, end:
         day = [r for r in others if r.start_date <= d <= r.end_date]
         if any(r.user_id == user_id for r in day):
             return d, "mine", len(day)
-        if len(day) >= settings.max_gpu_sharers:
+        if len(day) >= cap:
             return d, "full", len(day)
         d += timedelta(days=1)
     return None
@@ -158,10 +158,11 @@ def first_blocked_day(others: list[Reservation], user_id: int, start: date, end:
 def check_capacity(db: Session, gpu_ids: list[int], start: date, end: date, user_id: int, exclude_id: int | None = None):
     """同一张卡同一天最多 max_gpu_sharers 人共用，且同一个人不能在同一张卡同一天重复预约。冲突时抛 ValueError。"""
     rs = [r for r in overlapping(db, start, end, gpu_ids=gpu_ids) if r.id != exclude_id]
+    cap = get_int_setting(db, "max_gpu_sharers")
     problems = []
     for gid in gpu_ids:
         mine = [r for r in rs if r.gpu_id == gid]
-        hit = first_blocked_day(mine, user_id, start, end)
+        hit = first_blocked_day(mine, user_id, start, end, cap)
         if not hit:
             continue
         day, why, n = hit
@@ -171,7 +172,7 @@ def check_capacity(db: Session, gpu_ids: list[int], start: date, end: date, user
             problems.append(f"{label} 在 {day} 你已经有一条预约了（可以直接修改它的日期）")
         else:
             names = "、".join(sorted({r.user.name for r in mine if r.start_date <= day <= r.end_date}))
-            problems.append(f"{label} 在 {day} 已有 {n} 人预约（{names}），最多 {settings.max_gpu_sharers} 人共用")
+            problems.append(f"{label} 在 {day} 已有 {n} 人预约（{names}），最多 {cap} 人共用")
     if problems:
         raise ValueError("时间冲突：" + "；".join(problems))
 
@@ -182,7 +183,8 @@ def book_long_term(db: Session, owner: User, gpus: list[GPU], note: str = "") ->
     自己已有的长期使用预约保持不变，只补上没有预约的日子，最后合并成一条。
     某张卡今天就满员（或被自己占着以外的原因无法预约）时抛 ValueError，整个操作不生效。返回预约 id。"""
     d = today()
-    cycle = min(max(1, get_int_setting(db, "auto_renew_days")), settings.max_reservation_days)
+    cap = get_int_setting(db, "max_gpu_sharers")
+    cycle = min(max(1, get_int_setting(db, "auto_renew_days")), get_int_setting(db, "max_reservation_days"))
     window_end = d + timedelta(days=cycle - 1)
     ids: list[int] = []
     problems = []
@@ -202,11 +204,11 @@ def book_long_term(db: Session, owner: User, gpus: list[GPU], note: str = "") ->
             return any(r.start_date <= day <= r.end_date for r in mine)
 
         def full(day, others=others):
-            return sum(1 for r in others if r.start_date <= day <= r.end_date) >= settings.max_gpu_sharers
+            return sum(1 for r in others if r.start_date <= day <= r.end_date) >= cap
 
         label = f"{g.server.name} GPU{g.index}"
         if not covered(d) and full(d):
-            problems.append(f"{label} 今天已有 {settings.max_gpu_sharers} 人预约，最多 {settings.max_gpu_sharers} 人共用")
+            problems.append(f"{label} 今天已有 {cap} 人预约，最多 {cap} 人共用")
             continue
         # 补上 [今天, 周期末] 里自己还没预约的日子；中途遇到别人已满的日子就停在前一天
         day, reach = d, d
@@ -328,16 +330,42 @@ DEFAULT_SETTINGS = {
 }
 
 
-def get_int_setting(db: Session, key: str) -> int:
-    try:
-        return int(get_setting(db, key))
-    except ValueError:
-        return int(DEFAULT_SETTINGS[key])
+# 这几项原来只能在 .env 里配置：.env 里的值只是“初始默认值”，在管理页保存过以后以管理页为准。
+# 用函数而不是常量，是为了运行中（含测试里）改 settings 也能立刻生效。
+ENV_DEFAULTS = {
+    "lab_name": lambda: settings.lab_name,
+    "max_reservation_days": lambda: str(settings.max_reservation_days),
+    "max_advance_days": lambda: str(settings.max_advance_days),
+    "max_gpu_sharers": lambda: str(settings.max_gpu_sharers),
+    "reminder_hour": lambda: str(settings.reminder_hour),
+    "welcome_chat_ids": lambda: ",".join(settings.welcome_chat_ids),
+}
 
 
 def get_setting(db: Session, key: str) -> str:
     row = db.get(Setting, key)
-    return row.value if row else DEFAULT_SETTINGS.get(key, "")
+    if row:
+        return row.value
+    if key in ENV_DEFAULTS:
+        return ENV_DEFAULTS[key]()
+    return DEFAULT_SETTINGS.get(key, "")
+
+
+def get_int_setting(db: Session, key: str) -> int:
+    try:
+        return int(get_setting(db, key))
+    except ValueError:
+        return int(ENV_DEFAULTS[key]() if key in ENV_DEFAULTS else DEFAULT_SETTINGS[key])
+
+
+def welcome_chat_ids(db: Session) -> list[str]:
+    return [c.strip() for c in get_setting(db, "welcome_chat_ids").split(",") if c.strip()]
+
+
+def sync_runtime(db: Session):
+    """把会影响“在线判断”的设置同步给 web 进程：Agent 按刷新间隔上报，超过 3 个间隔没上报才算离线
+    （间隔调大到几百秒时，不能还按固定 180 秒判离线）。"""
+    settings.agent_offline_seconds = max(settings.agent_offline_floor, 3 * get_int_setting(db, "refresh_interval_seconds"))
 
 
 def set_setting(db: Session, key: str, value: str):
@@ -453,6 +481,7 @@ def run_auto_renew(db: Session) -> int:
     renewed: dict[int, list[tuple[Reservation, date, date]]] = {}
     failed: dict[int, list[tuple[Reservation, str]]] = {}
     step = timedelta(days=days)
+    cap = get_int_setting(db, "max_gpu_sharers")
     touched: set[tuple[int, int]] = set()
     with booking_lock:
         candidates = [r for r in overlapping(db, d, d + timedelta(days=3650)) if r.auto_renew and r.user.enabled]
@@ -467,12 +496,12 @@ def run_auto_renew(db: Session) -> int:
             new_end = wanted
             reason = ""
             others = [c for c in overlapping(db, old_end + timedelta(days=1), new_end, gpu_ids=[r.gpu_id]) if c.id != r.id]
-            hit = first_blocked_day(others, r.user_id, old_end + timedelta(days=1), new_end)
+            hit = first_blocked_day(others, r.user_id, old_end + timedelta(days=1), new_end, cap)
             if hit:
                 day, why, n = hit
                 new_end = day - timedelta(days=1)
                 reason = (f"{day} 起你在这张卡上已有另一条预约" if why == "mine"
-                          else f"{day} 起这张卡已有 {n} 人预约（最多 {settings.max_gpu_sharers} 人共用）")
+                          else f"{day} 起这张卡已有 {n} 人预约（最多 {cap} 人共用）")
             if new_end > old_end:
                 r.end_date = new_end
                 r.renew_count += 1
