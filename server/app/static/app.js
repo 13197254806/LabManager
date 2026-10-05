@@ -118,9 +118,9 @@ toastEl().addEventListener("mouseleave", () => toastHideLater(1000));
 // 悬停提示：接管页面里所有 title="..."（浏览器自带的提示丑、不能统一风格、鼠标一动就消失）。
 // 鼠标从元素移到提示上时提示保持显示，移出提示后才消失。
 const tipEl = $("#tip");
-let tipAnchor = null, tipShowTimer, tipHideTimer;
-function tipHideNow() { clearTimeout(tipShowTimer); clearTimeout(tipHideTimer); tipAnchor = null; popHide(tipEl); }
-function tipHideLater(ms = 250) { clearTimeout(tipShowTimer); clearTimeout(tipHideTimer); tipHideTimer = setTimeout(tipHideNow, ms); }
+let tipAnchor = null, tipShowTimer, tipHideTimer, tipPinned = false;
+function tipHideNow() { clearTimeout(tipShowTimer); clearTimeout(tipHideTimer); tipAnchor = null; tipPinned = false; tipEl.classList.remove("pinned"); popHide(tipEl); }
+function tipHideLater(ms = 250) { if (tipPinned) return; clearTimeout(tipShowTimer); clearTimeout(tipHideTimer); tipHideTimer = setTimeout(tipHideNow, ms); }
 const TIP_SEL = "[title], [data-tip], [data-tip-html]";
 function tipShow(anchor) {
   const text = anchor.dataset.tip, html = anchor.dataset.tipHtml;
@@ -137,7 +137,7 @@ function tipShow(anchor) {
   tipEl.style.top = `${top}px`;
 }
 document.addEventListener("mouseover", (e) => {
-  if (tipEl.contains(e.target)) return;
+  if (tipEl.contains(e.target) || tipPinned) return;  // 气泡被点击固定后，不再响应别处的悬停
   const a = e.target.closest?.(TIP_SEL);
   if (!a) return tipAnchor && tipHideLater();
   if (a.hasAttribute("title")) {  // 把 title 摘下来，避免浏览器再弹自带的提示
@@ -147,7 +147,7 @@ document.addEventListener("mouseover", (e) => {
   if (!a.dataset.tip && !a.dataset.tipHtml) return;
   if (a === tipAnchor) return clearTimeout(tipHideTimer);
   clearTimeout(tipHideTimer); clearTimeout(tipShowTimer);
-  tipShowTimer = setTimeout(() => tipShow(a), tipAnchor ? 0 : 300);
+  tipShowTimer = setTimeout(() => tipShow(a), tipAnchor || a.hasAttribute("data-pin") ? 0 : 300);
 });
 document.addEventListener("mouseout", (e) => {
   if (e.relatedTarget && (tipEl.contains(e.relatedTarget) || e.target.closest?.("[data-tip], [data-tip-html]")?.contains(e.relatedTarget))) return;
@@ -155,8 +155,22 @@ document.addEventListener("mouseout", (e) => {
 });
 tipEl.addEventListener("mouseenter", () => clearTimeout(tipHideTimer));
 tipEl.addEventListener("mouseleave", () => tipHideLater());
-document.addEventListener("pointerdown", (e) => { if (!tipEl.contains(e.target)) tipHideNow(); }, true);
-window.addEventListener("scroll", tipHideNow, true);
+document.addEventListener("pointerdown", (e) => {
+  if (tipEl.contains(e.target)) return;
+  const pin = e.target.closest?.("[data-pin]");
+  if (pin && pin === tipAnchor) return;  // 点的是正在显示气泡的链接：交给下面的 click 处理（固定 / 取消固定）
+  tipHideNow();                          // 点击其它地方：气泡消失（包括已固定的）
+}, true);
+// 蓝色链接（带 data-pin）：点击后气泡固定住，鼠标移开也不消失；再点一次链接或点击别处才消失
+document.addEventListener("click", (e) => {
+  const a = e.target.closest?.("[data-pin]");
+  if (!a || !(a.dataset.tip || a.dataset.tipHtml)) return;
+  if (tipPinned && tipAnchor === a) return tipHideNow();
+  tipShow(a);
+  tipPinned = true;
+  tipEl.classList.add("pinned");
+});
+window.addEventListener("scroll", () => (tipPinned && tipAnchor?.isConnected ? tipShow(tipAnchor) : tipHideNow()), true);
 setInterval(() => { if (tipAnchor && !tipAnchor.isConnected) tipHideNow(); }, 1000);  // 日历刷新后元素被替换
 
 // 复制文本，成功返回 true。navigator.clipboard 只在 HTTPS / localhost 可用；平台用 http+IP 访问时退回 execCommand。
@@ -322,20 +336,21 @@ function diskTable(users) {
   return `<table class="proc-table"><tr><th>Linux 用户名</th><th>占用空间</th></tr>${rows}</table>`;
 }
 
-// 服务器行：整机 CPU 利用率、内存和磁盘占用（GB）。离线或 Agent 还没上报时不显示
+// 服务器行：整机 CPU 利用率、内存和磁盘占用（GB）。进度条按占用率变色，数字保持黑色。
+// 服务器离线时给出提示；在线但 Agent 还没上报则不显示
 function serverStats(s) {
+  if (!s.online) return `<div class="srv-stats"><span class="offline-tag">服务器离线，资源数据暂不可用</span></div>`;
   const y = s.system;
-  if (!s.online || !y || y.cpu == null) return "";  // 拿不到数据就不显示
-  const item = (label, pct, text, tip) =>
-    `<span class="srv-stat ${pct >= 90 ? "hot" : ""}" title="${esc(tip)}">${label}<span class="meter"><i style="width:${Math.min(100, pct)}%"></i></span><b>${text}</b></span>`;
+  if (!y || y.cpu == null) return "";  // 拿不到数据就不显示
+  const item = (label, pct, text, tip, extra = "") =>
+    `<span class="stat-chip ${pct >= 90 ? "hot" : pct >= 70 ? "mid" : ""}" title="${esc(tip)}">${label}<span class="meter"><i style="width:${Math.min(100, pct)}%"></i></span><b>${text}</b>${extra}</span>`;
   const pct = (u, t) => (t ? (u * 100) / t : 0);
   const parts = [item("CPU", y.cpu, `${Math.round(y.cpu)}%`, `CPU 利用率 ${y.cpu}%（各核平均）`)];
   if (y.mem_total) parts.push(item("内存", pct(y.mem_used, y.mem_total), `${gb(y.mem_used)}/${gb(y.mem_total)} GB`, `内存已用 ${gb(y.mem_used)} GB，共 ${gb(y.mem_total)} GB（${Math.round(pct(y.mem_used, y.mem_total))}%）`));
   if (y.disk_total) {
-    const disk = item("磁盘", pct(y.disk_used, y.disk_total), `${gb(y.disk_used)}/${gb(y.disk_total)} GB`, `家目录所在磁盘已用 ${gb(y.disk_used)} GB，共 ${gb(y.disk_total)} GB（${Math.round(pct(y.disk_used, y.disk_total))}%）`);
-    // 各用户家目录占用（Agent 后台统计，新版 Agent 才会上报）
-    const usage = y.users?.length ? `<span class="disk-detail" data-tip-html="${esc(diskTable(y.users))}">磁盘占用情况</span>` : "";
-    parts.push(disk.replace(/<\/span>$/, "") + (usage ? `${usage}</span>` : "</span>"));
+    // 各用户家目录占用（Agent 后台统计，新版 Agent 才会上报）：悬停显示，点击固定
+    const usage = y.users?.length ? `<span class="bubble-link" data-pin data-tip-html="${esc(diskTable(y.users))}">占用情况</span>` : "";
+    parts.push(item("磁盘", pct(y.disk_used, y.disk_total), `${gb(y.disk_used)}/${gb(y.disk_total)} GB`, `家目录所在磁盘已用 ${gb(y.disk_used)} GB，共 ${gb(y.disk_total)} GB（${Math.round(pct(y.disk_used, y.disk_total))}%）`, usage));
   }
   return `<div class="srv-stats">${parts.join("")}</div>`;
 }
@@ -398,10 +413,8 @@ function renderCalendar() {
   const { cal } = state;
   const vStart = monthStart(), days = monthDays(), vEnd = addDays(vStart, days - 1);
   const today = cal.today;
-  $("#month-btn").textContent = `${MONTH_CN[state.month.m - 1]}月`;
-  const full = (iso) => { const [y, m, d] = iso.split("-").map(Number); return `${y}年${m}月${d}日`; };
-  $("#range-label").textContent = `${full(vStart)} – ${full(vEnd)}`;
-  $("#cal-hint").textContent = `点击日历格子进行预约；同一张卡每天最多 ${state.config.max_gpu_sharers} 人使用。`;
+  $("#month-label").textContent = `${state.month.y}年${state.month.m}月`;
+  $("#cal-hint").textContent = `点击空白格子预约；点击色块查看详情。同一张卡每天最多 ${state.config.max_gpu_sharers} 人使用。`;
   const root = $("#calendar");
   root.style.setProperty("--days", days);
   state.bars = [];
@@ -409,13 +422,13 @@ function renderCalendar() {
   const dates = Array.from({ length: days }, (_, i) => addDays(vStart, i));
   const cellClass = (d) => {
     const wd = parseDate(d).getDay();
-    return [wd === 0 || wd === 6 ? "weekend" : "", d === today ? "today" : "", d < today ? "past" : ""].join(" ");
+    return [wd === 0 || wd === 6 ? "weekend" : "", wd === 1 ? "mon" : "", d === today ? "today" : "", d < today ? "past" : ""].join(" ");
   };
 
-  let html = `<div class="cal-row cal-head"><div class="cal-label muted small">服务器 / 显卡</div><div class="cal-track">`;
+  let html = `<div class="cal-row cal-head"><div class="cal-label">服务器 / 显卡</div><div class="cal-track">`;
   dates.forEach((d, i) => {
     const dt = parseDate(d);
-    html += `<div class="cal-cell ${cellClass(d)}" style="grid-column:${i + 1}"><b>${dt.getDate()}</b><small>周${WEEK[dt.getDay()]}</small></div>`;
+    html += `<div class="cal-cell ${cellClass(d)}" style="grid-column:${i + 1}"><b>${dt.getDate()}</b><small>${d === today ? "今天" : `周${WEEK[dt.getDay()]}`}</small></div>`;
   });
   html += `</div></div>`;
 
@@ -425,31 +438,39 @@ function renderCalendar() {
 
   const byGpu = {};
   cal.reservations.forEach((r) => (byGpu[r.gpu_id] ||= []).push(r));
+  const busyToday = (g) => (byGpu[g.id] || []).some((r) => r.start_date <= today && today <= r.end_date);
+  // 已过去的日期共用一层斜线、今天这一列盖在色块上面：都是整段的覆盖层
+  const pastN = Math.min(days, Math.max(0, diffDays(vStart, today))), todayIdx = diffDays(vStart, today);
 
   for (const s of cal.servers) {
     const alertGpus = s.gpus.filter((g) => g.alerts.length);
     const collapsed = state.collapsed.has(s.id);
+    const freeN = s.gpus.filter((g) => !busyToday(g)).length;
     html += `<div class="cal-server-group ${collapsed ? "collapsed" : ""}" data-srv="${s.id}">
       <div class="cal-row cal-server" data-toggle-srv="${s.id}" role="button" tabindex="0" aria-expanded="${!collapsed}">
         <div class="cal-label">
-          <span class="srv-title"><span class="chev" aria-hidden="true"></span><span class="dot ${s.online ? "on" : ""}"></span><span class="server-name">${esc(s.name)}</span>
+          <span class="srv-title">${icon("chev", "chev")}<span class="dot ${s.online ? "on" : ""}"></span><span class="server-name">${esc(s.name)}</span>
             ${alertGpus.length ? `<span class="alert-ico" title="${esc(`${alertGpus.length} 张卡上有未预约的用户正在使用`)}">${ALERT_ICON}</span>` : ""}</span>
-          <span class="muted small srv-host">${esc(s.host)}</span></div>
+          <span class="srv-host"><span class="mono">${esc(s.host)}</span>${s.gpus.length ? `<span class="srv-free ${freeN ? "" : "none"}">${freeN ? `今天空闲 ${freeN}` : "今天已满"}</span>` : ""}</span></div>
         <div class="cal-track">${serverStats(s)}</div></div>
       <div class="srv-body"><div class="srv-inner">`;
     for (const g of s.gpus) {
       const util = g.utilization ?? 0;
-      const stat = s.online && g.memory_total != null
-        ? `<span class="meter" title="利用率 ${util}%"><i style="width:${util}%"></i></span>${util}% · ${gb(g.memory_used)}/${gb(g.memory_total)}G`
+      const live = s.online && g.memory_total != null;
+      const stat = live
+        ? `<span class="meter ${util >= 90 ? "hot" : util >= 70 ? "mid" : ""}" title="利用率 ${util}%"><i style="width:${util}%"></i></span>${util}% · ${gb(g.memory_used)}/${gb(g.memory_total)}G`
         : `<span>离线</span>`;
-      const detail = s.online && g.memory_total != null ? `<span class="gpu-detail" data-tip-html="${esc(procTable(g.processes))}">详情</span>` : "";
+      const detail = live ? `<span class="gpu-detail bubble-link" data-pin data-tip-html="${esc(procTable(g.processes))}">详情</span>` : "";
       const alert = g.alerts.length
         ? `<span class="alert-ico" title="${esc(`这些用户未预约，但正在使用 GPU：\n${g.alerts.map((a) => `• ${a}`).join("\n")}`)}">${ALERT_ICON}</span>`
-        : "";
+        : `<span></span>`;
+      const busy = busyToday(g);
       const { blocks, lanes } = buildBlocks(byGpu[g.id] || [], today, vStart, vEnd);
       html += `<div class="cal-row cal-gpu"><div class="cal-label gpu-label">
-        <div class="gpu-main"><span class="gpu-title"><b>GPU${g.index}</b> · ${esc(g.name.replace(/^NVIDIA /, ""))}</span>
-        <span class="gpu-stat">${stat}</span></div>${alert}${detail}</div>
+        <span class="gpu-free ${busy ? "" : "free"}" title="${busy ? "今天已有人预约" : "今天空闲"}"></span>
+        <div class="gpu-l1"><b>GPU${g.index}</b><span>${esc(g.name.replace(/^NVIDIA (GeForce )?/, ""))}</span></div>
+        <div class="gpu-l2">${stat}</div>
+        <div class="gpu-extra">${alert}${detail}</div></div>
         <div class="cal-track lanes-${Math.min(lanes, 3)}" style="--lanes:${lanes}">`;
       dates.forEach((d, i) => {
         html += `<div class="cal-cell ${cellClass(d)}" style="grid-column:${i + 1}" data-server="${s.id}" data-gpu="${g.id}" data-date="${d}"></div>`;
@@ -458,12 +479,16 @@ function renderCalendar() {
         const c = b.chain, head = c.head;
         const mine = c.user_id === state.me.id;
         const n = state.bars.push(b) - 1;
-        const tip = `${c.user_name}（${c.linux_username || "-"}）\n${c.start} ~ ${c.end}${c.items.length > 1 ? `（${c.items.length} 段连续预约）` : ""}`
-          + `${head?.auto_renew ? "\n长期使用（到期前自动延长）" : ""}${head?.note ? `\n${head.note}` : ""}${b.past ? "\n（已结束的部分）" : ""}`;
+        const tags = `${head?.auto_renew ? `<span class="badge running">长期使用</span>` : ""}${b.past ? `<span class="badge">已结束的部分</span>` : ""}${mine ? `<span class="badge ok">我的预约</span>` : ""}`;
+        const tip = `<div class="tt-who">${avatarHtml(c.user_name, c.user_avatar, c.user_id)}${esc(c.user_name)}<small>${esc(c.linux_username || "-")}</small></div>
+          <div class="tt-row">${c.start} ~ ${c.end}${c.items.length > 1 ? `（${c.items.length} 段连续预约）` : ""}</div>${head?.note ? `<div class="tt-row">${esc(head.note)}</div>` : ""}${tags ? `<div class="tt-tags">${tags}</div>` : ""}`;
+        // 与后面正在生效的部分相连的“已结束”淡色段不再重复头像和名字
+        const inner = b.past && b.cutR ? "" : `${avatarHtml(c.user_name, c.user_avatar, c.user_id)}<span class="nm">${esc(c.user_name)}</span>${head?.note ? `<span class="note">· ${esc(head.note)}</span>` : ""}${head?.auto_renew ? icon("renew", "renew") : ""}`;
         html += `<div class="bar ${mine ? "mine" : ""} ${b.past ? "past" : ""} ${b.cutL ? "cut-l" : ""} ${b.cutR ? "cut-r" : ""}"
-          style="grid-column:${b.c1}/${b.c2 + 1};grid-row:${b.lane + 1};--h:${hue(c.user_id)}" data-bar="${n}" title="${esc(tip)}">
-          ${avatarHtml(c.user_name, c.user_avatar, c.user_id)}<span>${esc(c.user_name)}</span></div>`;
+          style="grid-column:${b.c1}/${b.c2 + 1};grid-row:${b.lane + 1};--h:${hue(c.user_id)}" data-bar="${n}" data-tip-html="${esc(tip)}">${inner}</div>`;
       }
+      if (pastN > 0) html += `<div class="past-zone" style="grid-column:1/${pastN + 1}"></div>`;
+      if (todayIdx >= 0 && todayIdx < days) html += `<div class="today-zone" style="grid-column:${todayIdx + 1}"></div>`;
       html += `</div></div>`;
     }
     html += `</div></div></div>`;
@@ -508,31 +533,33 @@ function toggleServer(head) {
 $("#prev").onclick = () => setMonth(state.month.y, state.month.m - 1);
 $("#next").onclick = () => setMonth(state.month.y, state.month.m + 1);
 
-// 年 / 月选择
-const monthDialog = $("#month-dialog");
+// 年 / 月选择：点月份按钮在下方弹出，点别处自动收起
+const monthPop = $("#month-pop");
+const closeMonthPop = () => monthPop.classList.add("hidden");
 let pickYear = 0;
 function renderMonthPicker() {
   $("#year-label").textContent = `${pickYear} 年`;
   $("#month-grid").innerHTML = MONTH_CN.map((n, i) => {
     const cur = pickYear === state.month.y && i + 1 === state.month.m;
-    return `<button type="button" class="btn ${cur ? "primary" : ""}" data-pick-month="${i + 1}">${n}月</button>`;
+    return `<button type="button" class="btn ${cur ? "primary" : ""}" data-pick-month="${i + 1}">${i + 1} 月</button>`;
   }).join("");
 }
-$("#month-btn").onclick = () => { pickYear = state.month.y; renderMonthPicker(); monthDialog.showModal(); };
+$("#month-btn").onclick = () => { pickYear = state.month.y; renderMonthPicker(); monthPop.classList.toggle("hidden"); };
 $("#year-prev").onclick = () => { pickYear--; renderMonthPicker(); };
 $("#year-next").onclick = () => { pickYear++; renderMonthPicker(); };
 $("#month-grid").addEventListener("click", (e) => {
   const b = e.target.closest("[data-pick-month]");
   if (!b) return;
-  monthDialog.close();
+  closeMonthPop();
   setMonth(pickYear, Number(b.dataset.pickMonth));
 });
 $("#month-this").onclick = () => {
   const [y, m] = state.config.today.split("-").map(Number);
-  monthDialog.close();
+  closeMonthPop();
   setMonth(y, m);
 };
-$("#month-close").onclick = () => monthDialog.close();
+$("#month-close").onclick = closeMonthPop;
+document.addEventListener("click", (e) => { if (!e.target.closest(".nav-group")) closeMonthPop(); });
 
 // ---------------- 预约弹窗 ----------------
 
@@ -591,9 +618,10 @@ function renderGpuPicks(selected = []) {
       const o = load[g.id];
       const blocked = !!o && (o.mine || o.peak >= cap);
       const tip = !o ? "" : o.mine ? "你在这段时间已经预约了这张卡" : `${[...o.names].join("、")} 已预约${o.peak >= cap ? `，人数已满（最多 ${cap} 人共用）` : `，还可以再有 ${cap - o.peak} 人共用`}`;
+      const sub = !o ? "空闲" : o.mine ? "你已预约" : o.peak >= cap ? `已满员（${o.peak}/${cap}）` : `已有 ${o.peak}/${cap} 人`;
       return `<label class="${blocked ? "busy" : ""}" title="${esc(tip)}">
         <input type="checkbox" name="gpu" value="${g.id}" ${selected.includes(g.id) && !blocked ? "checked" : ""} ${blocked ? "disabled" : ""}>
-        GPU${g.index}${o ? ` · ${o.mine ? "你已预约" : `${o.peak}/${cap} 人`}` : ""}</label>`;
+        <span class="ck">${icon("check")}</span><span><b>GPU${g.index}</b><small>${sub}</small></span></label>`;
     })
     .join("") || `<span class="muted small">该服务器还没有上报显卡</span>`;
 }
@@ -617,6 +645,9 @@ async function openBooking({ serverId, gpuId, date }) {
       .map((u) => `<option value="${u.id}" ${u.id === state.me.id ? "selected" : ""}>${esc(u.name)}（${esc(u.linux_username)}）</option>`)
       .join("");
   }
+  const srv = state.cal.servers.find((x) => x.id === Number(bookingForm.server.value));
+  const gpu = srv?.gpus.find((x) => x.id === gpuId);
+  $("#booking-sub").textContent = [srv?.name, gpu && `GPU${gpu.index}`, date].filter(Boolean).join(" · ") || `同一张卡同一天最多 ${state.config.max_gpu_sharers} 人共用`;
   renderGpuPicks(gpuId ? [gpuId] : []);
   bookingDialog.showModal();
 }
@@ -664,9 +695,17 @@ function openDetail(r) {
   if (!r) return;
   detailRes = r;
   const today = state.config.today;
-  $("#detail-title").textContent = `${r.server_name} · GPU${r.gpu_index}`;
-  $("#detail-info").innerHTML = `${esc(r.user_name)}（${esc(r.linux_username || "-")}）<br>${r.start_date} ~ ${r.end_date}`
-    + `${r.auto_renew ? `<br>长期使用${r.renew_count ? `（已自动延长 ${r.renew_count} 次）` : ""}` : "<br>临时使用"}${r.note ? `<br>${esc(r.note)}` : ""}`;
+  const mine = r.user_id === state.me.id;
+  const ended = r.end_date < today;
+  $("#detail-avatar").innerHTML = avatarHtml(r.user_name, r.user_avatar, r.user_id);
+  $("#detail-title").textContent = mine ? "我的预约" : `${r.user_name} 的预约`;
+  $("#detail-sub").textContent = `${r.server_name} · GPU${r.gpu_index}`;
+  const status = ended ? `<span class="badge">已结束</span>` : `<span class="badge running">${esc(reservationStatus(r))}</span>`;
+  const canEdit = r.editable && !ended;  // 可编辑时日期、备注就在下面的输入框里，这里不再重复
+  $("#detail-info").innerHTML = `<dt>使用者</dt><dd>${esc(r.user_name)} <span class="muted mono">(${esc(r.linux_username || "-")})</span></dd>
+    <dt>${canEdit ? "状态" : "日期"}</dt><dd>${canEdit ? "" : `${r.start_date} ~ ${r.end_date} `}${status}</dd>
+    ${canEdit ? "" : `<dt>方式</dt><dd>${r.auto_renew ? `<span class="badge running">长期使用</span>${r.renew_count ? ` 已自动延长 ${r.renew_count} 次` : ""}` : "临时使用"}</dd>
+    ${r.note ? `<dt>备注</dt><dd>${esc(r.note)}</dd>` : ""}`}`;
   $("#detail-error").textContent = "";
   const editable = r.editable && r.end_date >= today;  // 已结束的预约只能查看
   $$(".editable", detailForm).forEach((el) => el.classList.toggle("hidden", !editable));

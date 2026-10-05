@@ -29,6 +29,10 @@
     <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M8 16H3v5"/></symbol>
     <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
     <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+    <symbol id="i-left" viewBox="0 0 24 24"><path d="m15 18-6-6 6-6"/></symbol>
+    <symbol id="i-right" viewBox="0 0 24 24"><path d="m9 18 6-6-6-6"/></symbol>
+    <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
+    <symbol id="i-renew" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M8 16H3v5"/></symbol>
     <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
   </svg>
   <div id="login" class="login hidden">
@@ -79,11 +83,21 @@
       <!-- 日历 -->
       <section id="tab-calendar" class="tab">
         <div class="toolbar">
-          <div class="group">
-            <button class="btn" id="prev" title="上个月">‹</button>
-            <button class="btn month-btn" id="month-btn" title="选择年 / 月"></button>
-            <button class="btn" id="next" title="下个月">›</button>
-            <span class="range" id="range-label"></span>
+          <div class="nav-group">
+            <button class="btn icon" id="prev" title="上个月"><svg class="i"><use href="#i-left"/></svg></button>
+            <button class="btn month-btn" id="month-btn"><span id="month-label"></span><svg class="i"><use href="#i-chev"/></svg></button>
+            <button class="btn icon" id="next" title="下个月"><svg class="i"><use href="#i-right"/></svg></button>
+            <div class="pop hidden" id="month-pop">
+              <div class="pop-year"><button class="btn ghost icon" id="year-prev" type="button"><svg class="i"><use href="#i-left"/></svg></button><span id="year-label"></span><button class="btn ghost icon" id="year-next" type="button"><svg class="i"><use href="#i-right"/></svg></button></div>
+              <div class="month-grid" id="month-grid"></div>
+              <div class="pop-foot"><button class="btn" id="month-this" type="button">回到本月</button><button class="btn ghost" id="month-close" type="button">关闭</button></div>
+            </div>
+          </div>
+          <span class="spacer"></span>
+          <div class="legend">
+            <span><i class="lg-mine"></i>我的预约</span>
+            <span><i class="lg-other"></i>他人预约</span>
+            <span><svg class="i"><use href="#i-renew"/></svg>长期使用</span>
           </div>
         </div>
         <p class="hint" id="cal-hint"></p>
@@ -244,30 +258,37 @@
   </div>
 
   <!-- 预约弹窗 -->
-  <dialog id="booking-dialog">
-    <form id="booking-form" class="stack" method="dialog">
-      <h2>预约 GPU</h2>
-      <label>服务器<select name="server" id="booking-server"></select></label>
-      <div>
-        <div class="label">显卡（可多选）<span class="req">*</span></div>
-        <div id="booking-gpus" class="gpu-picks"></div>
+  <dialog id="booking-dialog" class="dlg">
+    <form id="booking-form" method="dialog">
+      <div class="dlg-h">
+        <span class="dlg-ico"><svg class="i"><use href="#i-cal"/></svg></span>
+        <div><h2>预约 GPU</h2><p id="booking-sub"></p></div>
+        <button class="btn ghost icon dlg-x" value="cancel" formnovalidate title="关闭"><svg class="i"><use href="#i-x"/></svg></button>
       </div>
-      <div>
-        <div class="label">使用方式</div>
-        <div class="gpu-picks" role="radiogroup" aria-label="使用方式">
-          <label><input type="radio" name="mode" value="temp" checked> 临时使用</label>
-          <label><input type="radio" name="mode" value="long"> 长期使用</label>
+      <div class="dlg-b">
+        <label>服务器<select name="server" id="booking-server"></select></label>
+        <div>
+          <div class="label">显卡（可多选）<span class="req">*</span></div>
+          <div id="booking-gpus" class="gpu-pick"></div>
         </div>
+        <div>
+          <div class="label">使用方式</div>
+          <div class="seg" role="radiogroup" aria-label="使用方式">
+            <label><input type="radio" name="mode" value="temp" checked><span>临时使用</span></label>
+            <label><input type="radio" name="mode" value="long"><span>长期使用</span></label>
+          </div>
+        </div>
+        <div class="two temp-only">
+          <label>开始日期（含）<input type="date" name="start_date" required></label>
+          <label>结束日期（含）<input type="date" name="end_date" required></label>
+        </div>
+        <label class="admin-only hidden">替谁预约（管理员）<select name="user_id" id="booking-user"></select></label>
+        <label>用途备注<input name="note" maxlength="256" placeholder="例如：xx 论文消融实验"></label>
+        <p class="note-box"><svg class="i"><use href="#i-info"/></svg><span id="booking-rule"></span></p>
+        <p class="error" id="booking-error"></p>
       </div>
-      <div class="two temp-only">
-        <label>开始日期（含）<input type="date" name="start_date" required></label>
-        <label>结束日期（含）<input type="date" name="end_date" required></label>
-      </div>
-      <label class="admin-only hidden">替谁预约（管理员）<select name="user_id" id="booking-user"></select></label>
-      <label>用途备注<input name="note" maxlength="256" placeholder="例如：xx 论文消融实验"></label>
-      <p class="muted small" id="booking-rule"></p>
-      <p class="error" id="booking-error"></p>
-      <div class="actions">
+      <div class="dlg-f">
+        <span class="spacer"></span>
         <button class="btn" value="cancel" formnovalidate>取消</button>
         <button class="btn primary" id="booking-submit" value="ok">确认预约</button>
       </div>
@@ -275,18 +296,24 @@
   </dialog>
 
   <!-- 预约详情弹窗 -->
-  <dialog id="detail-dialog">
-    <form id="detail-form" class="stack" method="dialog">
-      <h2 id="detail-title"></h2>
-      <div id="detail-info" class="muted"></div>
-      <div class="two editable">
-        <label>开始日期（含）<input type="date" name="start_date" required></label>
-        <label>结束日期（含）<input type="date" name="end_date" required></label>
+  <dialog id="detail-dialog" class="dlg">
+    <form id="detail-form" method="dialog">
+      <div class="dlg-h">
+        <span class="dlg-ico" id="detail-avatar"></span>
+        <div><h2 id="detail-title"></h2><p id="detail-sub"></p></div>
+        <button class="btn ghost icon dlg-x" value="cancel" formnovalidate title="关闭"><svg class="i"><use href="#i-x"/></svg></button>
       </div>
-      <label class="check editable"><input type="checkbox" name="auto_renew"> <span>长期使用 <span class="muted small renew-rule"></span></span></label>
-      <label class="editable">用途备注<input name="note" maxlength="256"></label>
-      <p class="error" id="detail-error"></p>
-      <div class="actions">
+      <div class="dlg-b">
+        <dl class="info-grid" id="detail-info"></dl>
+        <div class="two editable">
+          <label>开始日期（含）<input type="date" name="start_date" required></label>
+          <label>结束日期（含）<input type="date" name="end_date" required></label>
+        </div>
+        <label class="switch-row editable"><span>长期使用<small class="renew-rule"></small></span><span class="switch"><input type="checkbox" name="auto_renew"><i></i></span></label>
+        <label class="editable">用途备注<input name="note" maxlength="256"></label>
+        <p class="error" id="detail-error"></p>
+      </div>
+      <div class="dlg-f">
         <button class="btn danger editable" type="button" id="detail-release">释放 / 取消</button>
         <span class="spacer"></span>
         <button class="btn" value="cancel" formnovalidate>关闭</button>
@@ -308,19 +335,6 @@
         <button class="btn primary" id="server-submit" value="ok">保存</button>
       </div>
     </form>
-  </dialog>
-
-  <!-- 选择年 / 月 -->
-  <dialog id="month-dialog">
-    <div class="stack">
-      <div class="year-bar"><button class="btn" id="year-prev" type="button" title="上一年">‹</button><b id="year-label"></b><button class="btn" id="year-next" type="button" title="下一年">›</button></div>
-      <div class="month-grid" id="month-grid"></div>
-      <div class="actions">
-        <button class="btn" id="month-this" type="button">回到本月</button>
-        <span class="spacer"></span>
-        <button class="btn" id="month-close" type="button">关闭</button>
-      </div>
-    </div>
   </dialog>
 
   <!-- 修改用户名 -->
