@@ -155,9 +155,12 @@ def first_blocked_day(others: list[Reservation], user_id: int, start: date, end:
     return None
 
 
-def check_capacity(db: Session, gpu_ids: list[int], start: date, end: date, user_id: int, exclude_id: int | None = None):
-    """同一张卡同一天最多 max_gpu_sharers 人共用，且同一个人不能在同一张卡同一天重复预约。冲突时抛 ValueError。"""
-    rs = [r for r in overlapping(db, start, end, gpu_ids=gpu_ids) if r.id != exclude_id]
+def check_capacity(db: Session, gpu_ids: list[int], start: date, end: date, user_id: int, exclude_id: int | None = None,
+                   allow_self: bool = False):
+    """同一张卡同一天最多 max_gpu_sharers 人共用，且同一个人不能在同一张卡同一天重复预约。冲突时抛 ValueError。
+    allow_self=True（修改已有预约、拖动色块）：和自己在这张卡上别的预约重叠是允许的，之后会合并成一条，
+    这些预约不占用别人的名额，也不算冲突。"""
+    rs = [r for r in overlapping(db, start, end, gpu_ids=gpu_ids) if r.id != exclude_id and not (allow_self and r.user_id == user_id)]
     cap = get_int_setting(db, "max_gpu_sharers")
     problems = []
     for gid in gpu_ids:
