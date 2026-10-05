@@ -402,7 +402,7 @@ def test_qr_login_url(monkeypatch):
     monkeypatch.setattr(settings, "feishu_app_id", "cli_x")
     monkeypatch.setattr(settings, "feishu_app_secret", "s")
     r = c.get("/auth/qr").json()["goto"]
-    assert "client_id=cli_x" in r and "redirect_uri=http%3A%2F%2Ftestserver%2Fauth%2Fcallback" in r
+    assert r.startswith("https://passport.feishu.cn/suite/passport/oauth/authorize?") and "client_id=cli_x" in r and "redirect_uri=http%3A%2F%2Ftestserver%2Fauth%2Fcallback" in r
     state = r.split("state=")[1]
     assert c.get("/auth/qr").json()["goto"].endswith(state)  # 同一会话里重复取二维码，state 不变
     assert c.get("/auth/callback?code=c&state=wrong").status_code == 400

@@ -106,10 +106,10 @@ label > input, label > select, label > textarea { color: var(--text); font-size:
 .login-head h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: 0.5px; }
 .login-head p { margin: 0; font-size: 13px; }
 .qr-box {
-  position: relative; width: 236px; height: 236px; margin: 0 auto; border-radius: 12px; overflow: hidden;
+  position: relative; width: 250px; height: 250px; margin: 0 auto; border-radius: 12px; overflow: hidden;
   background: #fff; border: 1px solid var(--line); display: grid; place-items: center;
 }
-.qr-box iframe { border: 0; display: block; width: 236px; height: 236px; }
+.qr-box iframe { border: 0; display: block; width: 250px; height: 250px; }
 .qr-tip { margin: 12px 0 0; font-size: 14px; color: var(--muted); }
 .qr-tip b { color: var(--text); }
 .login-or { display: flex; align-items: center; gap: 12px; margin: 18px 0 14px; color: var(--muted); font-size: 12px; }

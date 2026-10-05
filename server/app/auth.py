@@ -88,7 +88,7 @@ def qr_login(request: Request):
         raise HTTPException(500, "服务端未配置 FEISHU_APP_ID / FEISHU_APP_SECRET")
     state = request.session.get("oauth_state") or secrets.token_urlsafe(16)
     request.session["oauth_state"] = state
-    return {"goto": feishu.authorize_url(_redirect_uri(), state)}
+    return {"goto": feishu.qr_authorize_url(_redirect_uri(), state)}
 
 
 @router.get("/auth/callback")

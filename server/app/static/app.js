@@ -225,7 +225,7 @@ async function initQrLogin() {
       });
     }
     $("#qr-box").innerHTML = "";
-    const qr = window.QRLogin({ id: "qr-box", goto, width: "236", height: "236", style: "border:0;width:236px;height:236px" });
+    const qr = window.QRLogin({ id: "qr-box", goto, width: "250", height: "250", style: "border:0;width:250px;height:250px" });
     window.addEventListener("message", (ev) => {
       if (qr.matchOrigin(ev.origin) && qr.matchData(ev.data)) location.href = `${goto}&tmp_code=${ev.data.tmp_code}`;
     });

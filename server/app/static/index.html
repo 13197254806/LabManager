@@ -13,13 +13,13 @@
       <div class="login-head">
         <img class="login-logo" src="/static/logo.png" alt="">
         <h1 id="login-title">实验室</h1>
-        <p class="muted">GPU 管理平台 · 预约 · 服务器账号 · 实验室助手</p>
+        <p class="muted">GPU 管理平台</p>
       </div>
       <div id="login-feishu" class="hidden">
         <div class="qr-box" id="qr-box"><span class="muted small" id="qr-hint">正在加载二维码…</span></div>
         <p class="qr-tip">打开<b>飞书</b>，扫一扫登录</p>
         <div class="login-or"><span>或</span></div>
-        <a class="btn big login-btn" href="/auth/login" id="feishu-login">在此浏览器中使用飞书账号登录</a>
+        <a class="btn big login-btn" href="/auth/login" id="feishu-login">通过飞书客户端登录</a>
       </div>
       <p class="muted small hidden" id="login-unavailable">管理员还没有配置飞书应用，暂时无法登录。<br>（在服务器 deploy/.env 里填写 FEISHU_APP_ID / FEISHU_APP_SECRET）</p>
       <form id="dev-login" class="dev-login hidden">

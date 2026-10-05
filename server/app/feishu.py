@@ -134,6 +134,19 @@ def authorize_url(redirect_uri: str, state: str) -> str:
     return f"{settings.feishu_accounts_base}/open-apis/authen/v1/authorize?{query}"
 
 
+def qr_authorize_url(redirect_uri: str, state: str) -> str:
+    """扫码登录用的授权地址（给飞书二维码组件当 goto）：扫码确认后带 tmp_code 访问它，再跳回 redirect_uri。"""
+    query = urlencode(
+        {
+            "client_id": settings.feishu_app_id,
+            "redirect_uri": redirect_uri,
+            "response_type": "code",
+            "state": state,
+        }
+    )
+    return f"{settings.feishu_passport_base}/suite/passport/oauth/authorize?{query}"
+
+
 def exchange_code(code: str, redirect_uri: str) -> dict:
     """用授权码换 user_access_token，再取用户信息。返回 open_id/union_id/name/avatar_url/tenant_key。"""
     resp = httpx.post(

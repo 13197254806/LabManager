@@ -23,6 +23,8 @@ class Settings:
     feishu_app_secret = _env("FEISHU_APP_SECRET")
     feishu_open_base = _env("FEISHU_OPEN_BASE", "https://open.feishu.cn")
     feishu_accounts_base = _env("FEISHU_ACCOUNTS_BASE", "https://accounts.feishu.cn")
+    # 扫码登录的授权入口（二维码组件只认这个域名下的 /suite/passport/oauth/authorize，用 accounts 的地址会报 4401）
+    feishu_passport_base = _env("FEISHU_PASSPORT_BASE", "https://passport.feishu.cn")
     # 只允许该企业的成员登录（可选，留空不校验）
     feishu_tenant_key = _env("FEISHU_TENANT_KEY")
     # 只对这些群的新成员发欢迎卡片（留空则机器人所在的所有群都发）
