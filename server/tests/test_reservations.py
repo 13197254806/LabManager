@@ -365,15 +365,29 @@ def test_long_term_stops_before_full_day(admin, alice, server, db):
     assert len(mine) == 1 and (mine[0].start_date, mine[0].end_date) == (d, d + timedelta(days=2))
 
 
-def test_started_reservation_start_date_is_locked(admin, alice, server):
+def test_started_reservation_start_date_is_locked(admin, alice, server, db):
+    """开始日期在今天之前的预约，开始日期不能改（管理员也一样）；结束日期仍可修改。"""
     g = gpu_ids(alice)
     d = today()
-    rid = book(alice, g[:1], d - timedelta(days=0), d + timedelta(days=3)).json()[0]["id"]
+    rid = book(alice, g[:1], d, d + timedelta(days=3)).json()[0]["id"]
+    _backdate(db, rid, -2, 3)  # 前天开始，今天还在用
     for who in (alice, admin):
         r = who.patch(f"/api/reservations/{rid}", json={"start_date": str(d + timedelta(days=1))})
         assert r.status_code == 400
-    # 结束日期仍可修改
     assert alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d + timedelta(days=4))}).status_code == 200
+
+
+def test_start_date_can_move_from_today_on_but_never_into_the_past(admin, alice, server):
+    """今天及以后开始的预约可以改开始日期（拖左边缘）：可以往后缩，但不能挪到今天之前。"""
+    g = gpu_ids(alice)
+    d = today()
+    rid = book(alice, g[:1], d, d + timedelta(days=5)).json()[0]["id"]
+    r = alice.patch(f"/api/reservations/{rid}", json={"start_date": str(d + timedelta(days=2))})
+    assert r.status_code == 200 and r.json()["start_date"] == str(d + timedelta(days=2))
+    for who in (alice, admin):  # 管理员也不能改已过去的时间
+        assert who.patch(f"/api/reservations/{rid}", json={"start_date": str(d - timedelta(days=1))}).status_code == 400
+    # 往前拉回今天也可以
+    assert alice.patch(f"/api/reservations/{rid}", json={"start_date": str(d)}).status_code == 200
 
 
 def test_long_term_overrides_temp_but_keeps_history(alice, server, db):
@@ -496,3 +510,104 @@ def test_resize_by_end_date_only(admin, alice, server, db):
     # 别人的预约普通成员不能改
     other = [x for x in admin.get("/api/me/reservations").json()][0]["id"]
     assert alice.patch(f"/api/reservations/{other}", json={"end_date": str(d + timedelta(days=4))}).status_code in (403, 404)
+
+
+# ---------------- 拖动色块：和自己的其他预约重叠 / 相邻时合并；跨过今天的预约在“今天”处拆分 ----------------
+
+
+def _mine(db, user_name="alice"):
+    from app.models import User
+
+    db.expire_all()
+    u = db.query(User).filter_by(name=user_name).one()
+    rs = db.query(Reservation).filter_by(user_id=u.id, status="active").order_by(Reservation.start_date).all()
+    return [(r.start_date, r.end_date) for r in rs]
+
+
+def test_dragging_into_own_other_reservation_merges_in_database(alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    ra = book(alice, g[:1], d + timedelta(days=1), d + timedelta(days=2), note="左").json()[0]["id"]
+    rb = book(alice, g[:1], d + timedelta(days=5), d + timedelta(days=6), note="右").json()[0]["id"]
+    # 右边的块往左拉到和左边的块相邻 → 合并成一条（数据库里只剩一条）
+    r = alice.patch(f"/api/reservations/{rb}", json={"start_date": str(d + timedelta(days=3))})
+    assert r.status_code == 200
+    assert _mine(db) == [(d + timedelta(days=1), d + timedelta(days=6))]
+    assert r.json()["note"] == "左"  # 备注以靠左的（第一条还没结束的）为准
+
+
+def test_dragging_over_own_reservation_overlap_merges(alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    ra = book(alice, g[:1], d, d + timedelta(days=1)).json()[0]["id"]
+    book(alice, g[:1], d + timedelta(days=4), d + timedelta(days=6))
+    # 左边的块把右边缘一直拖到盖住右边的块的中间：重叠 → 合并，结束日期取较晚的
+    assert alice.patch(f"/api/reservations/{ra}", json={"end_date": str(d + timedelta(days=5))}).status_code == 200
+    assert _mine(db) == [(d, d + timedelta(days=6))]
+
+
+def test_merging_by_dragging_respects_max_length(alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    ra = book(alice, g[:1], d, d + timedelta(days=5)).json()[0]["id"]
+    book(alice, g[:1], d + timedelta(days=7), d + timedelta(days=15))
+    # 合并后一共 16 天（> 单次最长 14 天）→ 普通成员不能靠合并绕过限制
+    r = alice.patch(f"/api/reservations/{ra}", json={"end_date": str(d + timedelta(days=6))})
+    assert r.status_code == 400 and "最长" in r.json()["detail"]
+    assert len(_mine(db)) == 2
+
+
+def test_dragging_into_someone_elses_full_gpu_is_still_rejected(admin, alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    rid = book(alice, g[:1], d, d + timedelta(days=1)).json()[0]["id"]
+    assert book(admin, g[:1], d + timedelta(days=3), d + timedelta(days=4)).status_code == 200  # 默认一张卡只能一个人
+    assert alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d + timedelta(days=3))}).status_code == 409
+    assert _mine(db) == [(d, d + timedelta(days=1))]
+
+
+def test_split_a_running_reservation_at_today(alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    rid = book(alice, g[:1], d, d + timedelta(days=5), note="训练", auto_renew=True).json()[0]["id"]
+    _backdate(db, rid, -3, 5)  # 3 天前开始，今天还在用，到 5 天后
+    r = alice.post(f"/api/reservations/{rid}/split", json={"from_date": str(d + timedelta(days=2))})
+    assert r.status_code == 200
+    new = r.json()
+    assert (new["start_date"], new["end_date"]) == (str(d + timedelta(days=2)), str(d + timedelta(days=5)))
+    assert new["note"] == "训练" and new["auto_renew"] is True  # 备注和长期使用留在还在生效的后半段
+    # 数据库里是两条：一条全部过期的历史，一条完全没过期的；中间（今天、明天）释放了
+    assert _mine(db) == [(d - timedelta(days=3), d - timedelta(days=1)), (d + timedelta(days=2), d + timedelta(days=5))]
+    db.expire_all()
+    assert db.get(Reservation, rid).auto_renew is False
+    assert services.run_auto_renew(db) == 0  # 历史那条不会再被自动延长
+
+
+def test_split_rules(admin, alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    rid = book(alice, g[:1], d, d + timedelta(days=5)).json()[0]["id"]
+    # 从今天开始的预约没有“过去的部分”，不能拆
+    assert alice.post(f"/api/reservations/{rid}/split", json={"from_date": str(d + timedelta(days=2))}).status_code == 400
+    _backdate(db, rid, -3, 5)
+    for bad in (d, d - timedelta(days=1), d + timedelta(days=6)):  # 必须在今天之后、结束日期之内
+        assert alice.post(f"/api/reservations/{rid}/split", json={"from_date": str(bad)}).status_code == 400
+    from conftest import make_client
+
+    bob = make_client("bob")
+    assert bob.post(f"/api/reservations/{rid}/split", json={"from_date": str(d + timedelta(days=2))}).status_code in (403, 404)
+    assert len(_mine(db)) == 1  # 都被拒绝，没有改动
+
+
+def test_split_then_dragging_back_merges_again(alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    rid = book(alice, g[:1], d, d + timedelta(days=5), auto_renew=True).json()[0]["id"]
+    _backdate(db, rid, -3, 5)
+    new = alice.post(f"/api/reservations/{rid}/split", json={"from_date": str(d + timedelta(days=2))}).json()
+    assert len(_mine(db)) == 2
+    # 后半段的左边缘拖回今天：和历史那段相邻 → 合并回一条，长期使用标记取还在生效的那段
+    r = alice.patch(f"/api/reservations/{new['id']}", json={"start_date": str(d)})
+    assert r.status_code == 200
+    assert _mine(db) == [(d - timedelta(days=3), d + timedelta(days=5))]
+    assert r.json()["auto_renew"] is True

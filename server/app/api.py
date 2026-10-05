@@ -315,9 +315,10 @@ def _check_rules(db: Session, user: User, start: date, end: date, is_new_start: 
         raise HTTPException(400, f"最多提前 {max_advance} 天预约")
 
 
-def _check_conflicts(db: Session, gpu_ids: list[int], start: date, end: date, user_id: int, exclude_id: int | None = None):
+def _check_conflicts(db: Session, gpu_ids: list[int], start: date, end: date, user_id: int, exclude_id: int | None = None,
+                     allow_self: bool = False):
     try:
-        services.check_capacity(db, gpu_ids, start, end, user_id, exclude_id)
+        services.check_capacity(db, gpu_ids, start, end, user_id, exclude_id, allow_self)
     except ValueError as e:
         raise HTTPException(409, str(e))
 
@@ -409,10 +410,21 @@ def update_reservation(
             raise HTTPException(400, "已结束的预约不能修改")
         start = body.start_date or r.start_date
         end = body.end_date or r.end_date
-        if start != r.start_date and r.start_date <= today():
+        # 已经过去的日期不能改：开始日期在今天之前的预约不能改开始日期；开始日期也不能挪到今天之前。
+        # 今天及以后开始的预约可以改开始日期（拖动左边缘）。要把跨过今天的预约拆开，用 /split
+        if start != r.start_date and r.start_date < today():
             raise HTTPException(400, "预约已经开始，不能修改开始日期（已过去的部分不能改）")
+        if start != r.start_date and start < today():
+            raise HTTPException(400, "不能把开始日期改到今天之前")
         _check_rules(db, user, start, end, is_new_start=start != r.start_date)
-        _check_conflicts(db, [r.gpu_id], start, end, r.user_id, exclude_id=r.id)
+        # 和自己在这张卡上别的预约重叠 / 相邻：保存后合并成一条（见下面的 merge_reservations），合并后的整段也要满足长度限制
+        span_start, span_end = start, end
+        for o in services.overlapping(db, start - timedelta(days=1), end + timedelta(days=1), gpu_ids=[r.gpu_id]):
+            if o.id != r.id and o.user_id == r.user_id:
+                span_start, span_end = min(span_start, o.start_date), max(span_end, o.end_date)
+        if (span_start, span_end) != (start, end):
+            _check_rules(db, user, span_start, span_end, is_new_start=False)
+        _check_conflicts(db, [r.gpu_id], start, end, r.user_id, exclude_id=r.id, allow_self=True)
         changed = (start, end) != (r.start_date, r.end_date)
         r.start_date, r.end_date = start, end
         if body.note is not None:
@@ -426,6 +438,36 @@ def update_reservation(
     if changed:
         bg.add_task(_bg, services.notify_booked, r.user_id, [r.id], "预约已修改")
     return res_out(r, user)
+
+
+class ReservationSplit(BaseModel):
+    from_date: date  # 拆分后后半段的开始日期
+
+
+@router.post("/reservations/{rid}/split")
+def split_reservation(
+    rid: int, body: ReservationSplit, bg: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)
+):
+    """把跨过今天的预约拆成两条：今天之前的部分保留为已结束的历史（原记录），从 from_date 起另存一条新的，
+    中间（今天 ~ from_date 前一天）释放掉。用来在日历上拖动“今天”这一条边界，缩短后半段的开始日期。"""
+    with _booking_lock:
+        r = _own_reservation(db, rid, user)
+        t = today()
+        if not (r.start_date < t <= r.end_date):
+            raise HTTPException(400, "只有已经开始、且还没结束的预约才能这样拆分")
+        if not (t < body.from_date <= r.end_date):
+            raise HTTPException(400, "后半段的开始日期要在今天之后、结束日期之内")
+        new = Reservation(
+            user_id=r.user_id, gpu_id=r.gpu_id, start_date=body.from_date, end_date=r.end_date,
+            note=r.note, auto_renew=r.auto_renew, renew_count=r.renew_count, status="active",
+        )
+        r.end_date = t - timedelta(days=1)
+        r.auto_renew = False  # 已结束的历史部分不再自动延长；长期使用标记留在还在生效的后半段
+        db.add(new)
+        db.commit()
+        db.refresh(new)
+    bg.add_task(_bg, services.notify_booked, new.user_id, [new.id], "预约已修改")
+    return res_out(new, user)
 
 
 @router.delete("/reservations/{rid}")

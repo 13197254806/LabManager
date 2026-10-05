@@ -203,6 +203,7 @@ main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 .cal-gpu .cal-cell:not(.past):hover { background: var(--primary-soft); }
 .cal-gpu .cal-cell:not(.past):hover::after { content: "+"; position: absolute; inset: 0; display: grid; place-items: center; color: var(--primary); font-size: 18px; font-weight: 300; }
 /* 已过去的日期：同一台服务器的所有显卡行共用一层斜线（每格 / 每行各画一份花纹会在边界错位）；今天这一列盖在预约色块上面，不挡点击 */
+.cal-body { position: relative; }
 .past-zone { position: absolute; left: var(--label-w); top: 0; bottom: 0; z-index: 1; pointer-events: none; background-image: repeating-linear-gradient(135deg, transparent 0 5px, color-mix(in srgb, var(--line-strong) 75%, transparent) 5px 6.5px); }
 .today-zone { grid-row: 1 / -1; z-index: 3; pointer-events: none; background: var(--today); box-shadow: inset 1px 0 0 color-mix(in srgb, var(--primary) 40%, transparent), inset -1px 0 0 color-mix(in srgb, var(--primary) 40%, transparent); }
 
@@ -219,7 +220,7 @@ main { padding: 16px; max-width: 1600px; margin: 0 auto; }
 /* 服务器分组：点击服务器行折叠 / 展开，GPU 行用 grid-template-rows 0fr↔1fr 做高度动画（overflow: clip 不影响左列的 sticky） */
 .cal-server-group { border-bottom: 1px solid var(--line-strong); }
 .cal-server-group:last-child { border-bottom: 0; }
-.cal-server { background: color-mix(in srgb, var(--bg) 60%, var(--panel)); min-height: 46px; user-select: none; }
+.cal-server { position: relative; z-index: 2; background: color-mix(in srgb, var(--bg) 60%, var(--panel)); min-height: 46px; user-select: none; }  /* z-index：盖住下面那一整块斜线 */
 .cal-server > .cal-label { cursor: pointer; background: color-mix(in srgb, var(--bg) 60%, var(--panel)); padding: 9px 14px; }
 .cal-server > .cal-label:hover { filter: brightness(.975); }
 .cal-server:focus-visible { outline: 2px solid var(--primary); outline-offset: -2px; }
@@ -279,12 +280,17 @@ svg.i.chev { width: 14px; height: 14px; color: var(--faint); transition: transfo
 .bar:hover { filter: brightness(.96); }
 .bar { position: relative; }
 /* 右边缘的拖拽把手：悬停在色块上时出现，按住左右拖动改结束日期 */
-.bar.can-resize { padding-right: 14px; }
-.resize-handle { position: absolute; top: 0; bottom: 0; right: 0; width: 12px; cursor: ew-resize; display: none; touch-action: none; }
-.resize-handle::after { content: ""; position: absolute; top: 28%; bottom: 28%; right: 3px; width: 3px; border-left: 1.5px solid currentColor; border-right: 1.5px solid currentColor; opacity: .55; border-radius: 1px; }
-.bar.can-resize:hover .resize-handle, .bar.resizing .resize-handle { display: block; }
+.bar.has-r { padding-right: 14px; }
+.bar.has-l { padding-left: 14px; }
+.resize-handle { position: absolute; top: 0; bottom: 0; width: 12px; cursor: ew-resize; display: none; touch-action: none; }
+.resize-handle.r { right: 0; }
+.resize-handle.l { left: 0; }
+.resize-handle::after { content: ""; position: absolute; top: 28%; bottom: 28%; width: 3px; border-left: 1.5px solid currentColor; border-right: 1.5px solid currentColor; opacity: .55; border-radius: 1px; }
+.resize-handle.r::after { right: 3px; }
+.resize-handle.l::after { left: 3px; }
+.bar:hover .resize-handle, .bar.resizing .resize-handle { display: block; }
 .bar.resizing { z-index: 5; filter: none; box-shadow: 0 0 0 3px var(--primary-soft), 0 2px 8px rgba(0, 0, 0, .18); cursor: ew-resize; user-select: none; }
-@media (hover: none) { .bar.can-resize .resize-handle { display: block; } }
+@media (hover: none) { .bar .resize-handle { display: block; } }
 .drag-tip { position: fixed; z-index: 80; pointer-events: none; padding: 5px 10px; border-radius: 8px; background: #1f2329; color: #fff; font-size: 12.5px; white-space: nowrap; box-shadow: 0 4px 14px rgba(0, 0, 0, .25); }
 .drag-tip.hidden { display: none; }
 body.dragging-bar, body.dragging-bar * { cursor: ew-resize !important; }

@@ -442,6 +442,8 @@ function renderCalendar() {
   // 已过去的日期共用一层斜线、今天这一列盖在色块上面：都是整段的覆盖层
   const pastN = Math.min(days, Math.max(0, diffDays(vStart, today))), todayIdx = diffDays(vStart, today);
 
+  // 已过去的日期只画一整块斜线（所有显卡行共用，服务器行盖在它上面）：花纹是同一张图，不会在行 / 格子之间错位
+  html += `<div class="cal-body">${pastN > 0 ? `<div class="past-zone" style="width:calc((100% - var(--label-w)) * ${pastN} / ${days})"></div>` : ""}`;
   for (const s of cal.servers) {
     const alertGpus = s.gpus.filter((g) => g.alerts.length);
     const collapsed = state.collapsed.has(s.id);
@@ -453,7 +455,7 @@ function renderCalendar() {
             ${alertGpus.length ? `<span class="alert-ico" title="${esc(`${alertGpus.length} 张卡上有未预约的用户正在使用`)}">${ALERT_ICON}</span>` : ""}</span>
           <span class="srv-host"><span class="mono">${esc(s.host)}</span>${s.gpus.length ? `<span class="srv-free ${freeN ? "" : "none"}">${freeN ? `今天空闲 ${freeN}` : "今天已满"}</span>` : ""}</span></div>
         <div class="cal-track">${serverStats(s)}</div></div>
-      <div class="srv-body"><div class="srv-inner">${pastN > 0 ? `<div class="past-zone" style="width:calc((100% - var(--label-w)) * ${pastN} / ${days})"></div>` : ""}`;
+      <div class="srv-body"><div class="srv-inner">`;
     for (const g of s.gpus) {
       const util = g.utilization ?? 0;
       const live = s.online && g.memory_total != null;
@@ -484,28 +486,35 @@ function renderCalendar() {
           <div class="tt-row">${c.start} ~ ${c.end}${c.items.length > 1 ? `（${c.items.length} 段连续预约）` : ""}</div>${head?.note ? `<div class="tt-row">${esc(head.note)}</div>` : ""}${tags ? `<div class="tt-tags">${tags}</div>` : ""}`;
         // 与后面正在生效的部分相连的“已结束”淡色段不再重复头像和名字
         const inner = b.past && b.cutR ? "" : `${avatarHtml(c.user_name, c.user_avatar, c.user_id)}<span class="nm">${esc(c.user_name)}</span>${head?.note ? `<span class="note">· ${esc(head.note)}</span>` : ""}${head?.auto_renew ? icon("renew", "renew") : ""}`;
-        // 右边缘可以拖动改结束日期：整条连续预约的最后一段、有权限修改、结束日期就在本月里（右边缘看得见）、还没结束
+        // 可拖动的边缘（只能改今天及以后的日期；已过去的部分不能动）：
+        //  · 右边缘：整条连续预约的最后一段、结束日期就在本月里 → 改结束日期
+        //  · 左边缘：整条预约都从今天或以后开始 → 改开始日期；已经开始、跨过今天的 → 左边缘在“今天”处，向右拖就把预约拆成「已过去」和「还没过期」两条
         const last = c.items.reduce((a, r) => (r.end_date >= a.end_date ? r : a), c.items[0]);
-        const resizable = !b.past && !b.cutR && last.editable && last.end_date >= today;
-        const resize = resizable ? ` data-resize="${last.id}" data-end="${last.end_date}" data-min="${last.start_date > today ? last.start_date : today}"` : "";
-        html += `<div class="bar ${mine ? "mine" : ""} ${b.past ? "past" : ""} ${b.cutL ? "cut-l" : ""} ${b.cutR ? "cut-r" : ""} ${resizable ? "can-resize" : ""}"
-          style="grid-column:${b.c1}/${b.c2 + 1};grid-row:${b.lane + 1};--h:${hue(c.user_id)}" data-bar="${n}"${resize} data-tip-html="${esc(tip)}">${inner}${resizable ? `<span class="resize-handle" aria-hidden="true"></span>` : ""}</div>`;
+        const first = c.items.reduce((a, r) => (r.start_date < a.start_date ? r : a), c.items[0]);
+        const cover = c.items.find((r) => r.start_date <= today && today <= r.end_date);
+        const canR = !b.past && !b.cutR && last.editable && last.end_date >= today;
+        let left = null;
+        if (!b.past) {
+          if (!b.cutL && first.editable && first.start_date >= today) left = { mode: "start", row: first, from: first.start_date };
+          else if (b.cutL && c.start < today && cover?.editable && todayIdx >= 0 && b.c1 === todayIdx + 1) {
+            left = cover.start_date < today ? { mode: "split", row: cover, from: today } : { mode: "start", row: cover, from: cover.start_date };
+          }
+        }
+        const attrs = (canR ? ` data-resize="${last.id}" data-end="${last.end_date}" data-rs="${last.start_date}" data-min="${last.start_date > today ? last.start_date : today}"` : "")
+          + (left ? ` data-lmode="${left.mode}" data-lid="${left.row.id}" data-lstart="${left.from}" data-lmax="${left.row.end_date}"` : "");
+        html += `<div class="bar ${mine ? "mine" : ""} ${b.past ? "past" : ""} ${b.cutL ? "cut-l" : ""} ${b.cutR ? "cut-r" : ""} ${canR ? "has-r" : ""} ${left ? "has-l" : ""}"
+          style="grid-column:${b.c1}/${b.c2 + 1};grid-row:${b.lane + 1};--h:${hue(c.user_id)}" data-bar="${n}" data-gpu="${g.id}" data-user="${c.user_id}" data-c1="${b.c1}" data-c2="${b.c2}"${attrs} data-tip-html="${esc(tip)}">${left ? `<span class="resize-handle l" aria-hidden="true"></span>` : ""}${inner}${canR ? `<span class="resize-handle r" aria-hidden="true"></span>` : ""}</div>`;
       }
       if (todayIdx >= 0 && todayIdx < days) html += `<div class="today-zone" style="grid-column:${todayIdx + 1}"></div>`;
       html += `</div></div>`;
     }
     html += `</div></div></div>`;
   }
+  html += `</div>`;
   root.innerHTML = html;
-  alignStripes();
+  playBarAnim();
 }
 
-// 各台服务器的斜线层是分开的两块：让花纹相对整张日历对齐（折叠 / 展开后后面的服务器位置变了，要重新对齐）
-function alignStripes() {
-  const root = $("#calendar");
-  const top = root.getBoundingClientRect().top;
-  $$(".past-zone", root).forEach((z) => { z.style.backgroundPositionY = `${-Math.round(z.getBoundingClientRect().top - top)}px`; });
-}
 
 $("#calendar").addEventListener("click", (e) => {
   if (e.target.closest(".resize-handle")) return;  // 拖拽结束时的那一下 click，不要当成点色块
@@ -531,8 +540,11 @@ $("#calendar").addEventListener("keydown", (e) => {
   if (head && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); toggleServer(head); }
 });
 
-// 拖动预约块右边缘改结束日期：按住右边缘左右拖，随鼠标吸附到某一天，松手后提交；
-// 冲突 / 超出规则时服务端会拒绝，色块恢复原样并提示原因。按 Esc 取消。
+// 拖动预约块的边缘改日期（松手提交，数据库里同步修改）：
+//  · 右边缘改结束日期；左边缘改开始日期（只有今天及以后开始的预约）；
+//  · 已经开始、跨过今天的预约：拖「今天」处的左边缘向右，把它拆成「已过去」和「还没过期」两条（中间释放）；
+//  · 拖到和自己在这张卡上的另一条预约重叠或相邻，保存后两条合并成一条（备注、长期使用以靠左、第一条还没结束的为准）。
+// 日期会吸附到格子；冲突 / 超出规则时服务端拒绝，色块恢复原样并提示原因；Esc 取消。
 let drag = null;
 const dragTip = document.createElement("div");
 dragTip.className = "drag-tip hidden";
@@ -549,28 +561,42 @@ $("#calendar").addEventListener("pointerdown", (e) => {
   const handle = e.target.closest(".resize-handle");
   if (!handle || e.button > 0) return;
   const bar = handle.closest(".bar"), track = bar.parentElement;
-  const b = state.bars[Number(bar.dataset.bar)], vStart = monthStart();
-  drag = {
-    bar, track, vStart, id: Number(bar.dataset.resize), c1: b.c1, days: monthDays(),
-    minIdx: diffDays(vStart, bar.dataset.min), origIdx: diffDays(vStart, bar.dataset.end), curIdx: diffDays(vStart, bar.dataset.end),
-  };
+  const b = state.bars[Number(bar.dataset.bar)], vStart = monthStart(), days = monthDays();
+  const idxOf = (d) => diffDays(vStart, d);
+  const todayIdx = Math.max(0, idxOf(state.config.today));  // 不能拖到今天之前
+  const isLeft = handle.classList.contains("l");
+  drag = isLeft
+    ? { edge: "l", mode: bar.dataset.lmode, id: Number(bar.dataset.lid), orig: idxOf(bar.dataset.lstart), min: todayIdx, max: Math.min(days - 1, idxOf(bar.dataset.lmax)), keep: bar.dataset.lmax }
+    : { edge: "r", mode: "end", id: Number(bar.dataset.resize), orig: idxOf(bar.dataset.end), min: Math.max(0, idxOf(bar.dataset.min)), max: days - 1, keep: bar.dataset.rs };
+  Object.assign(drag, { bar, track, vStart, days, c1: b.c1, c2: b.c2 });
+  drag.cur = drag.orig;
   handle.setPointerCapture(e.pointerId);
   bar.classList.add("resizing");
   document.body.classList.add("dragging-bar");
   state.dragging = true;  // 拖动期间不要自动刷新
+  tipHideNow();
   e.preventDefault();
   e.stopPropagation();
 });
 document.addEventListener("pointermove", (e) => {
   if (!drag) return;
   const rect = drag.track.getBoundingClientRect();
-  const idx = Math.max(drag.minIdx, Math.min(drag.days - 1, Math.floor((e.clientX - rect.left) / (rect.width / drag.days))));
-  if (idx !== drag.curIdx) {
-    drag.curIdx = idx;
-    drag.bar.style.gridColumn = `${drag.c1}/${idx + 2}`;
+  const idx = Math.max(drag.min, Math.min(drag.max, Math.floor((e.clientX - rect.left) / (rect.width / drag.days))));
+  if (idx !== drag.cur) {
+    drag.cur = idx;
+    drag.bar.style.gridColumn = drag.edge === "r" ? `${drag.c1}/${idx + 2}` : `${idx + 1}/${drag.c2 + 1}`;
   }
-  const day = addDays(drag.vStart, drag.curIdx);
-  dragTip.textContent = `结束日期 ${day}（周${WEEK[parseDate(day).getDay()]}）${drag.curIdx === drag.origIdx ? "" : drag.curIdx > drag.origIdx ? `，延长 ${drag.curIdx - drag.origIdx} 天` : `，缩短 ${drag.origIdx - drag.curIdx} 天`}`;
+  const day = addDays(drag.vStart, drag.cur), wd = `（周${WEEK[parseDate(day).getDay()]}）`, n = Math.abs(drag.cur - drag.orig);
+  let text;
+  if (drag.mode === "split") {
+    text = drag.cur === drag.orig ? "向右拖动：拆成「已过去」和「还没过期」两段"
+      : `拆分：保留已过去的部分，从 ${day}${wd} 重新开始，中间 ${n} 天释放`;
+  } else if (drag.edge === "r") {
+    text = `结束日期 ${day}${wd}${n ? `，${drag.cur > drag.orig ? "延长" : "缩短"} ${n} 天` : ""}`;
+  } else {
+    text = `开始日期 ${day}${wd}${n ? `，${drag.cur < drag.orig ? "提前" : "推迟"} ${n} 天` : ""}`;
+  }
+  dragTip.textContent = text;
   dragTip.classList.remove("hidden");
   dragTip.style.left = `${Math.min(e.clientX + 14, window.innerWidth - dragTip.offsetWidth - 8)}px`;
   dragTip.style.top = `${e.clientY + 18}px`;
@@ -579,19 +605,55 @@ document.addEventListener("pointerup", async () => {
   if (!drag) return;
   const d = drag;
   dragEnd();
-  if (d.curIdx === d.origIdx) return;
-  const end = addDays(d.vStart, d.curIdx);
+  if (d.cur === d.orig) return;
+  const day = addDays(d.vStart, d.cur);
+  // 重画之后据此播放“合并 / 拆分”过渡动画：拖动时色块占着的那一段列
+  state.anim = { gpu: d.bar.dataset.gpu, user: d.bar.dataset.user, kind: d.mode === "split" ? "split" : "resize", ext: d.edge === "r" ? [d.c1, d.cur + 1] : [d.cur + 1, d.c2] };
   try {
-    await api(`/api/reservations/${d.id}`, { method: "PATCH", body: { end_date: end } });
-    toast(`已把结束日期改为 ${end}`);
+    let msg;
+    if (d.mode === "split") {
+      await api(`/api/reservations/${d.id}/split`, { method: "POST", body: { from_date: day } });
+      msg = `已拆分：已过去的部分保留，从 ${day} 起重新开始，中间的日子已释放`;
+    } else {
+      const r = await api(`/api/reservations/${d.id}`, { method: "PATCH", body: d.edge === "r" ? { end_date: day } : { start_date: day } });
+      // 返回的预约比拖出来的范围更大 / 另一端变了，说明和相邻的预约合并了
+      const merged = d.edge === "r" ? (r.end_date !== day || r.start_date !== d.keep) : (r.start_date !== day || r.end_date !== d.keep);
+      msg = merged ? "已和相邻的预约合并为一条" : d.edge === "r" ? `已把结束日期改为 ${day}` : `已把开始日期改为 ${day}`;
+    }
+    toast(msg);
     loadCalendar();
   } catch (err) {
+    state.anim = null;
     toast(err.message);
     renderCalendar();  // 恢复成拖动之前的样子
   }
 });
 document.addEventListener("pointercancel", () => { if (drag) { dragEnd(); renderCalendar(); } });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && drag) { dragEnd(); renderCalendar(); } });
+
+// 重画后的过渡动画：
+//  · 合并：合并后的色块从拖动时占着的那一段，向两侧“长”到完整长度，把被并入的色块吸收进来；
+//  · 拆分：拆出的两段轻轻“落定”。
+// 只是视觉效果，数据已经在服务端改好了；系统设置了“减少动态效果”时不播放。
+function playBarAnim() {
+  const a = state.anim;
+  state.anim = null;
+  if (!a || window.matchMedia?.("(prefers-reduced-motion: reduce)").matches) return;
+  const bars = $$(`#calendar .bar[data-gpu="${a.gpu}"][data-user="${a.user}"]`);
+  const ease = { duration: 320, easing: "cubic-bezier(.2,.7,.2,1)" };
+  if (a.kind === "split") {
+    bars.forEach((el) => el.animate([{ transform: "scaleY(.82)" }, { transform: "none" }], { ...ease, duration: 280 }));
+    return;
+  }
+  const [o1, o2] = a.ext;
+  const target = bars.filter((el) => !el.classList.contains("past") && Number(el.dataset.c1) <= o2 && Number(el.dataset.c2) >= o1)
+    .sort((x, y) => (y.dataset.c2 - y.dataset.c1) - (x.dataset.c2 - x.dataset.c1))[0];
+  if (!target) return;
+  const c1 = Number(target.dataset.c1), c2 = Number(target.dataset.c2), w = c2 - c1 + 1;
+  const L = Math.max(0, ((o1 - c1) / w) * 100), R = Math.max(0, ((c2 - o2) / w) * 100);
+  if (L < 0.5 && R < 0.5) return;  // 只是改了长度，没有合并
+  target.animate([{ clipPath: `inset(0 ${R}% 0 ${L}%)` }, { clipPath: "inset(0 0 0 0)" }], ease);
+}
 
 // 折叠 / 展开一台服务器：只切换 class，由 CSS 过渡负责动画（不重画日历，动画才不会被打断）
 function toggleServer(head) {
@@ -600,7 +662,6 @@ function toggleServer(head) {
   const collapsed = group.classList.toggle("collapsed");
   head.setAttribute("aria-expanded", String(!collapsed));
   state.lastToggle = Date.now();  // 折叠动画进行中不要自动刷新（重画会打断动画）
-  setTimeout(alignStripes, 350);  // 动画结束后重新对齐斜线
   if (collapsed) state.collapsed.add(id); else state.collapsed.delete(id);
   writeCollapsed();
 }
