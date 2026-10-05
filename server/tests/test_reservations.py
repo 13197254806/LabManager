@@ -470,3 +470,29 @@ def test_offline_threshold_follows_refresh_interval(admin, db, monkeypatch):
     assert settings.agent_offline_seconds == 900
     assert admin.put("/api/admin/settings", json={"refresh_interval_seconds": "10"}).status_code == 200
     assert settings.agent_offline_seconds == settings.agent_offline_floor  # 下限 180 秒
+
+
+# ---------------- 在日历上拖动色块右边缘：只提交结束日期 ----------------
+
+
+def test_resize_by_end_date_only(admin, alice, server, db):
+    g = gpu_ids(alice)
+    d = today()
+    rid = book(alice, g[:1], d, d + timedelta(days=3)).json()[0]["id"]
+    # 延长、缩短：只传 end_date 即可
+    r = alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d + timedelta(days=5))})
+    assert r.status_code == 200 and r.json()["end_date"] == str(d + timedelta(days=5))
+    r = alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d)})
+    assert r.status_code == 200 and r.json()["end_date"] == str(d)  # 最短缩到今天
+    # 不能缩到今天之前、不能超过单次最长天数
+    assert alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d - timedelta(days=1))}).status_code == 400
+    assert alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d + timedelta(days=20))}).status_code == 400
+    # 延长时撞上别人的预约（这张卡同一天只能一个人）→ 409，原预约不变
+    assert book(admin, g[:1], d + timedelta(days=2), d + timedelta(days=3)).status_code == 200
+    r = alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d + timedelta(days=2))})
+    assert r.status_code == 409
+    db.expire_all()
+    assert db.get(Reservation, rid).end_date == d
+    # 别人的预约普通成员不能改
+    other = [x for x in admin.get("/api/me/reservations").json()][0]["id"]
+    assert alice.patch(f"/api/reservations/{other}", json={"end_date": str(d + timedelta(days=4))}).status_code in (403, 404)
