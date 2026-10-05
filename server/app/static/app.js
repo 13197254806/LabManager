@@ -1477,10 +1477,28 @@ $("#onboard-skip").onclick = () => {
   onboard.step++;
   renderOnboarding();
 };
+const onboardLater = () => { try { sessionStorage.setItem("lab-onboard-later", "1"); } catch {} };
 $("#onboard-later").onclick = () => {
   $("#onboard-dialog").close();
-  try { sessionStorage.setItem("lab-onboard-later", "1"); } catch {}
+  onboardLater();
 };
+// 按 Esc 关掉引导和点「以后再说」一样：本次打开页面期间不再弹
+$("#onboard-dialog").addEventListener("cancel", onboardLater);
+
+// 「引导已完成」原来只在走完最后一步、点「开始使用」时才记录。中途关掉窗口（比如迁移已经开始，
+// 按提示直接关闭）就一直是未完成，每次刷新都会再弹。所以：用户名、登录方式都设好了，并且已经
+// 发起过文件迁移，就视为已完成，直接记下来。
+async function autoFinishOnboarding() {
+  const me = state.me;
+  if (!me.linux_username || (!me.has_password && !me.key_count)) return false;
+  try {
+    if (!(await api("/api/me/migrations")).length) return false;
+    state.me = await api("/api/me/onboarded", { method: "POST" });
+    return true;
+  } catch {
+    return false;
+  }
+}
 
 // ---------------- 管理 ----------------
 
@@ -1861,7 +1879,7 @@ async function boot() {
   else refreshMigrations();
   let later = false;
   try { later = sessionStorage.getItem("lab-onboard-later") === "1"; } catch {}
-  if (!state.me.onboarded && !later) openOnboarding();
+  if (!state.me.onboarded && !later && !(await autoFinishOnboarding())) openOnboarding();
   scheduleRefresh();
 }
 
