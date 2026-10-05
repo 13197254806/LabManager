@@ -390,3 +390,19 @@ def test_long_term_overrides_temp_but_keeps_history(alice, server, db):
     assert len(rows) == 1
     assert (rows[0].start_date, rows[0].end_date) == (d - timedelta(days=3), d + timedelta(days=6))
     assert rows[0].auto_renew is True
+
+
+def test_qr_login_url(monkeypatch):
+    from app.config import settings
+    from fastapi.testclient import TestClient
+    from app.main import app
+
+    c = TestClient(app)
+    assert c.get("/auth/qr").status_code == 500  # 没配置飞书应用
+    monkeypatch.setattr(settings, "feishu_app_id", "cli_x")
+    monkeypatch.setattr(settings, "feishu_app_secret", "s")
+    r = c.get("/auth/qr").json()["goto"]
+    assert "client_id=cli_x" in r and "redirect_uri=http%3A%2F%2Ftestserver%2Fauth%2Fcallback" in r
+    state = r.split("state=")[1]
+    assert c.get("/auth/qr").json()["goto"].endswith(state)  # 同一会话里重复取二维码，state 不变
+    assert c.get("/auth/callback?code=c&state=wrong").status_code == 400

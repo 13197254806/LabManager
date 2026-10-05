@@ -81,6 +81,16 @@ def login(request: Request):
     return RedirectResponse(feishu.authorize_url(_redirect_uri(), state))
 
 
+@router.get("/auth/qr")
+def qr_login(request: Request):
+    """扫码登录：页面里的二维码用这个地址（授权页地址，带本次登录的 state），扫码确认后飞书跳回 /auth/callback。"""
+    if not settings.feishu_enabled:
+        raise HTTPException(500, "服务端未配置 FEISHU_APP_ID / FEISHU_APP_SECRET")
+    state = request.session.get("oauth_state") or secrets.token_urlsafe(16)
+    request.session["oauth_state"] = state
+    return {"goto": feishu.authorize_url(_redirect_uri(), state)}
+
+
 @router.get("/auth/callback")
 def callback(request: Request, code: str = "", state: str = "", db: Session = Depends(get_db)):
     if not code or not state or state != request.session.pop("oauth_state", None):

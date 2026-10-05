@@ -90,9 +90,32 @@ label > input, label > select, label > textarea { color: var(--text); font-size:
 .row-form { display: grid; grid-template-columns: 1fr 1fr 1.5fr auto; gap: 8px; margin-top: 12px; }
 
 /* 登录 */
-.login { min-height: 100vh; display: grid; place-items: center; padding: 16px; }
-.login-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 40px 32px; text-align: center; width: 100%; max-width: 380px; }
-.login-logo { width: 72px; height: 72px; margin-bottom: 12px; }
+.login {
+  min-height: 100vh; display: grid; place-items: center; padding: 24px 16px;
+  background:
+    radial-gradient(900px 480px at 15% -10%, rgba(51, 112, 255, 0.14), transparent 60%),
+    radial-gradient(700px 420px at 100% 110%, rgba(51, 112, 255, 0.10), transparent 60%),
+    var(--bg);
+}
+.login-card {
+  background: var(--panel); border: 1px solid var(--line); border-radius: 16px; padding: 36px 32px 24px;
+  text-align: center; width: 100%; max-width: 380px; box-shadow: 0 10px 40px rgba(31, 35, 41, 0.08);
+}
+.login-head { margin-bottom: 20px; }
+.login-logo { width: 64px; height: 64px; margin-bottom: 10px; }
+.login-head h1 { margin: 0 0 6px; font-size: 22px; letter-spacing: 0.5px; }
+.login-head p { margin: 0; font-size: 13px; }
+.qr-box {
+  position: relative; width: 236px; height: 236px; margin: 0 auto; border-radius: 12px; overflow: hidden;
+  background: #fff; border: 1px solid var(--line); display: grid; place-items: center;
+}
+.qr-box iframe { border: 0; display: block; width: 236px; height: 236px; }
+.qr-tip { margin: 12px 0 0; font-size: 14px; color: var(--muted); }
+.qr-tip b { color: var(--text); }
+.login-or { display: flex; align-items: center; gap: 12px; margin: 18px 0 14px; color: var(--muted); font-size: 12px; }
+.login-or::before, .login-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
+.login-btn { display: flex; align-items: center; justify-content: center; width: 100%; box-sizing: border-box; height: 42px; font-size: 14px; padding: 0 16px; }
+.login-foot { margin: 22px 0 0; }
 .dev-login { margin-top: 24px; display: flex; flex-direction: column; gap: 8px; }
 
 /* 顶栏 */

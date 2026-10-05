@@ -209,6 +209,31 @@ function showLogin() {
   $("#login").classList.remove("hidden");
 }
 
+/** 飞书扫码登录：用飞书官方的二维码组件，扫码确认后带着 tmp_code 走一遍授权，最终回到 /auth/callback。 */
+const QR_SDK = "https://lf-package-cn.feishucdn.com/obj/feishu-static/lark/passport/qrcode/LarkSSOSDKWebQRCode-1.0.3.js";
+async function initQrLogin() {
+  const hint = $("#qr-hint");
+  try {
+    const { goto } = await api("/auth/qr");
+    if (!window.QRLogin) {
+      await new Promise((ok, fail) => {
+        const s = document.createElement("script");
+        s.src = QR_SDK;
+        s.onload = ok;
+        s.onerror = fail;
+        document.head.appendChild(s);
+      });
+    }
+    $("#qr-box").innerHTML = "";
+    const qr = window.QRLogin({ id: "qr-box", goto, width: "236", height: "236", style: "border:0;width:236px;height:236px" });
+    window.addEventListener("message", (ev) => {
+      if (qr.matchOrigin(ev.origin) && qr.matchData(ev.data)) location.href = `${goto}&tmp_code=${ev.data.tmp_code}`;
+    });
+  } catch {
+    hint.textContent = "二维码加载失败，请使用下方按钮登录";
+  }
+}
+
 $("#dev-login").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
@@ -1608,7 +1633,8 @@ async function boot() {
   }
   if (!state.me) {
     $("#dev-login").classList.toggle("hidden", !state.config.dev_login);
-    $("#feishu-login").classList.toggle("hidden", !state.config.feishu_enabled);
+    $("#login-feishu").classList.toggle("hidden", !state.config.feishu_enabled);
+    if (state.config.feishu_enabled) initQrLogin();
     $("#login-unavailable").classList.toggle("hidden", state.config.feishu_enabled || state.config.dev_login);
     return showLogin();
   }
