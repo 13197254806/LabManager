@@ -406,3 +406,67 @@ def test_qr_login_url(monkeypatch):
     state = r.split("state=")[1]
     assert c.get("/auth/qr").json()["goto"].endswith(state)  # 同一会话里重复取二维码，state 不变
     assert c.get("/auth/callback?code=c&state=wrong").status_code == 400
+
+
+# ---------------- 在管理页配置的规则（原来只能在 .env 里改） ----------------
+
+
+def test_rules_are_configurable_in_admin(admin, alice, server):
+    """管理页保存的值优先于 .env：同一张卡最多共用人数、单次最长天数、最多提前天数。"""
+    g = gpu_ids(alice)
+    d = today()
+    assert alice.put("/api/admin/settings", json={"max_gpu_sharers": "2"}).status_code == 403  # 只有管理员能改
+    saved = admin.put("/api/admin/settings", json={
+        "max_gpu_sharers": "2", "max_reservation_days": "3", "max_advance_days": "5", "reminder_hour": "9"}).json()
+    assert saved["max_gpu_sharers"] == "2" and saved["reminder_hour"] == "9"
+    cfg = alice.get("/api/config").json()
+    assert (cfg["max_gpu_sharers"], cfg["max_reservation_days"], cfg["max_advance_days"]) == (2, 3, 5)
+
+    # 单次最长 3 天、最多提前 5 天（普通成员受限）
+    assert book(alice, g[:1], d, d + timedelta(days=3)).status_code == 400
+    assert book(alice, g[:1], d + timedelta(days=6), d + timedelta(days=6)).status_code == 400
+    assert book(alice, g[:1], d, d + timedelta(days=2)).status_code == 200
+    # 最多 2 人共用：第 2 个人可以，第 3 个人被拒绝，提示里是新的人数
+    u1, u2 = _users(2)
+    assert book(u1, g[:1], d, d).status_code == 200
+    r = book(u2, g[:1], d, d)
+    assert r.status_code == 409 and "最多 2 人共用" in r.json()["detail"]
+
+
+def test_rule_settings_are_validated(admin):
+    for key, bad in [("max_gpu_sharers", "0"), ("max_gpu_sharers", "11"), ("max_reservation_days", "abc"),
+                     ("reminder_hour", "24"), ("max_advance_days", "-1")]:
+        assert admin.put("/api/admin/settings", json={key: bad}).status_code == 400, (key, bad)
+    assert admin.put("/api/admin/settings", json={"lab_name": "   "}).status_code == 400
+    assert admin.put("/api/admin/settings", json={"lab_name": "x" * 41}).status_code == 400
+    # 平台名称、欢迎卡片的群列表
+    r = admin.put("/api/admin/settings", json={"lab_name": " 安全与隐私实验室 ", "welcome_chat_ids": "oc_a, oc_b\noc_c，oc_d"})
+    assert r.status_code == 200 and r.json()["lab_name"] == "安全与隐私实验室"
+    assert r.json()["welcome_chat_ids"] == "oc_a,oc_b,oc_c,oc_d"
+    assert admin.get("/api/config").json()["lab_name"] == "安全与隐私实验室"
+
+
+def test_env_values_are_defaults_until_saved(db, monkeypatch):
+    """没在管理页保存过时用 .env 的值；保存过就以管理页为准。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "max_gpu_sharers", 4)
+    monkeypatch.setattr(settings, "welcome_chat_ids", ["oc_env"])
+    assert services.get_int_setting(db, "max_gpu_sharers") == 4
+    assert services.welcome_chat_ids(db) == ["oc_env"]
+    services.set_setting(db, "max_gpu_sharers", "2")
+    services.set_setting(db, "welcome_chat_ids", "")
+    db.commit()
+    assert services.get_int_setting(db, "max_gpu_sharers") == 2
+    assert services.welcome_chat_ids(db) == []  # 管理页里清空 = 所有群，不再回退到 .env
+
+
+def test_offline_threshold_follows_refresh_interval(admin, db, monkeypatch):
+    """刷新间隔调大后，Agent 按这个间隔上报，不能还按固定 180 秒判离线。"""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "agent_offline_seconds", settings.agent_offline_floor)
+    assert admin.put("/api/admin/settings", json={"refresh_interval_seconds": "300"}).status_code == 200
+    assert settings.agent_offline_seconds == 900
+    assert admin.put("/api/admin/settings", json={"refresh_interval_seconds": "10"}).status_code == 200
+    assert settings.agent_offline_seconds == settings.agent_offline_floor  # 下限 180 秒

@@ -5,7 +5,7 @@ import threading
 import time
 
 from . import services
-from .config import now, settings
+from .config import now
 from .db import SessionLocal
 
 log = logging.getLogger("jobs")
@@ -19,7 +19,7 @@ def _loop():
                 n = services.run_auto_renew(db)
                 if n:
                     log.info("自动续约 %d 条预约", n)
-                if now().hour >= settings.reminder_hour:
+                if now().hour >= services.get_int_setting(db, "reminder_hour"):
                     n = services.send_expiry_reminders(db)
                     if n:
                         log.info("已发送 %d 条到期提醒", n)

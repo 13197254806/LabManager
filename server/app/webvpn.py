@@ -312,6 +312,18 @@ class WebVPNClient:
         with self.opener.open(req, timeout=self.timeout) as r:
             return r.read()
 
+    def export_cookies(self):
+        """导出会话 Cookie（供重启后沿用，免得每次重启都重新登录）。"""
+        return [{"name": c.name, "value": c.value, "domain": c.domain, "path": c.path, "secure": bool(c.secure)}
+                for c in self.jar]
+
+    def import_cookies(self, items):
+        for it in items:
+            domain = it.get("domain") or self.host.split(":")[0]
+            self.jar.set_cookie(http.cookiejar.Cookie(
+                0, it["name"], it["value"], None, False, domain, True, domain.startswith("."),
+                it.get("path") or "/", True, bool(it.get("secure")), None, True, None, None, {}))
+
     def cookie_header(self):
         # jar 里只有 WebVPN 门户的 Cookie（本客户端只和门户通信），全部带上即可
         return "; ".join(f"{c.name}={c.value}" for c in self.jar)

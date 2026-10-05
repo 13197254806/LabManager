@@ -23,12 +23,21 @@ x-app-env: &app-env
   CHISEL_ALLOW: ${CHISEL_ALLOW:-59.69.127.0/24}
   REMOTE_PLATFORM_PORT: ${REMOTE_PLATFORM_PORT:-18765}
 
+# 容器日志轮转：Docker 默认不限大小，隧道每条 chisel 日志都会写进去，跑上几个月会把磁盘写满
+x-logging: &logging
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+# 所有服务都是 restart: unless-stopped：服务器重启 / 进程崩溃后由 Docker 自动拉起（Docker 本身由 systemd 开机自启）
 x-app: &app
   image: lab-server:latest
   environment: *app-env
   volumes:
     - ./data:/data
   restart: unless-stopped
+  logging: *logging
 
 services:
   web:
@@ -42,6 +51,13 @@ services:
     # 只监听服务器本机：需要时可以 ssh -L 18080:127.0.0.1:8080 转发到自己电脑上访问
     ports:
       - "127.0.0.1:8080:8000"
+    # 健康检查：docker compose ps 能看到 healthy / unhealthy（卡死时一眼就能发现）
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
 
   # 飞书机器人（长连接收事件）
   bot:
@@ -58,6 +74,7 @@ services:
     image: ${MIHOMO_IMAGE:-metacubex/mihomo:latest}
     container_name: lab-proxy
     restart: unless-stopped
+    logging: *logging
     volumes:
       - ./data/proxy:/root/.config/mihomo
     profiles: [campus]
@@ -96,6 +113,7 @@ services:
       - caddy_data:/data
     depends_on: [web]
     restart: unless-stopped
+    logging: *logging
 
 volumes:
   caddy_data:

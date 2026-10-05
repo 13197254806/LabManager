@@ -207,8 +207,20 @@
 
         <div class="admin-sub hidden" id="sub-rules">
           <form id="rules-form">
+            <div class="set-group"><h3>基本</h3>
+              <div class="card">
+                <div class="set-row"><div><div class="t">平台名称</div><div class="d">显示在页面左上角、登录页和浏览器标签页上。</div></div>
+                  <input type="text" name="lab_name" maxlength="40" required style="width:260px"></div>
+              </div>
+            </div>
             <div class="set-group"><h3>预约</h3>
               <div class="card">
+                <div class="set-row"><div><div class="t">预约时长与提前期</div><div class="d">普通成员单次最长能预约几天、最多能提前几天预约；管理员不受这两项限制。</div></div>
+                  <div class="inline-num">单次最长 <input type="number" name="max_reservation_days" min="1" max="365" required> 天，最多提前 <input type="number" name="max_advance_days" min="0" max="365" required> 天</div></div>
+                <div class="set-row"><div><div class="t">同一张卡每天最多人数</div><div class="d">同一张显卡同一天最多几个人共用，日历上会并排显示；调小不会取消已有的预约，只影响新的预约和自动延长。</div></div>
+                  <div class="inline-num"><input type="number" name="max_gpu_sharers" min="1" max="10" required> 人</div></div>
+                <div class="set-row"><div><div class="t">到期提醒时间</div><div class="d">每天这个整点以后，给当天到期的预约发一次飞书提醒。</div></div>
+                  <div class="inline-num">每天 <input type="number" name="reminder_hour" min="0" max="23" required> 点</div></div>
                 <div class="set-row"><div><div class="t">长期使用自动延长</div><div class="d">标记为「长期使用」的预约，在到期前自动顺延，并发飞书通知。</div></div>
                   <div class="inline-num">到期前 <input type="number" name="auto_renew_before_hours" min="1" max="336" required> 小时，延长 <input type="number" name="auto_renew_days" min="1" max="60" required> 天</div></div>
                 <div class="set-row"><div><div class="t">页面自动刷新间隔</div><div class="d">GPU 日历和管理页按这个间隔自动刷新；GPU 服务器上的 Agent 也按它上报，数据才会同步变新。</div></div>
@@ -242,6 +254,7 @@
                 <form id="welcome-form" class="stack">
                   <label>标题<input name="welcome_title"></label>
                   <label>正文<textarea name="welcome_markdown" rows="8"></textarea></label>
+                  <label>发送范围<span class="field-hint">只对这些群的新成员发送欢迎卡片：填群的 chat_id，多个用逗号分隔；留空 = 机器人所在的所有群</span><textarea name="welcome_chat_ids" rows="2" class="mono" placeholder="oc_xxxxxxxx, oc_yyyyyyyy"></textarea></label>
                   <label>按钮<span class="field-hint">每行一个：<code>按钮文字|链接</code>，<code>{base_url}</code> 代表平台地址</span><textarea name="welcome_links" rows="3" class="mono"></textarea></label>
                   <div class="btn-row"><button class="btn primary">保存</button><button class="btn" type="button" id="welcome-test"><svg class="i"><use href="#i-send"/></svg>发给我自己测试</button></div>
                 </form>

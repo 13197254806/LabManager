@@ -110,12 +110,12 @@ def public_config(db: Session = Depends(get_db)):
     return {
         "auto_renew_before_hours": services.get_int_setting(db, "auto_renew_before_hours"),
         "auto_renew_days": services.get_int_setting(db, "auto_renew_days"),
-        "lab_name": settings.lab_name,
+        "lab_name": services.get_setting(db, "lab_name"),
         "dev_login": settings.dev_login,
         "feishu_enabled": settings.feishu_enabled,
-        "max_reservation_days": settings.max_reservation_days,
-        "max_advance_days": settings.max_advance_days,
-        "max_gpu_sharers": settings.max_gpu_sharers,
+        "max_reservation_days": services.get_int_setting(db, "max_reservation_days"),
+        "max_advance_days": services.get_int_setting(db, "max_advance_days"),
+        "max_gpu_sharers": services.get_int_setting(db, "max_gpu_sharers"),
         "refresh_interval": services.get_int_setting(db, "refresh_interval_seconds"),
         "require_reservation_to_login": services.get_setting(db, "require_reservation_to_login") == "1",
         "today": today().isoformat(),
@@ -296,7 +296,7 @@ def my_reservations(user: User = Depends(current_user), db: Session = Depends(ge
     return [res_out(r, user) for r in rs]
 
 
-def _check_rules(user: User, start: date, end: date, is_new_start: bool):
+def _check_rules(db: Session, user: User, start: date, end: date, is_new_start: bool):
     if end < start:
         raise HTTPException(400, "结束日期不能早于开始日期")
     if end < today():
@@ -307,10 +307,12 @@ def _check_rules(user: User, start: date, end: date, is_new_start: bool):
         raise HTTPException(400, "不能预约过去的日期")
     # 已经开始的预约按“从今天起还剩几天”计算：长期使用的自动延长会把总时长延到上限以上，
     # 不能因此改个备注、改为临时使用，或在到期前继续延长，就被“最长 N 天”拦住
-    if (end - max(start, today())).days + 1 > settings.max_reservation_days:
-        raise HTTPException(400, f"单次预约最长 {settings.max_reservation_days} 天，到期前可以续约")
-    if start > today() + timedelta(days=settings.max_advance_days):
-        raise HTTPException(400, f"最多提前 {settings.max_advance_days} 天预约")
+    max_days = services.get_int_setting(db, "max_reservation_days")
+    max_advance = services.get_int_setting(db, "max_advance_days")
+    if (end - max(start, today())).days + 1 > max_days:
+        raise HTTPException(400, f"单次预约最长 {max_days} 天，到期前可以续约")
+    if start > today() + timedelta(days=max_advance):
+        raise HTTPException(400, f"最多提前 {max_advance} 天预约")
 
 
 def _check_conflicts(db: Session, gpu_ids: list[int], start: date, end: date, user_id: int, exclude_id: int | None = None):
@@ -359,7 +361,7 @@ def create_reservation(
         return [res_out(r, user) for r in rs]
     if not body.start_date or not body.end_date:
         raise HTTPException(400, "请选择开始日期和结束日期")
-    _check_rules(user, body.start_date, body.end_date, is_new_start=True)
+    _check_rules(db, user, body.start_date, body.end_date, is_new_start=True)
     with _booking_lock:
         _check_conflicts(db, body.gpu_ids, body.start_date, body.end_date, owner.id)
         rs = [
@@ -409,7 +411,7 @@ def update_reservation(
         end = body.end_date or r.end_date
         if start != r.start_date and r.start_date <= today():
             raise HTTPException(400, "预约已经开始，不能修改开始日期（已过去的部分不能改）")
-        _check_rules(user, start, end, is_new_start=start != r.start_date)
+        _check_rules(db, user, start, end, is_new_start=start != r.start_date)
         _check_conflicts(db, [r.gpu_id], start, end, r.user_id, exclude_id=r.id)
         changed = (start, end) != (r.start_date, r.end_date)
         r.start_date, r.end_date = start, end
@@ -549,11 +551,13 @@ def admin_delete_server(sid: int, _: User = Depends(admin_user), db: Session = D
 
 
 SETTING_KEYS = (
-    "welcome_title", "welcome_markdown", "welcome_links",
+    "lab_name", "welcome_title", "welcome_markdown", "welcome_links", "welcome_chat_ids",
+    "max_reservation_days", "max_advance_days", "max_gpu_sharers", "reminder_hour",
     "auto_renew_before_hours", "auto_renew_days", "migration_requires_approval", "require_reservation_to_login",
     "refresh_interval_seconds", "restrict_to_admin_tenant",
 )
 INT_SETTINGS = {
+    "max_reservation_days": (1, 365), "max_advance_days": (0, 365), "max_gpu_sharers": (1, 10), "reminder_hour": (0, 23),
     "auto_renew_before_hours": (1, 24 * 14), "auto_renew_days": (1, 60),
     "migration_requires_approval": (0, 1), "require_reservation_to_login": (0, 1), "restrict_to_admin_tenant": (0, 1),
     "refresh_interval_seconds": (3, 600),
@@ -573,9 +577,16 @@ def admin_put_settings(body: dict[str, str], _: User = Depends(admin_user), db: 
             if not str(v).strip().isdigit() or not lo <= int(v) <= hi:
                 raise HTTPException(400, f"{k} 需为 {lo}-{hi} 之间的整数")
             v = str(int(v))
+        if k == "lab_name":
+            v = str(v).strip()
+            if not v or len(v) > 40:
+                raise HTTPException(400, "平台名称不能为空，最长 40 个字")
+        if k == "welcome_chat_ids":  # 逗号 / 空白 / 换行分隔都接受，统一存成逗号分隔
+            v = ",".join(c for c in re.split(r"[,\s，]+", str(v)) if c)
         if k in SETTING_KEYS:
             services.set_setting(db, k, v)
     db.commit()
+    services.sync_runtime(db)
     return {k: services.get_setting(db, k) for k in SETTING_KEYS}
 
 
