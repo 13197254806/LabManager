@@ -26,6 +26,8 @@ function diffDays(a, b) {
 function hue(id) {
   return (id * 137.508) % 360;
 }
+// 内联 SVG 图标（图标库在 index.html 顶部）
+const icon = (name, cls = "") => `<svg class="i ${cls}"><use href="#i-${name}"/></svg>`;
 
 // 必填项加红色 *：给带 required 控件的 <label> 里的文字加上星号（动态生成的表单也会处理）
 function markRequired(root) {
@@ -726,18 +728,45 @@ function refreshCurrentTab() {
 
 const ACCOUNT_STATE = { ok: "已同步", pending: "等待生效", error: "同步失败" };
 
+let keyFormOpen = false;
+
+// 预约的进度说明：进行中 · 剩 N 天
+function reservationStatus(r) {
+  const today = state.config.today;
+  if (r.start_date > today) return `未开始 · ${diffDays(today, r.start_date)} 天后开始`;
+  const left = diffDays(today, r.end_date);
+  return left > 0 ? `进行中 · 剩 ${left} 天` : "进行中 · 今天到期";
+}
+
 async function renderAccount() {
   const [me, servers, rs] = await Promise.all([api("/api/me"), api("/api/me/servers"), api("/api/me/reservations")]);
   state.me = me;
   state.myServers = servers;
   renderBanner();
 
+  // 顶部身份条
+  $("#hero-avatar").innerHTML = avatarHtml(me.name, me.avatar_url, me.id);
+  $("#hero-name").textContent = me.name;
+  $("#hero-username").textContent = me.linux_username || "未设置";
+  $("#rename-btn").classList.toggle("hidden", !me.linux_username);
+  $("#rename-btn").onclick = openRename;
+  const synced = servers.filter((s) => s.online && s.account?.state === "ok").length;
+  const stat = (jump, cls, ic, val, label) =>
+    `<a class="hero-stat" href="#" data-jump="${jump}"><span class="icon-box ${cls}">${icon(ic)}</span><div><b>${val}</b><span class="l">${label}</span></div></a>`;
+  $("#hero-stats").innerHTML = [
+    stat("c-servers", me.linux_username && servers.length && synced === servers.length ? "ok" : "warn", "server",
+      me.linux_username ? `${synced} / ${servers.length}` : "未设置", "服务器已同步"),
+    stat("c-password", me.has_password ? "ok" : "warn", "lock", me.has_password ? "已开启" : "未开启", "密码登录"),
+    stat("c-keys", "", "key", `${me.ssh_keys.length} 个`, "SSH 公钥"),
+    stat("c-reservations", "warn", "cal", `${rs.length} 个`, "当前预约"),
+  ].join("");
+
   // 服务器账号
   const box = $("#linux-account");
   if (!me.linux_username) {
-    box.innerHTML = `<p class="muted small">这是你在所有 GPU 服务器上的登录名，建议用姓名拼音，如 <code>zhangsan</code>。以后也可以修改。</p>
+    box.innerHTML = `<div class="card-b"><p class="card-note" style="margin-bottom:12px">这是你在所有 GPU 服务器上的登录名，建议用姓名拼音，如 <code>zhangsan</code>。以后也可以修改。</p>
       <form id="username-form" class="stack"><label>Linux 用户名<input name="username" placeholder="小写字母开头，如 zhangsan" required></label>
-      <div><button class="btn primary">保存</button></div></form>`;
+      <div><button class="btn primary">保存</button></div></form></div>`;
     $("#username-form").onsubmit = async (e) => {
       e.preventDefault();
       try {
@@ -752,41 +781,46 @@ async function renderAccount() {
     const rows = servers.map((s) => {
       const a = s.account;
       const st = !s.online ? `<span class="badge">服务器离线</span>`
-        : !a ? `<span class="badge pending">同步中…</span>`
-        : `<span class="badge ${a.state}" title="${esc(a.message)}">${ACCOUNT_STATE[a.state] || a.state}</span>`;
-      const local = a && a.username !== me.linux_username ? `<div class="small warn-text">当前仍为 ${esc(a.username)}：${esc(a.message)}</div>`
-        : a?.state === "error" ? `<div class="small" style="color:var(--danger)">${esc(a.message)}</div>` : "";
-      return `<tr><td>${esc(s.name)}</td><td><code>ssh ${esc(a?.username || me.linux_username)}@${esc(s.host || s.name)}</code>${local}</td><td>${st}</td></tr>`;
+        : !a ? `<span class="badge pending has-dot">同步中…</span>`
+        : `<span class="badge ${a.state} has-dot" title="${esc(a.message)}">${ACCOUNT_STATE[a.state] || a.state}</span>`;
+      const local = a && a.username !== me.linux_username ? `<div class="srv-acct-msg small warn-text">当前仍为 ${esc(a.username)}：${esc(a.message)}</div>`
+        : a?.state === "error" ? `<div class="srv-acct-msg small" style="color:var(--danger)">${esc(a.message)}</div>` : "";
+      const cmd = `ssh ${a?.username || me.linux_username}@${s.host || s.name}`;
+      return `<div class="srv-acct"><div class="name"><span class="dot ${s.online ? "on" : ""}"></span>${esc(s.name)}</div>
+        <div class="cmd"><span class="prompt mono">$</span><code>${esc(cmd)}</code><button class="btn ghost icon small" data-copy="${esc(cmd)}" title="复制">${icon("copy")}</button></div>
+        ${st}${local}</div>`;
     }).join("");
-    box.innerHTML = `<div class="group" style="margin-bottom:8px">Linux 用户名 <code>${esc(me.linux_username)}</code>
-        <button class="btn small" id="rename-btn">修改</button></div>
-      <p class="muted small">${state.config.require_reservation_to_login
+    box.innerHTML = `<div class="card-b" style="padding-bottom:12px"><p class="card-note tip-line">${icon("info")}<span>${state.config.require_reservation_to_login
         ? "只有在<b>当天预约了该服务器显卡</b>时才能登录（需在实验室内网）。"
-        : "随时都可以登录服务器（需在实验室内网），不需要预约；预约只决定你能用哪些显卡。"}登录后执行 <code>lab-gpus</code> 查看今天分配给你的显卡。</p>
-      ${servers.length ? `<div class="table-wrap"><table><tr><th>服务器</th><th>登录命令</th><th>账号状态</th></tr>${rows}</table></div>` : `<p class="muted">暂无服务器</p>`}`;
-    $("#rename-btn").onclick = openRename;
+        : "随时都可以登录服务器（需在实验室内网），不需要预约；预约只决定你能用哪些显卡。"}登录后执行 <code>lab-gpus</code> 查看今天分配给你的显卡。</span></p></div>
+      ${servers.length ? rows : `<div class="card-b"><p class="muted">暂无服务器</p></div>`}`;
   }
 
   // 密码
-  $("#password-state").innerHTML = me.has_password
-    ? `<p><span class="badge ok">已设置</span> 可以用密码登录</p>`
-    : `<p><span class="badge">未设置</span> 目前只能用公钥登录</p>`;
+  const pw = $("#password-state");
+  pw.className = `pw-state${me.has_password ? "" : " off"}`;
+  pw.innerHTML = me.has_password ? `${icon("check")}<b>已设置</b><span>可以用密码登录</span>` : `<b>未设置</b><span>目前只能用公钥登录</span>`;
   $("#password-clear").classList.toggle("hidden", !me.has_password);
 
-  // 公钥
-  $("#key-list").innerHTML = me.ssh_keys.length
-    ? me.ssh_keys.map((k) => `<li><div><b>${esc(k.title)}</b><code>${esc(k.fingerprint)}</code></div>
-        <button class="btn small danger" data-del-key="${k.id}">删除</button></li>`).join("")
-    : `<li class="muted small">还没有公钥</li>`;
+  // 公钥：还没有公钥时直接展开添加表单
+  $("#key-list").innerHTML = me.ssh_keys.map((k) => `<div class="key-item"><span class="icon-box">${icon("key")}</span>
+      <div class="key-main"><b>${esc(k.title)}</b><code>${esc(k.fingerprint)}</code></div>
+      <button class="btn ghost icon small danger-ghost" data-del-key="${k.id}" title="删除">${icon("trash")}</button></div>`).join("");
+  const noKeys = !me.ssh_keys.length;
+  $("#key-form").classList.toggle("hidden", !(noKeys || keyFormOpen));
+  $("#key-toggle").classList.toggle("hidden", noKeys || keyFormOpen);
+  $("#key-cancel").classList.toggle("hidden", noKeys);
 
   // 预约
   $("#my-reservations").innerHTML = rs.length
-    ? `<div class="table-wrap"><table><tr><th>服务器</th><th>显卡</th><th>日期</th><th>长期使用</th><th>备注</th><th></th></tr>
-        ${rs.map((r) => `<tr><td>${esc(r.server_name)}</td><td>GPU${r.gpu_index}</td><td>${r.start_date} ~ ${r.end_date}</td>
-          <td><label class="check"><input type="checkbox" data-renew="${r.id}" ${r.auto_renew ? "checked" : ""}>${r.renew_count ? `<span class="muted small">已续 ${r.renew_count} 次</span>` : ""}</label></td>
-          <td>${esc(r.note)}</td><td><button class="btn small" data-open-res="${r.id}">修改</button></td></tr>`).join("")}
-      </table></div><p class="muted small">长期使用${esc(renewRuleText())}。与他人预约冲突时只延长到冲突前一天。</p>`
-    : `<p class="muted">没有进行中或即将开始的预约。</p>`;
+    ? `<div style="padding-top:10px"><div class="res-row head"><span>服务器</span><span>显卡</span><span>日期</span><span>长期使用</span><span></span></div>
+        ${rs.map((r) => `<div class="res-row"><div><div>${esc(r.server_name)}</div>${r.note ? `<div class="sub" title="${esc(r.note)}">${esc(r.note)}</div>` : ""}</div>
+          <span><span class="gpu-chip">GPU${r.gpu_index}</span></span>
+          <div class="res-date">${r.start_date} ~ ${r.end_date}<small>${reservationStatus(r)}</small></div>
+          <label class="renew"><span class="switch"><input type="checkbox" data-renew="${r.id}" ${r.auto_renew ? "checked" : ""}><i></i></span>${r.renew_count ? `已续 ${r.renew_count} 次` : ""}</label>
+          <button class="btn small" data-open-res="${r.id}">修改</button></div>`).join("")}</div>
+      <div class="card-foot" style="margin-top:12px">长期使用${esc(renewRuleText())}。与他人预约冲突时只延长到冲突前一天。</div>`
+    : `<div class="card-b"><p class="muted">没有进行中或即将开始的预约。</p></div>`;
   $$("[data-open-res]").forEach((b) => (b.onclick = () => openDetail(rs.find((r) => r.id === Number(b.dataset.openRes)))));
   $$("[data-renew]").forEach((c) => (c.onchange = async () => {
     try {
@@ -801,8 +835,20 @@ async function renderAccount() {
   await refreshMigrations();
 }
 
+// 通用点击：复制命令、跳转到卡片、去日历、展开 / 收起添加公钥
+document.addEventListener("click", (e) => {
+  const copy = e.target.closest("[data-copy]");
+  if (copy) copyText(copy.dataset.copy);
+  const jump = e.target.closest("[data-jump]");
+  if (jump) { e.preventDefault(); $(`#${jump.dataset.jump}`)?.scrollIntoView({ behavior: "smooth", block: "center" }); }
+  const go = e.target.closest("[data-goto]");
+  if (go) switchTab(go.dataset.goto);
+});
+$("#key-toggle").onclick = () => { keyFormOpen = true; $("#key-form").classList.remove("hidden"); $("#key-toggle").classList.add("hidden"); $("#key-form").public_key.focus(); };
+$("#key-cancel").onclick = () => { keyFormOpen = false; $("#key-form").reset(); $("#key-form").classList.add("hidden"); $("#key-toggle").classList.remove("hidden"); };
+
 $("#key-list").addEventListener("click", async (e) => {
-  const id = e.target.dataset.delKey;
+  const id = e.target.closest("[data-del-key]")?.dataset.delKey;
   if (!id || !confirm("删除这个公钥？使用它的设备将无法再用公钥登录服务器。")) return;
   try {
     await api(`/api/me/keys/${id}`, { method: "DELETE" });
@@ -820,6 +866,7 @@ $("#key-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   try {
     await addKey(e.target);
+    keyFormOpen = false;
     toast("公钥已添加，约 1 分钟后同步到各服务器");
     renderAccount();
   } catch (err) {
@@ -916,21 +963,39 @@ function taskHtml(t, admin = false) {
   if (admin && t.status === "pending_approval") {
     actions.push(`<button class="btn small primary" data-mig-approve="${t.id}">同意</button><button class="btn small danger" data-mig-reject="${t.id}">拒绝</button>`);
   }
-  return `<div class="task">
-    <div class="task-head">
-      <span class="badge ${t.status}">${TASK_STATE[t.status] || t.status}</span>
-      ${admin ? `<b>${esc(t.user_name)}</b>` : ""}
-      <b>${esc(t.server_name)}</b>
-      ${t.kind === "profile"
-        ? `<span>${esc(t.summary)}</span>`
-        : `<span class="path">${esc(t.source)} → ${esc(t.dest_path || `~/${t.dest_name}`)}</span><span class="muted small">${MODE_NAMES[t.mode] || t.mode}</span>`}
-      <span class="spacer"></span>${actions.join("")}
-    </div>
-    ${["running", "done"].includes(t.status) ? `<div class="progress ${pct == null ? "indeterminate" : ""}"><i style="width:${pct ?? 30}%"></i></div>` : ""}
-    <div class="task-meta"><span>${t.status === "running" ? esc(t.phase) + "　" : ""}${detail}</span><span>${speed}</span></div>
-    ${t.message ? `<div class="small ${t.status === "failed" ? "error" : "muted"}" style="margin-top:4px">${esc(t.message)}</div>` : ""}
-  </div>`;
+  const who = admin ? `<span class="mig-who">${avatarHtml(t.user_name, t.user_avatar, t.user_id)}${esc(t.user_name)}</span>` : "";
+  const title = `${who}<b>${esc(t.server_name)}</b>${t.kind === "profile"
+    ? esc(t.summary)
+    : `<span class="path">${esc(t.source)} → ${esc(t.dest_path || `~/${t.dest_name}`)}</span> <span class="muted small">${MODE_NAMES[t.mode] || t.mode}</span>`}`;
+  const badge = `<span class="badge ${t.status} has-dot">${TASK_STATE[t.status] || t.status}</span>`;
+  const progress = ["running", "done"].includes(t.status)
+    ? `<div class="progress ${t.status === "done" ? "done" : ""} ${pct == null ? "indeterminate" : ""}"><i style="width:${pct ?? 30}%"></i></div>` : "";
+  const metaLeft = `${t.status === "running" ? esc(t.phase) + "　" : ""}${detail}`;
+  const meta = metaLeft || speed ? `<div class="mig-meta"><span>${metaLeft}</span><span>${speed}</span></div>` : "";
+  const msg = t.message ? `<div class="note ${t.status === "failed" ? "error" : ""}">${esc(t.message)}</div>` : "";
+  const body = `<div class="mig-body">${progress}${meta}${msg}</div>`;
+  // 已结束的任务折叠成一行，点开才看详情；进行中 / 等待 / 失败的保持展开
+  if (["done", "cancelled", "rejected"].includes(t.status)) {
+    return `<details class="mig" data-st="${migGroup(t)}" data-mig-id="${t.id}" ${migOpen.has(t.id) ? "open" : ""}>
+      <summary>${badge}<span class="mig-title">${title}</span>${icon("chev", "mig-chev")}</summary>${body}</details>`;
+  }
+  return `<div class="mig ${t.status === "running" ? "running" : t.status === "failed" ? "failed" : ""}" data-st="${migGroup(t)}">
+    <div class="mig-head">${badge}<span class="mig-title">${title}</span>${actions.join("")}</div>${body}</div>`;
 }
+
+// 管理页迁移记录的筛选分组
+function migGroup(t) {
+  if (["queued", "running", "pending_approval"].includes(t.status)) return "active";
+  return t.status === "done" ? "done" : "other";
+}
+// 折叠任务的展开状态要记住：进行中任务每 3 秒会重画一次列表
+const migOpen = new Set();
+document.addEventListener("toggle", (e) => {
+  const d = e.target;
+  if (!d.matches?.("details.mig[data-mig-id]")) return;
+  const id = Number(d.dataset.migId);
+  if (d.open) migOpen.add(id); else migOpen.delete(id);
+}, true);
 
 let migTimer = null;
 async function refreshMigrations() {
@@ -945,7 +1010,7 @@ async function refreshMigrations() {
   const chip = $("#mig-chip");
   if (active.length) {
     const pct = running ? taskProgress(running) : null;
-    chip.textContent = running ? `📦 迁移中${pct != null ? ` ${Math.floor(pct)}%` : "…"}` : `📦 ${active.length} 个迁移等待中`;
+    chip.textContent = running ? `迁移中${pct != null ? ` ${Math.floor(pct)}%` : "…"}` : `${active.length} 个迁移等待中`;
     chip.classList.remove("hidden");
   } else {
     chip.classList.add("hidden");
@@ -1325,7 +1390,7 @@ function renderOnboarding() {
       <p class="muted small">以前大家共用一个账号（如 ubuntu）。这里可以把共用账号里的 .bashrc、git 配置、需要的 conda 环境迁移到你的新账号，并把你自己的项目目录迁移过来。</p>
       <div id="ob-picker"></div><div id="onboard-migrations"></div>`;
     renderPicker($("#ob-picker"), () => {
-      $("#ob-picker").innerHTML = `<p>✅ 迁移已开始，在服务器后台进行。你可以直接关闭这个窗口，进度随时可以在「我的账号 → 文件迁移」或顶部的 📦 查看。</p>`;
+      $("#ob-picker").innerHTML = `<p>✅ 迁移已开始，在服务器后台进行。你可以直接关闭这个窗口，进度随时可以在「我的账号 → 文件迁移」或顶部的「迁移中」标签查看。</p>`;
     });
   } else {
     const running = state.migrations.some((t) => ["queued", "running", "pending_approval"].includes(t.status));
@@ -1333,7 +1398,7 @@ function renderOnboarding() {
       <ul>
         <li>在「GPU 日历」上点空白格子即可预约显卡，预约当天起可以使用所选显卡${state.config.require_reservation_to_login ? "，也只有预约当天才能登录对应服务器" : "（没有预约也能登录服务器、迁移文件，只是看不到显卡）"}。</li>
         <li>登录命令：<code>ssh ${esc(me.linux_username)}@服务器地址</code>${me.has_password ? "，输入你刚设置的密码" : ""}。</li>
-        ${running ? "<li>文件迁移正在后台进行，进度见顶部的 📦。</li>" : ""}
+        ${running ? "<li>文件迁移正在后台进行，进度见顶部的「迁移中」标签。</li>" : ""}
       </ul>`;
   }
 }
@@ -1392,10 +1457,48 @@ async function fetchAdminTables() {
 function renderAdminTables({ servers, users, migrations, tunnel }) {
   state.users = users;
   state.tunnelEnabled = tunnel.enabled;
+  state.adminMigrations = migrations;
+  renderAdminKpis(servers, users, migrations);
   renderAdminServers(servers, tunnel);
   renderAdminUsers(users);
-  $("#admin-migrations").innerHTML = migrations.length ? migrations.map((t) => taskHtml(t, true)).join("") : `<p class="muted">暂无迁移记录。</p>`;
+  renderAdminMigrations(migrations);
 }
+
+// 顶部 4 个数字卡 + 子标签上的数量
+function renderAdminKpis(servers, users, migrations) {
+  const online = servers.filter((s) => s.online).length;
+  const gpus = servers.flatMap((s) => s.gpus);
+  const models = [...new Set(gpus.map((g) => g.name.replace(/^NVIDIA (GeForce )?/, "")))].join(" / ");
+  const admins = users.filter((u) => u.is_admin).length;
+  const active = migrations.filter((t) => migGroup(t) === "active").length;
+  const kpi = (cls, ic, val, label) => `<div class="card kpi"><span class="icon-box ${cls}">${icon(ic)}</span><div><b>${val}</b><span class="l">${label}</span></div></div>`;
+  $("#admin-kpis").innerHTML = [
+    kpi(servers.length && online === servers.length ? "ok" : "warn", "server", `${online}<small> / ${servers.length}</small>`, "GPU 服务器在线"),
+    kpi("", "cpu", gpus.length, `显卡总数${models ? ` · ${esc(models)}` : ""}`),
+    kpi("", "users", users.length, `成员 · ${admins} 位管理员`),
+    kpi(active ? "warn" : "", "swap", `${active}<small> 进行中</small>`, `文件迁移 · 共 ${migrations.length} 条`),
+  ].join("");
+  $("#cnt-servers").textContent = servers.length;
+  $("#cnt-members").textContent = users.length;
+  $("#cnt-migrations").textContent = migrations.length;
+}
+
+// 管理页的子标签（记住上次看的是哪一个）
+function switchAdminSub(name) {
+  $$("#admin-subtabs button").forEach((b) => b.classList.toggle("active", b.dataset.sub === name));
+  $$(".admin-sub").forEach((x) => x.classList.toggle("hidden", x.id !== `sub-${name}`));
+  try { localStorage.setItem("lab-admin-sub", name); } catch {}
+}
+$$("#admin-subtabs button").forEach((b) => (b.onclick = () => switchAdminSub(b.dataset.sub)));
+try { const n = localStorage.getItem("lab-admin-sub"); if (n && $(`#sub-${n}`)) switchAdminSub(n); } catch {}
+
+// 「⋯」菜单：点别处自动收起
+document.addEventListener("click", (e) => {
+  const open = e.target.closest("[data-menu]")?.nextElementSibling;
+  $$(".menu").forEach((m) => { if (m !== open) m.classList.add("hidden"); });
+  if (open) open.classList.toggle("hidden");
+});
+
 let adminSig = "";
 async function refreshAdmin() {
   try {
@@ -1407,44 +1510,78 @@ async function refreshAdmin() {
   } catch { /* 自动刷新失败时保持现状，下次再试 */ }
 }
 
+let rulesDirty = false, welcomeDirty = false;
+function setRulesDirty(d) {
+  rulesDirty = d;
+  $("#rules-bar").classList.toggle("clean", !d);
+  $("#rules-save").disabled = !d;
+  $("#rules-msg").textContent = d ? "有未保存的更改" : "所有更改已保存";
+}
+$("#rules-form").addEventListener("input", () => setRulesDirty(true));
+
+// 新人欢迎卡片的实时预览（只是示意：支持 **加粗** 和以 - 开头的列表）
+function renderWelcomePreview() {
+  const f = $("#welcome-form");
+  $("#wp-title").textContent = f.welcome_title.value;
+  let html = "", list = [];
+  const inline = (t) => esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
+  const flush = () => { if (list.length) { html += `<ul>${list.map((i) => `<li>${inline(i)}</li>`).join("")}</ul>`; list = []; } };
+  for (const line of f.welcome_markdown.value.split("\n")) {
+    if (/^\s*-\s+/.test(line)) list.push(line.replace(/^\s*-\s+/, ""));
+    else { flush(); if (line.trim()) html += `<p>${inline(line)}</p>`; }
+  }
+  flush();
+  $("#wp-body").innerHTML = html;
+  $("#wp-btns").innerHTML = f.welcome_links.value.split("\n").filter((l) => l.includes("|")).map((l) => `<span>${esc(l.split("|")[0].trim())}</span>`).join("");
+}
+$("#welcome-form").addEventListener("input", () => { welcomeDirty = true; renderWelcomePreview(); });
+
 async function loadAdmin() {
   try {
     const [tables, settings] = await Promise.all([fetchAdminTables(), api("/api/admin/settings")]);
     adminSig = JSON.stringify(tables);
     renderAdminTables(tables);
-    const f = $("#welcome-form");
-    for (const k of ["welcome_title", "welcome_markdown", "welcome_links"]) f[k].value = settings[k];
-    const r = $("#rules-form");
-    r.auto_renew_before_hours.value = settings.auto_renew_before_hours;
-    r.auto_renew_days.value = settings.auto_renew_days;
-    r.migration_requires_approval.checked = settings.migration_requires_approval === "1";
-    r.require_reservation_to_login.checked = settings.require_reservation_to_login === "1";
-    r.restrict_to_admin_tenant.checked = settings.restrict_to_admin_tenant === "1";
-    r.refresh_interval_seconds.value = settings.refresh_interval_seconds;
+    if (!welcomeDirty) {
+      const f = $("#welcome-form");
+      for (const k of ["welcome_title", "welcome_markdown", "welcome_links"]) f[k].value = settings[k];
+      renderWelcomePreview();
+    }
+    if (!rulesDirty) {
+      const r = $("#rules-form");
+      r.auto_renew_before_hours.value = settings.auto_renew_before_hours;
+      r.auto_renew_days.value = settings.auto_renew_days;
+      r.migration_requires_approval.checked = settings.migration_requires_approval === "1";
+      r.require_reservation_to_login.checked = settings.require_reservation_to_login === "1";
+      r.restrict_to_admin_tenant.checked = settings.restrict_to_admin_tenant === "1";
+      r.refresh_interval_seconds.value = settings.refresh_interval_seconds;
+      setRulesDirty(false);
+    }
   } catch (err) {
     toast(err.message);
   }
 }
 
 function renderAdminServers(servers, tunnel) {
-  $("#admin-servers").innerHTML = webvpnLine(tunnel) + (servers.length
-    ? `<div class="table-wrap"><table><tr><th>名称</th><th>地址</th><th>状态</th><th>显卡</th><th>公共用户名<span class="help" title="迁移前大家共用的 Linux 账号（如 ubuntu）。成员可以把这个账号里的配置、conda 环境和项目文件，迁移到自己的个人账号下。">?</span></th><th>校园网隧道</th><th>注册命令</th><th></th></tr>
+  $("#admin-vpn").innerHTML = webvpnLine(tunnel);
+  $("#admin-servers").innerHTML = servers.length
+    ? `<div class="tbl-row head srv-grid"><span>服务器</span><span>状态</span><span>显卡</span><span>公共用户名<span class="help" title="迁移前大家共用的 Linux 账号（如 ubuntu）。成员可以把这个账号里的配置、conda 环境和项目文件，迁移到自己的个人账号下。">?</span></span><span>校园网隧道</span><span></span></div>
       ${servers.map((s) => {
-        const models = [...new Set(s.gpus.map((g) => g.name.replace(/^NVIDIA /, "")))].join(", ");
-        return `<tr><td><b>${esc(s.name)}</b></td><td>${esc(s.host)}</td>
-          <td title="${esc(`主机名 ${s.hostname || "-"}\nAgent 版本 ${s.agent_version || "-"}`)}"><span class="dot ${s.online ? "on" : ""}" style="display:inline-block"></span> ${s.online ? "在线" : "离线"}
-            <div class="muted small">${s.last_seen_at ? s.last_seen_at.replace("T", " ") : "从未连接"}</div></td>
-          <td>${s.gpus.length} × ${esc(models || "-")}</td>
-          <td>${s.legacy_users?.length ? s.legacy_users.map((u) => `<code>${esc(u)}</code>`).join(" ") : `<span class="muted">-</span>`}</td>
-          <td class="small">${tunnelCell(s.tunnel)}</td>
-          <td class="small">${registerCell(s)}</td>
-          <td style="white-space:nowrap">
+        const models = [...new Set(s.gpus.map((g) => g.name.replace(/^NVIDIA (GeForce )?/, "")))].join(", ");
+        return `<div class="tbl-row srv-grid">
+          <div><div class="cell-main">${esc(s.name)}</div><div class="cell-sub mono">${esc(s.host)}</div></div>
+          <div title="${esc(`主机名 ${s.hostname || "-"}\nAgent 版本 ${s.agent_version || "-"}`)}"><div class="srv-status"><span class="dot ${s.online ? "on" : ""}"></span>${s.online ? "在线" : "离线"}</div>
+            <div class="cell-sub">${s.last_seen_at ? s.last_seen_at.replace("T", " ") : "从未连接"}</div></div>
+          <div>${s.gpus.length ? `<span class="gpu-chip">${s.gpus.length} × ${esc(models)}</span>` : `<span class="muted">-</span>`}</div>
+          <div>${s.legacy_users?.length ? s.legacy_users.map((u) => `<code class="inline-code">${esc(u)}</code>`).join(" ") : `<span class="muted">-</span>`}</div>
+          <div>${tunnelCell(s.tunnel)}</div>
+          <div class="row-actions">${registerCell(s)}
             <button class="btn small" data-edit-server="${s.id}">编辑</button>
-            <button class="btn small" data-token-server="${s.id}">重置 Token</button>
-            <button class="btn small danger" data-del-server="${s.id}">删除</button></td></tr>`;
-      }).join("")}</table></div>
-      <p class="muted small">「注册命令」只有管理员能看到，用来把 GPU 服务器接入平台。接入过的服务器重装 / 换 token 时点「重置 Token」会生成新命令。</p>`
-    : `<p class="muted">还没有服务器。添加后这里会给出一条注册命令，照着执行即可把 GPU 接入平台。</p>`);
+            <div class="menu-wrap"><button class="btn ghost icon small" data-menu title="更多">${icon("more")}</button>
+              <div class="menu hidden"><button data-token-server="${s.id}">${icon("refresh")}重置 Token</button><button class="danger" data-del-server="${s.id}">${icon("trash")}删除服务器</button></div></div>
+          </div></div>`;
+      }).join("")}
+      <div class="card-foot">「注册命令」只有管理员能看到，用来把 GPU 服务器接入平台。接入过的服务器重装 / 换 token 时，在「⋯」里点「重置 Token」会生成新命令。</div>`
+    : `<div class="card-b"><p class="muted">还没有服务器。添加后这里会给出一条注册命令，照着执行即可把 GPU 接入平台。</p></div>`;
   $$("[data-install-server]").forEach((b) => (b.onclick = () => showInstallDialog(servers.find((x) => x.id === Number(b.dataset.installServer)))));
   $$("[data-edit-server]").forEach((b) => (b.onclick = async () => {
     openServerDialog(servers.find((x) => x.id === Number(b.dataset.editServer)));
@@ -1478,12 +1615,14 @@ function webvpnLine(tunnel) {
   const w = tunnel?.enabled && tunnel.status?._webvpn;
   if (!w) return "";
   const [cls, text] = WEBVPN_STATE[w.state] || ["", w.state];
-  return `<p class="small">公网服务器 → 学校 WebVPN：<span class="badge ${cls}">${esc(text)}</span>${w.error ? ` <span class="muted">${esc(w.error)}</span>` : ""}</p>`;
+  return `<div class="card vpn"><span class="icon-box ${cls === "ok" ? "ok" : "warn"}">${icon("globe")}</span>
+    <div class="grow"><b>校园网通道</b> <span class="path">公网服务器 → 学校 WebVPN</span>${w.error ? `<div class="cell-sub">${esc(w.error)}</div>` : ""}</div>
+    <span class="badge ${cls} has-dot">${esc(text)}</span></div>`;
 }
 function tunnelCell(t) {
   if (!t) return `<span class="muted">-</span>`;
   const [cls, text] = TUNNEL_STATE[t.state] || ["", t.state];
-  return `<span class="badge ${cls}" title="${esc(t.error || "")}">${text}</span><div class="muted">${esc(t.since?.replace("T", " ").slice(5, 16) || "")}</div>`;
+  return `<span class="badge ${cls} has-dot" title="${esc(t.error || "")}">${text}</span><div class="cell-sub">${esc(t.since?.replace("T", " ").slice(5, 16) || "")}</div>`;
 }
 
 // 把这台 GPU 接入平台的注册命令：在新服务器上直接执行即可，不需要提前下载任何文件。
@@ -1503,8 +1642,8 @@ function installInfo(token) {
 }
 
 function registerCell(s) {
-  if (!s.token) return `<span class="muted">点「重置 Token」生成</span>`;
-  return `<button class="btn small" data-install-server="${s.id}">查看命令</button>`;
+  if (!s.token) return `<span class="cell-sub">先重置 Token</span>`;
+  return `<button class="btn small" data-install-server="${s.id}">${icon("term")}注册命令</button>`;
 }
 
 function showInstallDialog(s) {
@@ -1561,15 +1700,18 @@ serverForm.addEventListener("submit", async (e) => {
 });
 
 function renderAdminUsers(users) {
-  $("#admin-users").innerHTML = `<div class="table-wrap"><table><tr><th>姓名</th><th>Linux 用户名</th><th>UID</th><th>密码</th><th>公钥</th><th>管理员</th><th>启用</th></tr>
-    ${users.map((u) => `<tr><td>${esc(u.name)}</td>
-      <td>${u.linux_username ? `<code>${esc(u.linux_username)}</code>` : `<span class="badge">未设置</span>`}
-        <button class="btn small ghost" data-rename="${u.id}">修改</button></td>
-      <td>${u.uid}</td><td>${u.has_password ? "✓" : "-"}</td><td>${u.key_count ? u.key_count : `<span class="muted">未配置</span>`}</td>
-      <td><input type="checkbox" data-admin="${u.id}" ${u.is_admin ? "checked" : ""} style="width:auto;min-height:0"></td>
-      <td><input type="checkbox" data-enabled="${u.id}" ${u.enabled ? "checked" : ""} style="width:auto;min-height:0"></td></tr>`).join("")}
-    </table></div>
-    <p class="muted small">停用成员后，各服务器上的账号会在 1 分钟内被锁定（家目录和数据保留）。修改用户名会在各服务器上把账号改名并移动家目录。</p>`;
+  $("#admin-users").innerHTML = `<div class="tbl-row head mem-grid"><span>姓名</span><span>Linux 用户名</span><span class="c-center">UID</span><span class="c-center">密码</span><span class="c-center">公钥</span><span class="c-center">管理员</span><span class="c-center">启用</span></div>
+    ${users.map((u) => `<div class="tbl-row mem-grid" data-member="${esc(`${u.name} ${u.linux_username || ""}`.toLowerCase())}">
+      <div class="who">${avatarHtml(u.name, u.avatar_url, u.id)}${esc(u.name)}</div>
+      <div>${u.linux_username ? `<code class="inline-code">${esc(u.linux_username)}</code>` : `<span class="badge">未设置</span>`}
+        <button class="btn ghost icon small" data-rename="${u.id}" title="修改用户名">${icon("edit")}</button></div>
+      <span class="c-center mono muted">${u.uid}</span>
+      <span class="c-center">${u.has_password ? `<span style="color:var(--ok)">${icon("check")}</span>` : `<span class="muted">-</span>`}</span>
+      <span class="c-center">${u.key_count ? u.key_count : `<span class="muted">未配置</span>`}</span>
+      <span class="c-center"><label class="switch"><input type="checkbox" data-admin="${u.id}" ${u.is_admin ? "checked" : ""}><i></i></label></span>
+      <span class="c-center"><label class="switch"><input type="checkbox" data-enabled="${u.id}" ${u.enabled ? "checked" : ""}><i></i></label></span></div>`).join("")}
+    <div class="card-foot">停用成员后，各服务器上的账号会在 1 分钟内被锁定（家目录和数据保留）。修改用户名会在各服务器上把账号改名并移动家目录。</div>`;
+  applyMemberFilter();
   const patch = async (id, body) => {
     try { await api(`/api/admin/users/${id}`, { method: "PATCH", body }); toast("已更新"); } catch (err) { toast(err.message); }
     loadAdmin();
@@ -1582,6 +1724,30 @@ function renderAdminUsers(users) {
     if (name && name.trim()) patch(u.id, { linux_username: name.trim() });
   }));
 }
+
+function applyMemberFilter() {
+  const q = $("#member-search").value.trim().toLowerCase();
+  $$("[data-member]").forEach((r) => r.classList.toggle("hidden", !r.dataset.member.includes(q)));
+}
+$("#member-search").addEventListener("input", applyMemberFilter);
+
+let migFilter = "all";
+function renderAdminMigrations(migrations) {
+  const n = (g) => migrations.filter((t) => migGroup(t) === g).length;
+  const counts = { all: migrations.length, active: n("active"), done: n("done"), other: n("other") };
+  $("#mig-filter").innerHTML = [["all", "全部"], ["active", "进行中"], ["done", "已完成"], ["other", "失败 / 取消"]]
+    .map(([k, l]) => `<button data-f="${k}" class="${migFilter === k ? "active" : ""}">${l} ${counts[k]}</button>`).join("");
+  const list = migrations.filter((t) => migFilter === "all" || migGroup(t) === migFilter);
+  $("#admin-migrations").innerHTML = list.length
+    ? list.map((t) => taskHtml(t, true)).join("")
+    : `<p class="muted">${migrations.length ? "没有符合条件的记录。" : "暂无迁移记录。"}</p>`;
+}
+$("#mig-filter").addEventListener("click", (e) => {
+  const b = e.target.closest("[data-f]");
+  if (!b) return;
+  migFilter = b.dataset.f;
+  renderAdminMigrations(state.adminMigrations || []);
+});
 
 $("#rules-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1599,6 +1765,7 @@ $("#rules-form").addEventListener("submit", async (e) => {
       },
     });
     state.config = await api("/api/config");
+    setRulesDirty(false);
     toast("已保存");
   } catch (err) {
     toast(err.message);
@@ -1610,6 +1777,7 @@ $("#welcome-form").addEventListener("submit", async (e) => {
   const f = e.target;
   try {
     await api("/api/admin/settings", { method: "PUT", body: { welcome_title: f.welcome_title.value, welcome_markdown: f.welcome_markdown.value, welcome_links: f.welcome_links.value } });
+    welcomeDirty = false;
     toast("已保存");
   } catch (err) {
     toast(err.message);
@@ -1665,7 +1833,7 @@ function scheduleRefresh() {
   const secs = Math.max(3, Number(state.config?.refresh_interval) || 10);
   setTimeout(async () => {
     try {
-      if (!document.hidden && !$("dialog[open]") && !tipAnchor && Date.now() - state.lastToggle > 600) {
+      if (!document.hidden && !$("dialog[open]") && !tipAnchor && !$(".menu:not(.hidden)") && Date.now() - state.lastToggle > 600) {
         const tab = activeTab();
         if (tab === "calendar") await loadCalendar(true);
         else if (tab === "admin") await refreshAdmin();

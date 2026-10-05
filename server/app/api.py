@@ -602,6 +602,7 @@ def task_out(t: MigrationTask) -> dict:
         "server_name": t.server.name,
         "user_id": t.user_id,
         "user_name": t.user.name,
+        "user_avatar": t.user.avatar_url,
         "kind": t.kind,
         "summary": t.summary,
         "source": t.source,

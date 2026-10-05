@@ -8,6 +8,29 @@
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="9" y="9" width="13" height="13" rx="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></symbol>
+    <symbol id="i-edit" viewBox="0 0 24 24"><path d="M17 3a2.85 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/></symbol>
+    <symbol id="i-trash" viewBox="0 0 24 24"><path d="M3 6h18"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6"/><path d="M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></symbol>
+    <symbol id="i-key" viewBox="0 0 24 24"><circle cx="7.5" cy="15.5" r="5.5"/><path d="m21 2-9.6 9.6"/><path d="m15.5 7.5 3 3L22 7l-3-3"/></symbol>
+    <symbol id="i-server" viewBox="0 0 24 24"><rect width="20" height="8" x="2" y="2" rx="2"/><rect width="20" height="8" x="2" y="14" rx="2"/><path d="M6 6h.01M6 18h.01"/></symbol>
+    <symbol id="i-lock" viewBox="0 0 24 24"><rect width="18" height="11" x="3" y="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></symbol>
+    <symbol id="i-cal" viewBox="0 0 24 24"><rect width="18" height="18" x="3" y="4" rx="2"/><path d="M16 2v4M8 2v4M3 10h18"/></symbol>
+    <symbol id="i-swap" viewBox="0 0 24 24"><path d="m16 3 4 4-4 4"/><path d="M20 7H4"/><path d="m8 21-4-4 4-4"/><path d="M4 17h16"/></symbol>
+    <symbol id="i-check" viewBox="0 0 24 24"><path d="M20 6 9 17l-5-5"/></symbol>
+    <symbol id="i-more" viewBox="0 0 24 24"><circle cx="12" cy="5" r="1"/><circle cx="12" cy="12" r="1"/><circle cx="12" cy="19" r="1"/></symbol>
+    <symbol id="i-search" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></symbol>
+    <symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14M12 5v14"/></symbol>
+    <symbol id="i-term" viewBox="0 0 24 24"><polyline points="4 17 10 11 4 5"/><line x1="12" x2="20" y1="19" y2="19"/></symbol>
+    <symbol id="i-cpu" viewBox="0 0 24 24"><rect width="16" height="16" x="4" y="4" rx="2"/><rect width="6" height="6" x="9" y="9"/><path d="M15 2v2M15 20v2M2 15h2M2 9h2M20 15h2M20 9h2M9 2v2M9 20v2"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-chev" viewBox="0 0 24 24"><path d="m6 9 6 6 6-6"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4M12 8h.01"/></symbol>
+    <symbol id="i-refresh" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M8 16H3v5"/></symbol>
+    <symbol id="i-send" viewBox="0 0 24 24"><path d="m22 2-7 20-4-9-9-4Z"/><path d="M22 2 11 13"/></symbol>
+    <symbol id="i-globe" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M2 12h20"/><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></symbol>
+    <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
+  </svg>
   <div id="login" class="login hidden">
     <div class="login-card">
       <div class="login-head">
@@ -68,94 +91,152 @@
       </section>
 
       <!-- 我的账号 -->
-      <section id="tab-account" class="tab hidden">
-        <div class="cards">
-          <div class="card span-2">
-            <h2>服务器账号</h2>
-            <div id="linux-account"></div>
-          </div>
-          <div class="card">
-            <h2>登录密码</h2>
-            <p class="muted small">用于 <code>ssh 用户名@服务器</code> 密码登录，所有 GPU 服务器通用。平台只保存加密后的哈希。在服务器上用 <code>passwd</code> 改的密码会被平台覆盖，请在这里修改。</p>
-            <div id="password-state" class="small"></div>
-            <form id="password-form" class="stack">
-              <label>新密码<input type="password" name="password" placeholder="至少 8 位" autocomplete="new-password" required></label>
-              <label>确认新密码<input type="password" name="confirm" placeholder="再输入一次" autocomplete="new-password" required></label>
-              <div class="group">
-                <button class="btn primary">保存密码</button>
-                <button class="btn danger hidden" type="button" id="password-clear">关闭密码登录</button>
-              </div>
-            </form>
-          </div>
-          <div class="card">
-            <h2>SSH 公钥 <span class="muted small">（可选，免输密码）</span></h2>
-            <ul id="key-list" class="list"></ul>
-            <form id="key-form" class="stack">
-              <label>备注（可选）<input name="title" placeholder="例如：我的笔记本" maxlength="64"></label>
-              <label>公钥<textarea name="public_key" rows="3" placeholder="粘贴公钥，例如 ssh-ed25519 AAAAC3Nza... you@laptop" required></textarea></label>
-              <button class="btn primary">添加公钥</button>
-            </form>
-          </div>
-          <div class="card span-2" id="migration-card">
-            <div class="card-head">
-              <h2>文件迁移</h2>
-              <button class="btn" id="open-migrate">迁移环境和文件…</button>
+      <section id="tab-account" class="tab narrow hidden">
+        <div class="card hero">
+          <div class="hero-id">
+            <span id="hero-avatar" class="hero-avatar"></span>
+            <div>
+              <h1 id="hero-name"></h1>
+              <div class="hero-sub">Linux 用户名 <span class="pill" id="hero-username"></span><button class="link-btn" id="rename-btn">修改</button></div>
             </div>
-            <p class="muted small">从以前大家共用的账号（如 <code>ubuntu</code>）迁移 .bashrc、git 配置、需要的 conda 环境，并把你自己的项目目录迁移到新账号的家目录，迁移后文件完全归你所有。迁移在服务器后台进行，可以关掉页面，进度随时回来看。</p>
-            <div id="my-migrations"></div>
           </div>
-          <div class="card span-2">
-            <h2>我的预约</h2>
-            <div id="my-reservations"></div>
+          <div class="hero-stats" id="hero-stats"></div>
+        </div>
+
+        <div class="acct-grid">
+          <div class="acct-col">
+            <div class="card" id="c-servers">
+              <div class="card-h"><span class="icon-box"><svg class="i"><use href="#i-server"/></svg></span><h2>服务器账号</h2></div>
+              <div id="linux-account"></div>
+            </div>
+
+            <div class="card" id="c-reservations">
+              <div class="card-h"><span class="icon-box warn"><svg class="i"><use href="#i-cal"/></svg></span><h2>我的预约</h2><span class="grow"></span><button class="btn small" data-goto="calendar">去日历预约</button></div>
+              <div id="my-reservations"></div>
+            </div>
+
+            <div class="card" id="migration-card">
+              <div class="card-h"><span class="icon-box"><svg class="i"><use href="#i-swap"/></svg></span><h2>文件迁移</h2><span class="grow"></span><button class="btn primary small" id="open-migrate">迁移环境和文件…</button></div>
+              <div class="card-b">
+                <p class="card-note" style="margin-bottom:14px">把以前共用账号（如 <code>ubuntu</code>）里的 .bashrc、git 配置、conda 环境，以及你自己的项目目录迁到新账号的家目录，迁移后文件完全归你所有。迁移在服务器后台进行，可以关掉页面，进度随时回来看。</p>
+                <div id="my-migrations"></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="acct-col">
+            <div class="card" id="c-password">
+              <div class="card-h"><span class="icon-box ok"><svg class="i"><use href="#i-lock"/></svg></span><h2>登录密码</h2><span class="help" data-tip="用于 ssh 用户名@服务器 密码登录，所有 GPU 服务器通用。平台只保存加密后的哈希。在服务器上用 passwd 改的密码会被平台覆盖，请在这里修改。">?</span></div>
+              <div class="card-b">
+                <div id="password-state" class="pw-state"></div>
+                <form id="password-form" class="stack">
+                  <label>新密码<input type="password" name="password" placeholder="至少 8 位" autocomplete="new-password" required></label>
+                  <label>确认新密码<input type="password" name="confirm" placeholder="再输入一次" autocomplete="new-password" required></label>
+                  <div class="btn-row">
+                    <button class="btn primary grow">保存密码</button>
+                    <button class="link-btn danger hidden" type="button" id="password-clear">关闭密码登录</button>
+                  </div>
+                </form>
+              </div>
+            </div>
+
+            <div class="card" id="c-keys">
+              <div class="card-h"><span class="icon-box"><svg class="i"><use href="#i-key"/></svg></span><h2>SSH 公钥</h2><span class="sub-title">可选 · 免输密码</span></div>
+              <div class="card-b">
+                <div id="key-list"></div>
+                <button class="btn block" type="button" id="key-toggle"><svg class="i"><use href="#i-plus"/></svg>添加公钥</button>
+                <form id="key-form" class="stack hidden">
+                  <label>备注（可选）<input name="title" placeholder="例如：我的笔记本" maxlength="64"></label>
+                  <label>公钥<textarea name="public_key" rows="3" class="mono" placeholder="粘贴公钥，例如 ssh-ed25519 AAAAC3Nza... you@laptop" required></textarea></label>
+                  <div class="btn-row"><button class="btn primary grow">添加</button><button class="btn" type="button" id="key-cancel">取消</button></div>
+                </form>
+              </div>
+            </div>
           </div>
         </div>
       </section>
 
       <!-- 管理 -->
-      <section id="tab-admin" class="tab hidden">
-        <div class="cards">
-          <div class="card wide">
-            <div class="card-head">
-              <h2>GPU 服务器</h2>
-              <button class="btn primary" id="add-server">+ 添加服务器</button>
-            </div>
+      <section id="tab-admin" class="tab narrow hidden">
+        <div class="page-title"><div><h1>管理</h1><p>接入 GPU 服务器、管理成员，并配置平台规则。</p></div></div>
+        <div class="kpis" id="admin-kpis"></div>
+
+        <div class="subtabs" id="admin-subtabs">
+          <button data-sub="servers" class="active"><svg class="i"><use href="#i-server"/></svg>GPU 服务器 <span class="count" id="cnt-servers"></span></button>
+          <button data-sub="members"><svg class="i"><use href="#i-users"/></svg>成员 <span class="count" id="cnt-members"></span></button>
+          <button data-sub="migrations"><svg class="i"><use href="#i-swap"/></svg>迁移记录 <span class="count" id="cnt-migrations"></span></button>
+          <button data-sub="rules"><svg class="i"><use href="#i-zap"/></svg>预约与迁移规则</button>
+          <button data-sub="welcome"><svg class="i"><use href="#i-send"/></svg>新人欢迎卡片</button>
+        </div>
+
+        <div class="admin-sub" id="sub-servers">
+          <div id="admin-vpn"></div>
+          <div class="card">
+            <div class="card-h" style="padding-bottom:14px"><h2>GPU 服务器</h2><span class="grow"></span><button class="btn primary small" id="add-server"><svg class="i"><use href="#i-plus"/></svg>添加服务器</button></div>
             <div id="admin-servers"></div>
           </div>
-          <div class="card wide">
-            <h2>成员</h2>
-            <div id="admin-users"></div>
+        </div>
+
+        <div class="admin-sub hidden" id="sub-members">
+          <div class="card">
+            <div class="tools"><div class="search"><svg class="i"><use href="#i-search"/></svg><input type="search" id="member-search" placeholder="搜索姓名或用户名"></div></div>
+            <div id="admin-users" style="padding-top:12px"></div>
           </div>
-          <div class="card wide">
-            <h2>文件迁移记录</h2>
-            <div id="admin-migrations"></div>
+        </div>
+
+        <div class="admin-sub hidden" id="sub-migrations">
+          <div class="card">
+            <div class="tools"><div class="seg" id="mig-filter"></div></div>
+            <div class="card-b" style="padding-top:12px" id="admin-migrations"></div>
           </div>
-          <div class="card span-2">
-            <h2>预约与迁移规则</h2>
-            <form id="rules-form" class="stack">
-              <div class="two">
-                <label>长期使用：到期前多少小时自动延长<input type="number" name="auto_renew_before_hours" min="1" max="336" required></label>
-                <label>每次自动延长多少天<input type="number" name="auto_renew_days" min="1" max="60" required></label>
+        </div>
+
+        <div class="admin-sub hidden" id="sub-rules">
+          <form id="rules-form">
+            <div class="set-group"><h3>预约</h3>
+              <div class="card">
+                <div class="set-row"><div><div class="t">长期使用自动延长</div><div class="d">标记为「长期使用」的预约，在到期前自动顺延，并发飞书通知。</div></div>
+                  <div class="inline-num">到期前 <input type="number" name="auto_renew_before_hours" min="1" max="336" required> 小时，延长 <input type="number" name="auto_renew_days" min="1" max="60" required> 天</div></div>
+                <div class="set-row"><div><div class="t">页面自动刷新间隔</div><div class="d">GPU 日历和管理页按这个间隔自动刷新；GPU 服务器上的 Agent 也按它上报，数据才会同步变新。</div></div>
+                  <div class="inline-num"><input type="number" name="refresh_interval_seconds" min="3" max="600" required> 秒</div></div>
               </div>
-              <label>页面自动刷新间隔（秒）<input type="number" name="refresh_interval_seconds" min="3" max="600" required>
-                <span class="muted small">GPU 日历和管理页按这个间隔自动刷新；GPU 服务器上的 Agent 也按它上报，数据才会同步变新。</span></label>
-              <label class="check"><input type="checkbox" name="migration_requires_approval"> 成员发起的文件迁移需要管理员确认</label>
-              <label class="check" style="align-items:flex-start"><input type="checkbox" name="restrict_to_admin_tenant" style="margin-top:3px"> <span>仅允许和管理员同一个飞书组织的成员登录平台<br><span class="muted small">打开：其他飞书组织的人（包括个人飞书号）即使授权也不能登录；以管理员最近一次登录时的组织为准。关闭：只要能通过飞书应用授权就能登录。</span></span></label>
-              <label class="check" style="align-items:flex-start"><input type="checkbox" name="require_reservation_to_login" style="margin-top:3px"> <span>仅允许当天预约了该服务器显卡的成员 SSH 登录<br><span class="muted small">打开：没有预约这台服务器的成员不能登录它；关闭：所有成员都能登录，预约只决定能用哪些显卡。账号 / 密码设置和文件迁移不受影响，约 1 分钟内生效。</span></span></label>
-              <div><button class="btn primary">保存规则</button></div>
-            </form>
-          </div>
-          <div class="card span-2">
-            <h2>新人欢迎卡片</h2>
-            <p class="muted small">新成员加入飞书企业或机器人所在的群时，机器人会私聊发送这张卡片。正文支持飞书 lark_md 语法。</p>
-            <form id="welcome-form" class="stack">
-              <label>标题<input name="welcome_title"></label>
-              <label>正文<textarea name="welcome_markdown" rows="6"></textarea></label>
-              <label><span>按钮（每行一个：<code>按钮文字|链接</code>，<code>{base_url}</code> 代表平台地址）</span><textarea name="welcome_links" rows="3"></textarea></label>
-              <div class="group">
-                <button class="btn primary">保存</button>
-                <button class="btn" type="button" id="welcome-test">发给我自己测试</button>
+            </div>
+            <div class="set-group"><h3>登录与访问</h3>
+              <div class="card">
+                <div class="set-row"><div><div class="t">仅允许和管理员同一个飞书组织的成员登录平台</div><div class="d">打开：其他飞书组织的人（包括个人飞书号）即使授权也不能登录；以管理员最近一次登录时的组织为准。关闭：只要能通过飞书应用授权就能登录。</div></div>
+                  <label class="switch"><input type="checkbox" name="restrict_to_admin_tenant"><i></i></label></div>
+                <div class="set-row"><div><div class="t">仅允许当天预约了该服务器显卡的成员 SSH 登录</div><div class="d">打开：没有预约这台服务器的成员不能登录它；关闭：所有成员都能登录，预约只决定能用哪些显卡。账号 / 密码设置和文件迁移不受影响，约 1 分钟内生效。</div></div>
+                  <label class="switch"><input type="checkbox" name="require_reservation_to_login"><i></i></label></div>
               </div>
-            </form>
+            </div>
+            <div class="set-group"><h3>文件迁移</h3>
+              <div class="card">
+                <div class="set-row"><div><div class="t">成员发起的文件迁移需要管理员确认</div><div class="d">打开后，成员提交的迁移会先进入「等待管理员确认」，管理员同意后才开始执行。</div></div>
+                  <label class="switch"><input type="checkbox" name="migration_requires_approval"><i></i></label></div>
+              </div>
+            </div>
+            <div class="savebar clean" id="rules-bar"><span class="grow" id="rules-msg">所有更改已保存</span><button class="btn primary" id="rules-save" disabled>保存规则</button></div>
+          </form>
+        </div>
+
+        <div class="admin-sub hidden" id="sub-welcome">
+          <div class="welcome">
+            <div class="card">
+              <div class="card-h"><h2>编辑卡片</h2></div>
+              <div class="card-b">
+                <p class="card-note" style="margin-bottom:14px">新成员加入飞书企业或机器人所在的群时，机器人会私聊发送这张卡片。正文支持飞书 <code>lark_md</code> 语法。</p>
+                <form id="welcome-form" class="stack">
+                  <label>标题<input name="welcome_title"></label>
+                  <label>正文<textarea name="welcome_markdown" rows="8"></textarea></label>
+                  <label>按钮<span class="field-hint">每行一个：<code>按钮文字|链接</code>，<code>{base_url}</code> 代表平台地址</span><textarea name="welcome_links" rows="3" class="mono"></textarea></label>
+                  <div class="btn-row"><button class="btn primary">保存</button><button class="btn" type="button" id="welcome-test"><svg class="i"><use href="#i-send"/></svg>发给我自己测试</button></div>
+                </form>
+              </div>
+            </div>
+            <div class="preview-wrap">
+              <div class="preview-label"><span>实时预览</span><span>飞书卡片样式（示意）</span></div>
+              <div class="fcard"><div class="fcard-h" id="wp-title"></div><div class="fcard-b" id="wp-body"></div><div class="fcard-btns" id="wp-btns"></div></div>
+            </div>
           </div>
         </div>
       </section>
