@@ -51,3 +51,24 @@ def test_remove_moved_env(tmp_path):
     assert (tmp_path / "outside" / "conda-meta").exists()
     assert lab_agent.remove_moved_env(str(tmp_path / "outside"), str(envs)) is not None
     assert (tmp_path / "outside").exists()
+
+
+def test_stale_marker_from_another_task_is_ignored(tmp_path, monkeypatch):
+    """平台数据库重建后任务 id 会重复：旧任务留下的“已完成”标记不能让新任务直接报告完成。"""
+    monkeypatch.setattr(lab_agent, "STATE_DIR", str(tmp_path))
+    home = tmp_path / "home"
+    home.mkdir()
+    old = {"id": 1, "kind": "profile", "uid": 1001, "source": "/home/ubuntu", "options": {"configs": ["bashrc"]},
+           "created_at": "2026-10-03T10:00:00"}
+    new = dict(old, created_at="2026-10-05T14:00:00")
+    m_old = lab_agent.Migration(None, old)
+    m_old.p.update(bytes_total=5, files_total=2)
+    m_old._save_marker("%s（旧）" % home, check=str(home))
+    # 同一个任务中断后重启：沿用标记，并带回当时的统计
+    m_same = lab_agent.Migration(None, old)
+    assert m_same._done_before() == "%s（旧）" % home
+    assert m_same.p["files_total"] == 2
+    # id 相同但不是同一个任务：作废并删除标记，必须真正执行
+    m_new = lab_agent.Migration(None, new)
+    assert m_new._done_before() is None
+    assert not (tmp_path / "migration-1.json").exists()

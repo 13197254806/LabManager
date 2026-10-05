@@ -294,6 +294,7 @@ def pending_migrations(db: Session, server: Server) -> list[dict]:
             "mode": t.mode,
             "dest_name": t.dest_name,
             "options": t.options,
+            "created_at": t.created_at.isoformat(),
         }
         for t in tasks
         if t.user.enabled and t.user.linux_username

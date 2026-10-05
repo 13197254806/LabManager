@@ -927,7 +927,7 @@ def agent_sync(
 
 class MigrationProgress(BaseModel):
     status: str = Field(pattern="^(running|done|failed)$")
-    phase: str = Field(default="", max_length=32)
+    phase: str = Field(default="", max_length=64)
     bytes_done: int = 0
     bytes_total: int = 0
     files_done: int = 0
@@ -1013,7 +1013,7 @@ def agent_migration_progress(
     if t.status not in ("queued", "running"):
         return {"ok": False, "status": t.status}
     t.status = body.status
-    t.phase, t.message, t.dest_path = body.phase, body.message, body.dest_path or t.dest_path
+    t.phase, t.message, t.dest_path = body.phase[:32], body.message, body.dest_path or t.dest_path
     t.bytes_done, t.bytes_total = body.bytes_done, body.bytes_total
     t.files_done, t.files_total = body.files_done, body.files_total
     if body.status == "running" and not t.started_at:

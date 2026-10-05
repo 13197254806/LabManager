@@ -49,7 +49,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.7.2"
+VERSION = "0.7.3"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -950,6 +950,8 @@ class Migration(threading.Thread):
         self.reloc_failed = []
         self._last = 0
         self.marker = os.path.join(STATE_DIR, "migration-%d.json" % self.id)
+        # 任务指纹：平台数据库重建后任务 id 会重新从 1 开始，不能只凭 id 认定“这个任务以前做完了”
+        self.sig = json.dumps(task, sort_keys=True, ensure_ascii=False)
 
     def report(self, status="running", force=False, **kw):
         self.p.update(kw)
@@ -957,11 +959,14 @@ class Migration(threading.Thread):
             return
         self._last = time.time()
         payload = dict(self.p, status=status)
+        payload["phase"] = payload["phase"][:60]  # 平台限制 64 字符，过长会被拒绝，进度就不再更新
         payload.setdefault("message", "")
         try:
             self.agent.post("/api/agent/migrations/%d" % self.id, payload, timeout=10)
+            return True
         except Exception as e:  # noqa: BLE001
             log.warning("上报迁移进度失败: %s", e)
+            return False
 
     def run(self):
         log.info("开始迁移 #%d (%s): %s", self.id, self.kind, self.t.get("source"))
@@ -974,7 +979,8 @@ class Migration(threading.Thread):
             if self.reloc_failed:
                 self.notes.append("%d 个二进制文件中的路径无法自动修正（新路径比原路径长太多）：%s" % (
                     len(self.reloc_failed), "、".join(self.reloc_failed[:5])))
-            self.report("done", force=True, phase="完成", message="；".join(self.notes), dest_path=dest)
+            if self.report("done", force=True, phase="完成", message="；".join(self.notes), dest_path=dest):
+                self._clear_marker()
             log.info("迁移 #%d 完成: %s", self.id, dest)
         except MigrationError as e:
             log.warning("迁移 #%d 失败: %s", self.id, e)
@@ -1041,17 +1047,31 @@ class Migration(threading.Thread):
             if not os.path.isdir(STATE_DIR):
                 os.makedirs(STATE_DIR, 0o700)
             with open(self.marker, "w") as f:
-                json.dump({"final": final, "check": check or final}, f)
+                json.dump({"sig": self.sig, "final": final, "check": check or final,
+                           "totals": {k: self.p[k] for k in ("bytes_total", "files_total")}}, f)
+        except OSError:
+            pass
+
+    def _clear_marker(self):
+        try:
+            os.remove(self.marker)
         except OSError:
             pass
 
     def _done_before(self):
-        """中断后重启：最后一步其实已经完成了。"""
-        if os.path.exists(self.marker):
+        """中断后重启：最后一步其实已经完成了（只认同一个任务留下的标记）。"""
+        try:
             with open(self.marker) as f:
                 m = json.load(f)
-            if m.get("final") and os.path.lexists(m.get("check") or m["final"]):
-                return m["final"]
+        except (OSError, ValueError):
+            return None
+        if m.get("sig") != self.sig:  # 别的任务（或旧版本）遗留的标记：作废
+            self._clear_marker()
+            return None
+        if m.get("final") and os.path.lexists(m.get("check") or m["final"]):
+            self.p.update(m.get("totals") or {})
+            self.p["bytes_done"], self.p["files_done"] = self.p["bytes_total"], self.p["files_total"]
+            return m["final"]
         return None
 
     @staticmethod

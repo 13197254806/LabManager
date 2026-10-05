@@ -759,7 +759,7 @@ async function renderAccount() {
     ? `<div class="table-wrap"><table><tr><th>服务器</th><th>显卡</th><th>日期</th><th>长期使用</th><th>备注</th><th></th></tr>
         ${rs.map((r) => `<tr><td>${esc(r.server_name)}</td><td>GPU${r.gpu_index}</td><td>${r.start_date} ~ ${r.end_date}</td>
           <td><label class="check"><input type="checkbox" data-renew="${r.id}" ${r.auto_renew ? "checked" : ""}>${r.renew_count ? `<span class="muted small">已续 ${r.renew_count} 次</span>` : ""}</label></td>
-          <td>${esc(r.note)}</td><td><button class="btn small" data-open-res="${r.id}">续约 / 释放</button></td></tr>`).join("")}
+          <td>${esc(r.note)}</td><td><button class="btn small" data-open-res="${r.id}">修改</button></td></tr>`).join("")}
       </table></div><p class="muted small">长期使用${esc(renewRuleText())}。与他人预约冲突时只延长到冲突前一天。</p>`
     : `<p class="muted">没有进行中或即将开始的预约。</p>`;
   $$("[data-open-res]").forEach((b) => (b.onclick = () => openDetail(rs.find((r) => r.id === Number(b.dataset.openRes)))));
@@ -983,22 +983,27 @@ const CFG_DESC = {
 const helpIcon = (desc, paths) => `<span class="help" title="${esc([desc, ...(paths.length ? ["", ...paths] : [])].join("\n"))}">?</span>`;
 const MODE_NAMES = { move: "移动", copy: "复制", link: "原地保留" };
 
-async function renderPicker(container, onSubmitted) {
+async function renderPicker(container, onSubmitted, onClose) {
+  // 读取失败 / 没有可选服务器时也要能关掉弹窗
+  const bail = (html) => {
+    container.innerHTML = html + (onClose ? `<div class="actions"><button type="button" class="btn pk-close">关闭</button></div>` : "");
+    if (onClose) $(".pk-close", container).onclick = onClose;
+  };
   container.innerHTML = `<p class="muted">正在读取服务器上的内容…</p>`;
   let servers;
   try {
     servers = await api("/api/me/servers");
   } catch (err) {
-    container.innerHTML = `<p class="error">${esc(err.message)}</p>`;
+    bail(`<p class="error">${esc(err.message)}</p>`);
     return;
   }
   if (!state.me.linux_username) {
-    container.innerHTML = `<p class="muted">请先设置 Linux 用户名。</p>`;
+    bail(`<p class="muted">请先设置 Linux 用户名。</p>`);
     return;
   }
   const usable = servers.filter((s) => s.online);
   if (!usable.length) {
-    container.innerHTML = `<p class="muted">目前没有在线的服务器。</p>`;
+    bail(`<p class="muted">目前没有在线的服务器。</p>`);
     return;
   }
   container.innerHTML = `
@@ -1007,7 +1012,8 @@ async function renderPicker(container, onSubmitted) {
     <p class="pk-total small muted"></p>
     <p class="pk-warn small warn-text"></p>
     <p class="error pk-error"></p>
-    <div class="actions"><button class="btn primary pk-submit">开始迁移</button></div>`;
+    <div class="actions">${onClose ? `<button type="button" class="btn pk-close">关闭</button>` : ""}<button class="btn primary pk-submit">开始迁移</button></div>`;
+  if (onClose) $(".pk-close", container).onclick = onClose;
   const sel = $(".pk-server", container);
   const cur = () => usable.find((x) => x.id === Number(sel.value));
 
@@ -1241,9 +1247,8 @@ $("#fs-close").onclick = () => fsDialog.close();
 
 $("#open-migrate").onclick = () => {
   $("#migrate-dialog").showModal();
-  renderPicker($("#migrate-picker"), () => { $("#migrate-dialog").close(); });
+  renderPicker($("#migrate-picker"), () => { $("#migrate-dialog").close(); }, () => $("#migrate-dialog").close());
 };
-$("#migrate-close").onclick = () => $("#migrate-dialog").close();
 
 // ---------------- 首次使用引导 ----------------
 
