@@ -140,7 +140,7 @@
 
           <div class="acct-col">
             <div class="card" id="c-password">
-              <div class="card-h"><span class="icon-box ok"><svg class="i"><use href="#i-lock"/></svg></span><h2>登录密码</h2><span class="help" data-tip="用于 ssh 用户名@服务器 密码登录，所有 GPU 服务器通用。平台只保存加密后的哈希。在服务器上用 passwd 改的密码会被平台覆盖，请在这里修改。">?</span></div>
+              <div class="card-h"><span class="icon-box ok"><svg class="i"><use href="#i-lock"/></svg></span><h2>服务器密码</h2><span class="help" data-tip="登录实验室 GPU 服务器（ssh 用户名@服务器）用的密码，所有服务器通用；不是飞书或本平台的登录密码。平台只保存加密后的哈希。在服务器上用 passwd 改的密码会被平台覆盖，请在这里修改。">?</span></div>
               <div class="card-b">
                 <div id="password-state" class="pw-state"></div>
                 <form id="password-form" class="stack">
@@ -223,6 +223,8 @@
                   <div class="inline-num">每天 <input type="number" name="reminder_hour" min="0" max="23" required> 点</div></div>
                 <div class="set-row"><div><div class="t">长期使用自动延长</div><div class="d">标记为「长期使用」的预约，在到期前自动顺延，并发飞书通知。</div></div>
                   <div class="inline-num">到期前 <input type="number" name="auto_renew_before_hours" min="1" max="336" required> 小时，延长 <input type="number" name="auto_renew_days" min="1" max="60" required> 天</div></div>
+                <div class="set-row"><div><div class="t">预约结束后的进程缓冲时间</div><div class="d">成员在没预约的显卡上还有进程（预约结束后没停掉）时，先给本人飞书提醒；超过这个时间仍在运行，就由 Agent 强制终止，并再发一张飞书卡片。填 0 表示不自动终止。新程序在没预约的卡上本来就起不来（设备权限限制），这里只处理预约结束前就已在运行的进程。</div></div>
+                  <div class="inline-num"><input type="number" name="process_kill_grace_hours" min="0" max="720" required> 小时</div></div>
                 <div class="set-row"><div><div class="t">页面自动刷新间隔</div><div class="d">GPU 日历和管理页按这个间隔自动刷新；GPU 服务器上的 Agent 也按它上报，数据才会同步变新。</div></div>
                   <div class="inline-num"><input type="number" name="refresh_interval_seconds" min="3" max="600" required> 秒</div></div>
               </div>

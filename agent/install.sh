@@ -244,6 +244,12 @@ fi
 fetch() {  # 优先用脚本同目录的文件，否则从平台下载
     if [ -f "$SRC/$1" ]; then cp "$SRC/$1" "$2"; else curl -fsSL "$SERVER_URL/agent/$1" -o "$2"; fi
 }
+# 显卡的硬限制（设备文件权限）要用 setfacl / getfacl
+if ! command -v setfacl >/dev/null 2>&1; then
+    info "安装 acl（用来限制未预约的显卡）"
+    (apt-get install -y acl || yum install -y acl || dnf install -y acl) >/dev/null 2>&1 \
+        || warn "没能自动安装 acl，请手动安装（apt install acl）；在此之前只有环境变量这一层软限制"
+fi
 mkdir -p /opt/lab-agent /etc/lab-agent /etc/lab-gpu /etc/ssh/lab_authorized_keys /var/lib/lab-agent
 fetch lab_agent.py /opt/lab-agent/lab_agent.py && chmod 755 /opt/lab-agent/lab_agent.py
 fetch lab-gpus /usr/local/bin/lab-gpus && chmod 755 /usr/local/bin/lab-gpus

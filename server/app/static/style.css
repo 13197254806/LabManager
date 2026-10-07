@@ -492,6 +492,8 @@ dialog.wide { width: min(760px, calc(100vw - 32px)); }
 .mig.failed { border-color: color-mix(in srgb, var(--danger) 40%, var(--line)); }
 .mig-who { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; margin-right: 6px; }
 .mig-who .avatar { width: 20px; height: 20px; font-size: 11px; }
+.pager { display: flex; align-items: center; justify-content: center; gap: 12px; margin-top: 14px; font-size: 12.5px; color: var(--muted); }
+.pager .btn:disabled { opacity: .45; cursor: default; }
 .mig-meta { display: flex; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-top: 7px; font-size: 12px; color: var(--muted); }
 .progress { height: 6px; border-radius: 3px; background: var(--line); overflow: hidden; }
 .progress i { display: block; height: 100%; background: var(--primary); border-radius: 3px; transition: width .4s; }

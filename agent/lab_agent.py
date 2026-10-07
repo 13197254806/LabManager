@@ -8,8 +8,10 @@
      - 同步登录密码（平台只下发 sha512-crypt 哈希）和 SSH 公钥
      - 维护 lab-active 组（sshd 只允许该组和 lab-admin 登录）：平台上“预约才能登录”开关关闭时，
        所有成员都在组里；开启时，只有今天预约了本机显卡的成员在组里
-     - 写 /etc/lab-gpu/<用户名>，登录时据此设置 CUDA_VISIBLE_DEVICES：预约了哪些卡就能看到哪些，
-       没有预约则文件为空、看不到任何卡。登录本身不需要预约
+     - 显卡硬限制：对 /dev/nvidia<N> 设 ACL，lab-users 组默认不能打开，只有今天预约了这张卡的成员例外
+       （没预约的卡 nvidia-smi 看不到、PyTorch 用不了）；另写 /etc/lab-gpu/<用户名>[.uuid]，登录时据此设置
+       CUDA_VISIBLE_DEVICES 作为双保险。登录本身不需要预约
+     - 平台下发“在没预约的卡上超过缓冲期”的进程清单时，核对后终止（SIGTERM → SIGKILL）并上报
      - 被停用的成员：锁定账号，保留家目录
   3. 另有两个后台线程：浏览请求长轮询（成员在网页上选文件时，列目录 / 统计大小）、各用户家目录占用统计
   4. 在后台线程执行成员发起的文件迁移，每隔几秒上报进度：
@@ -40,6 +42,7 @@ import os
 import pwd
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -49,7 +52,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.7.3"
+VERSION = "0.8.0"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -154,6 +157,28 @@ def has_processes(uid):
     return False
 
 
+def proc_owner(pid):
+    """显卡进程的（Linux 用户名, 所在目录）。
+    本机 /proc 里找不到这个进程（刚退出、在别的 PID 命名空间里，或进程已死但驱动还没释放显存）时用户名为空，
+    由平台显示“未知”；uid 在 /etc/passwd 里没有对应用户（如容器里 --user 指定的 uid）时写成 uid:数字。"""
+    try:
+        uid = os.stat("/proc/%d" % pid).st_uid
+    except (OSError, TypeError):
+        return "", ""
+    try:
+        user = pwd.getpwuid(uid).pw_name
+    except KeyError:
+        user = "uid:%d" % uid
+    path = ""
+    for link in ("cwd", "exe"):  # 进程所在的目录；读不到时退回可执行文件路径
+        try:
+            path = os.readlink("/proc/%d/%s" % (pid, link))
+            break
+        except OSError:
+            pass
+    return user, path
+
+
 class Agent(object):
     def __init__(self, cfg, dry_run=False):
         self.cfg = cfg
@@ -174,6 +199,13 @@ class Agent(object):
         self.pending_migrations = False
         self.wake = threading.Event()  # 扫描完成 / 迁移结束时立即触发一次同步
         self._size_cache = {}
+        self.gpu_uuid = {}         # nvidia-smi 序号 → UUID（上一次上报时采集）
+        self.killed = []           # 已终止、等待上报给平台的进程
+        self.killing = set()       # 正在终止的 pid
+        self._lock = threading.Lock()
+        self._warned_acl = False
+        self.relocating = {}       # uid → 改名后修正路径的后台线程
+        self.relocate_notes = {}   # uid → 修正没做完整时的提示
 
     # ---------------- 工具 ----------------
 
@@ -259,17 +291,7 @@ class Agent(object):
                 if len(r) < 3 or r[0] not in by_uuid:
                     continue
                 pid = self._num(r[1])
-                user, path = "?", ""
-                try:
-                    user = pwd.getpwuid(os.stat("/proc/%d" % pid).st_uid).pw_name
-                except (OSError, KeyError, TypeError):
-                    pass
-                for link in ("cwd", "exe"):  # 进程所在的目录；读不到时退回可执行文件路径
-                    try:
-                        path = os.readlink("/proc/%d/%s" % (pid, link))
-                        break
-                    except (OSError, TypeError):
-                        pass
+                user, path = proc_owner(pid)
                 by_uuid[r[0]]["processes"].append({"pid": pid, "user": user, "used_memory": self._num(r[2]), "path": path[:512]})
         except (OSError, RuntimeError, subprocess.TimeoutExpired) as e:
             log.warning("查询 GPU 进程失败: %s", e)
@@ -588,8 +610,14 @@ class Agent(object):
         return out
 
     def sync(self):
-        payload = {"hostname": socket.gethostname(), "agent_version": VERSION, "gpus": self.collect_gpus(),
+        gpus = self.collect_gpus()
+        self.gpu_uuid = {g["index"]: g["uuid"] for g in gpus if g.get("index") is not None} or self.gpu_uuid
+        payload = {"hostname": socket.gethostname(), "agent_version": VERSION, "gpus": gpus,
                    "system": self.collect_system()}
+        with self._lock:
+            sent_kills = list(self.killed)
+        if sent_kills:
+            payload["killed"] = sent_kills
         if self.accounts is not None:
             payload["accounts"] = self.accounts
             self._sent_accounts = self.accounts
@@ -598,7 +626,10 @@ class Agent(object):
             payload["browse_roots"] = self.browse_bases()
             payload["legacy"] = self.legacy
             payload["home_free"] = self.home_free
-        return self.post("/api/agent/sync", payload)
+        res = self.post("/api/agent/sync", payload)
+        with self._lock:  # 平台收到了才从待上报里去掉
+            self.killed = [k for k in self.killed if k not in sent_kills]
+        return res
 
     # ---------------- 账号对齐 ----------------
 
@@ -664,12 +695,15 @@ class Agent(object):
         return ok, out
 
     def rename_user(self, pw, new):
-        """改名 + 移动家目录，并在旧家目录位置留一个兼容链接（旧路径写死的代码、conda 环境仍可用）。"""
+        """改名 + 移动家目录，并修正家目录里写死的旧路径（conda、.bashrc 等，见 Relocator）。
+        旧家目录位置另留一个兼容链接，项目代码里写死的旧路径仍可用。"""
         old = pw.pw_name
         if self._exists(new):
             return "error", "本机已存在名为 %s 的账号，无法改名，请联系管理员" % new
         if has_processes(pw.pw_uid):
             return "pending", "旧账号 %s 还有进程在运行，进程全部结束后会自动改名（在此之前请继续用 %s 登录）" % (old, old)
+        if self.migration and self.migration.is_alive() and int(self.migration.t.get("uid", -1)) == pw.pw_uid:
+            return "pending", "文件迁移进行中，结束后会自动改名（在此之前请继续用 %s 登录）" % old
         ok, out = self.run("usermod", "-l", new, old)
         if not ok:
             return "error", "改名失败：" + out
@@ -678,15 +712,98 @@ class Agent(object):
                 self.run("groupmod", "-n", new, old)
         except KeyError:
             pass
+        for d in ("/var/spool/cron/crontabs", "/var/mail", "/var/lib/systemd/linger"):  # 以用户名命名的：定时任务、邮箱、常驻用户服务
+            src, dst = os.path.join(d, old), os.path.join(d, new)
+            if os.path.lexists(src) and not os.path.lexists(dst):
+                log.info("$ mv %s %s", src, dst)
+                if not self.dry_run:
+                    try:
+                        os.rename(src, dst)
+                    except OSError as e:
+                        log.warning("移动 %s 失败: %s", src, e)
         new_home = os.path.join(os.path.dirname(pw.pw_dir.rstrip("/")), new)
         if os.path.islink(new_home) and not self.dry_run:
             os.remove(new_home)  # 别人改名留下的兼容链接
         if os.path.basename(pw.pw_dir.rstrip("/")) == old and not os.path.lexists(new_home):
             ok, out = self.run("usermod", "-d", new_home, "-m", new)
-            if ok and not self.dry_run and not os.path.lexists(pw.pw_dir):
-                os.symlink(new_home, pw.pw_dir)
+            if ok and not self.dry_run:
+                if not os.path.lexists(pw.pw_dir):
+                    os.symlink(new_home, pw.pw_dir)
+                self.start_relocate(pw.pw_uid, pw.pw_dir.rstrip("/"), new_home)
         log.info("已将 %s 改名为 %s", old, new)
         return "ok", "已从 %s 改名" % old
+
+    # ---------------- 改名后的路径修正（后台） ----------------
+
+    def _relocate_marker(self, uid):
+        return os.path.join(STATE_DIR, "relocate-%d.json" % uid)
+
+    def start_relocate(self, uid, old_home, new_home):
+        """记下“这个家目录要把 old_home 改成 new_home”再开始做：Agent 中途重启后会接着做（改写是幂等的）。"""
+        try:
+            os.makedirs(STATE_DIR, 0o700, exist_ok=True)
+            with open(self._relocate_marker(uid), "w") as f:
+                json.dump({"old": old_home, "new": new_home}, f)
+        except OSError as e:
+            log.warning("无法记录路径修正任务: %s", e)
+        self.resume_relocations()
+
+    def resume_relocations(self):
+        if self.dry_run or not os.path.isdir(STATE_DIR):
+            return
+        for fn in os.listdir(STATE_DIR):
+            m = re.match(r"^relocate-(\d+)\.json$", fn)
+            if not m:
+                continue
+            uid = int(m.group(1))
+            t = self.relocating.get(uid)
+            if t and t.is_alive():
+                continue
+            try:
+                with open(os.path.join(STATE_DIR, fn)) as f:
+                    job = json.load(f)
+                pw = pwd.getpwuid(uid)
+                if os.path.realpath(pw.pw_dir) != os.path.realpath(job["new"]) or not os.path.isdir(job["new"]):
+                    raise ValueError("家目录已变化")
+            except (OSError, ValueError, KeyError):
+                self._relocate_done(uid)  # 任务作废
+                continue
+            t = threading.Thread(target=self._relocate_job, args=(pw, job["old"], job["new"]), daemon=True, name="relocate-%d" % uid)
+            self.relocating[uid] = t
+            t.start()
+
+    def _relocate_done(self, uid):
+        try:
+            os.remove(self._relocate_marker(uid))
+        except OSError:
+            pass
+
+    def _relocate_job(self, pw, old, new):
+        log.info("修正 %s 家目录里的旧路径 %s → %s", pw.pw_name, old, new)
+
+        def demote():
+            os.setgroups([])
+            os.setgid(pw.pw_gid)
+            os.setuid(pw.pw_uid)
+
+        env = {"HOME": new, "USER": pw.pw_name, "PATH": "/usr/local/bin:/usr/bin:/bin", "LANG": "C.UTF-8"}
+        try:
+            p = subprocess.run([sys.executable, os.path.abspath(__file__), "--relocate", old, new], preexec_fn=demote, cwd=new,
+                               env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=6 * 3600)
+            if p.returncode != 0:
+                raise RuntimeError(p.stderr.strip()[-300:])
+            res = json.loads(p.stdout.strip().splitlines()[-1])
+        except Exception as e:  # noqa: BLE001
+            log.warning("修正 %s 的旧路径失败: %s（旧路径仍可通过兼容链接使用，下次同步会重试）", pw.pw_name, e)
+            return  # 保留标记，下一轮同步重试
+        self._relocate_done(pw.pw_uid)
+        if res.get("failed_count"):
+            self.relocate_notes[pw.pw_uid] = "家目录里有 %d 处旧路径没能自动修正（如新用户名更长导致二进制文件放不下），请联系管理员" % res["failed_count"]
+            log.warning("未能修正：%s", res.get("failed"))
+        else:
+            self.relocate_notes.pop(pw.pw_uid, None)
+        log.info("%s 家目录路径修正完成，改了 %d 个文件", pw.pw_name, res.get("changed", 0))
+        self.wake.set()
 
     def set_group(self, name, group, member):
         current = name in group_members(group)
@@ -709,9 +826,11 @@ class Agent(object):
         for d in (KEYS_DIR, GPU_DIR):
             if not os.path.isdir(d) and not self.dry_run:
                 os.makedirs(d, 0o755)
+        self.resume_relocations()  # 先接上被中断的路径修正：它在跑时账号还有进程，不会被再次改名
         managed = group_members(GROUP_MANAGED)
         shadow = read_shadow()
         wanted, statuses = set(), []
+        allowed = {}  # 显卡序号 → 今天有权使用它的账号
         for u in users:
             name = u.get("username") or ""
             status = {"id": u.get("id"), "username": name, "state": "ok", "message": ""}
@@ -742,6 +861,16 @@ class Agent(object):
                 local = name
             status["username"] = local
             wanted.add(local)
+            try:
+                luid = pwd.getpwnam(local).pw_uid
+            except KeyError:
+                luid = None
+            if status["state"] == "ok" and luid is not None:
+                t = self.relocating.get(luid)
+                if t and t.is_alive():
+                    status["message"] = "正在修正家目录里的路径（conda、.bashrc 等），期间旧路径仍可用"
+                elif self.relocate_notes.get(luid):
+                    status["message"] = self.relocate_notes[luid]
 
             if shadow.get(local, ("", ""))[1] not in ("", "-1"):
                 self.run("chage", "-E", "-1", local)  # 之前被停用过，恢复
@@ -767,18 +896,156 @@ class Agent(object):
             # 登录权限：开关关闭时所有成员都能登录；开启时只有今天有预约的成员能登录
             self.set_group(local, GROUP_ACTIVE, active or not getattr(self, "require_reservation", False))
             gpu_path = os.path.join(GPU_DIR, local)
-            gpus = [str(int(i)) for i in u.get("gpus") or []]
-            # 没有预约：写空文件，登录后 CUDA_VISIBLE_DEVICES 为空、看不到任何卡（登录和文件迁移不受影响）
-            self.write_file(gpu_path, (",".join(gpus) + "\n") if active and gpus else "")
+            gpus = [str(int(i)) for i in u.get("gpus") or []] if active else []
+            for i in gpus:
+                allowed.setdefault(int(i), set()).add(local)
+            # 没有预约：写空文件（登录和文件迁移不受影响）。<用户名> 里是序号（lab-gpus 显示用），
+            # <用户名>.uuid 里是 UUID（登录时设置 CUDA_VISIBLE_DEVICES 用）：设备权限收紧后 CUDA 只枚举能打开的卡，
+            # 序号会重新编号，只有 UUID 在任何情况下都指向同一张卡
+            self.write_file(gpu_path, (",".join(gpus) + "\n") if gpus else "")
+            self.write_file(gpu_path + ".uuid", (",".join(self.gpu_uuid.get(int(i), i) for i in gpus) + "\n") if gpus else "")
 
         for name in group_members(GROUP_MANAGED) - wanted:
             self.disable_user(name, shadow)
         for d in (KEYS_DIR, GPU_DIR):
             if os.path.isdir(d):
                 for f in os.listdir(d):
-                    if f not in wanted and USERNAME_RE.match(f):
+                    base = f[:-5] if f.endswith(".uuid") else f
+                    if base not in wanted and USERNAME_RE.match(base):
                         self.remove_file(os.path.join(d, f))
+        self.apply_gpu_acl(allowed)
         self.accounts = statuses
+
+    # ---------------- 显卡的硬限制：设备文件权限 ----------------
+
+    def gpu_minors(self):
+        """nvidia-smi 序号 → /dev/nvidia<N> 的 N。N 是驱动里的设备号，不一定等于序号，按 PCI 地址查 /proc/driver/nvidia。"""
+        out = {}
+        for r in self._smi("--query-gpu=index,pci.bus_id"):
+            idx, bus = self._num(r[0]), r[1].lower()
+            if idx is None:
+                continue
+            dom, rest = bus.split(":", 1)
+            minor = idx
+            try:
+                with open("/proc/driver/nvidia/gpus/%s:%s/information" % (dom[-4:], rest)) as f:
+                    m = re.search(r"Device Minor:\s*(\d+)", f.read())
+                    if m:
+                        minor = int(m.group(1))
+            except (IOError, OSError):
+                pass
+            out[idx] = minor
+        return out
+
+    @staticmethod
+    def _read_acl(dev):
+        """{'u:名字': 权限, 'g:名字': 权限}（只含命名条目）。"""
+        p = subprocess.run(["getfacl", "-cp", dev], stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        if p.returncode != 0:
+            raise RuntimeError(p.stderr.strip())
+        out = {}
+        for line in p.stdout.splitlines():
+            f = line.split("#")[0].split()
+            if not f:
+                continue
+            kind, name, perm = (f[0].split(":") + ["", ""])[:3]
+            if name and kind in ("user", "group"):
+                out["%s:%s" % (kind[0], name)] = perm
+        return out
+
+    def apply_gpu_acl(self, allowed):
+        """硬限制：lab-users 组的成员默认不能打开任何 /dev/nvidia<N>，只有今天预约了这张卡的成员例外。
+        这样没预约的卡上 nvidia-smi 看不到、PyTorch 等也用不了，不依赖环境变量（环境变量用户自己能改）。
+        不属于 lab-users 的账号（root、gdm、旧共享账号、管理员）不受影响；已经打开设备的进程不受影响，
+        它们超过缓冲期后由平台通知 Agent 终止。设备文件在驱动重载 / 重启后会重建，所以每次同步都重新对齐。"""
+        if not (shutil.which("setfacl") and shutil.which("getfacl")):
+            if not self._warned_acl:
+                log.warning("未安装 acl（apt install acl）：无法限制显卡设备权限，目前只靠 CUDA_VISIBLE_DEVICES 做软限制")
+                self._warned_acl = True
+            return
+        try:
+            minors = self.gpu_minors()
+        except (OSError, RuntimeError, subprocess.TimeoutExpired, ValueError) as e:
+            log.warning("无法确定显卡设备号，跳过设备权限设置: %s", e)
+            return
+        managed = group_members(GROUP_MANAGED)
+        for idx, minor in sorted(minors.items()):
+            dev = "/dev/nvidia%d" % minor
+            if not os.path.exists(dev):
+                continue
+            want = allowed.get(idx, set()) & managed
+            try:
+                cur = self._read_acl(dev)
+            except (OSError, RuntimeError) as e:
+                log.warning("读取 %s 的权限失败: %s", dev, e)
+                continue
+            mods = []
+            if cur.get("g:" + GROUP_MANAGED) != "---":
+                mods.append("g:%s:---" % GROUP_MANAGED)
+            mods += ["u:%s:rw-" % u for u in sorted(want) if cur.get("u:" + u) != "rw-"]
+            if mods:
+                self.run("setfacl", "-m", ",".join(mods), dev)
+            for key in sorted(cur):  # 以前开放过、现在没预约的成员：去掉单独的条目，回到组的“禁止”
+                if key.startswith("u:") and key[2:] in managed and key[2:] not in want:
+                    self.run("setfacl", "-x", key, dev)
+
+    # ---------------- 终止超过缓冲期的未预约进程 ----------------
+
+    def handle_kills(self, items):
+        """平台下发的清单：这些进程在没预约的显卡上超过了缓冲期。逐个核对后终止（先 SIGTERM，不退出再 SIGKILL）。"""
+        todo = []
+        for it in items:
+            try:
+                todo.append((int(it["pid"]), str(it["user"]), int(it["gpu"])))
+            except (KeyError, TypeError, ValueError):
+                continue
+        todo = [t for t in todo if t[0] not in self.killing]
+        if not todo:
+            return
+        if self.dry_run:
+            for pid, user, gpu in todo:
+                log.info("[dry-run] 将终止 %s 在 GPU%d 上的进程 %d", user, gpu, pid)
+            return
+        self.killing.update(t[0] for t in todo)
+        threading.Thread(target=self._kill_job, args=(todo,), daemon=True, name="kill").start()
+
+    @staticmethod
+    def _gone(pid):
+        try:
+            with open("/proc/%d/stat" % pid) as f:
+                return f.read().rsplit(")", 1)[1].split()[0] == "Z"  # 僵尸进程已不占用显卡
+        except (IOError, OSError, IndexError):
+            return True
+
+    def _kill_job(self, todo):
+        try:
+            using = {(g["index"], p["pid"]) for g in self.collect_gpus() for p in g["processes"]}
+            managed = group_members(GROUP_MANAGED)
+            for pid, user, gpu in todo:
+                try:
+                    pw = pwd.getpwnam(user)
+                    # 只处理平台托管的普通成员账号；进程必须确实属于他、此刻仍在这张卡上（防止进程号被复用后误杀）
+                    if pw.pw_uid < 1000 or user not in managed or not self.can_manage(user):
+                        continue
+                    if os.stat("/proc/%d" % pid).st_uid != pw.pw_uid or (gpu, pid) not in using:
+                        continue
+                    log.warning("终止 %s 在 GPU%d 上的进程 %d（超过未预约缓冲期）", user, gpu, pid)
+                    os.kill(pid, signal.SIGTERM)
+                    for _ in range(20):
+                        if self._gone(pid):
+                            break
+                        time.sleep(1)
+                    else:
+                        os.kill(pid, signal.SIGKILL)
+                        time.sleep(3)
+                    if self._gone(pid):
+                        with self._lock:
+                            self.killed.append({"gpu": gpu, "pid": pid, "user": user})
+                except (KeyError, OSError) as e:
+                    log.info("跳过进程 %d: %s", pid, e)
+        finally:
+            self.killing.difference_update(t[0] for t in todo)
+            self.wake.set()
 
     # ---------------- 迁移 ----------------
 
@@ -810,6 +1077,7 @@ class Agent(object):
         log.log(logging.INFO if summary != self._last_summary else logging.DEBUG, "同步成功：%s", summary)
         self._last_summary = summary
         self.reconcile(users)
+        self.handle_kills(state.get("kill") or [])
         if self.accounts != getattr(self, "_sent_accounts", None):
             self.sync()  # 账号状态有变化（新建、改名、出错），立即上报给平台
         listed = state.get("migrations") or []
@@ -886,6 +1154,192 @@ def binary_relocate(data, rx, new):
                 return None
             out[i:end + delta] = new_seg
         pos = i + len(new_seg)
+
+
+# ---------------- 改名后修正家目录里写死的路径 ----------------
+# 家目录从 /home/旧名 搬到 /home/新名后，里面这些内容仍写着旧路径：conda 的 shebang、conda-meta、.bashrc 里的 conda init、
+# ~/.conda/environments.txt、Jupyter kernel、venv 的 activate 等。旧路径靠兼容链接还能用，但旧名字一旦分给别人
+# 链接就没了，所以改名时把这些路径一并改成新的。以成员本人的身份执行（不跟随符号链接，家目录里的任何把戏只影响他自己）。
+RELOCATE_FILES = (".bashrc", ".bash_profile", ".bash_login", ".bash_aliases", ".profile", ".zshrc", ".zprofile", ".zshenv",
+                  ".inputrc", ".gitconfig", ".vimrc", ".tmux.conf", ".screenrc", ".condarc", ".mambarc", ".wgetrc", ".ssh/config")
+RELOCATE_DIRS = (".config", ".conda", ".ipython", ".jupyter", ".local", ".vim", ".pip",
+                 ".vscode-server/data/Machine", ".vscode-server/data/User")
+RELOCATE_SKIP_EXT = {".so", ".a", ".pyc", ".pyo", ".png", ".jpg", ".jpeg", ".gif", ".gz", ".bz2", ".xz", ".zst", ".zip",
+                     ".whl", ".tar", ".conda", ".pdf", ".npy", ".npz", ".h5", ".ckpt", ".safetensors", ".bin", ".onnx"}
+RELOCATE_MAX_TEXT = 4 * 1024 * 1024
+RELOCATE_MAX_BIN = 256 * 1024 * 1024
+RELOCATE_TMP = ".lab-relocate-tmp"
+
+
+def path_regex(path):
+    """匹配完整路径：前面不能是字母数字（避免 /mnt/home/x 误伤），后面也不能（避免 /home/ubuntu 误伤 /home/ubuntu602）。"""
+    return re.compile(rb"(?<![\w.-])" + re.escape(path.encode()) + rb"(?![\w.-])")
+
+
+class Relocator(object):
+    def __init__(self, old, new):
+        self.rx = path_regex(old)
+        self.new = new.encode()
+        self.changed = 0
+        self.failed = []       # 路径太长放不下的二进制文件 / 写不了的文件
+        self.prefixes = {}     # conda 环境根目录 → conda-meta 里记录的、可做二进制替换的文件
+
+    def _sub(self, data):
+        return self.rx.sub(lambda _m: self.new, data)
+
+    def link(self, path):
+        try:
+            target = os.readlink(path)
+        except OSError:
+            return
+        b = target.encode("utf-8", "surrogateescape")
+        nb = self._sub(b)
+        if nb == b:
+            return
+        tmp = path + RELOCATE_TMP
+        try:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            os.symlink(nb.decode("utf-8", "surrogateescape"), tmp)
+            os.replace(tmp, path)
+            self.changed += 1
+        except OSError as e:
+            self.failed.append("%s（%s）" % (path, e.strerror))
+
+    def _binary_set(self, path):
+        best = None
+        for p in self.prefixes:
+            if path.startswith(p + "/") and (best is None or len(p) > len(best)):
+                best = p
+        return (self.prefixes[best], path[len(best) + 1:]) if best else (None, None)
+
+    def file(self, path, st):
+        if os.path.splitext(path)[1].lower() in RELOCATE_SKIP_EXT:
+            return
+        binset, rel = self._binary_set(path)
+        is_bin_ok = binset is not None and rel in binset
+        if st.st_size == 0 or st.st_size > (RELOCATE_MAX_BIN if is_bin_ok else RELOCATE_MAX_TEXT):
+            return
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_NONBLOCK", 0))
+            with os.fdopen(fd, "rb") as f:
+                fst = os.fstat(f.fileno())
+                if not stat.S_ISREG(fst.st_mode):
+                    return
+                data = f.read()
+        except OSError:
+            return
+        if not self.rx.search(data):
+            return
+        if b"\0" in data:
+            if not is_bin_ok:
+                return  # 其他二进制文件（.pyc 等）格式不同，改写会损坏，原样保留
+            out = binary_relocate(data, self.rx, self.new)
+            if out is None:
+                self.failed.append("%s（新路径比原路径长太多）" % path)
+                return
+        else:
+            out = self._sub(data)
+        tmp = path + RELOCATE_TMP
+        try:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            wfd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(wfd, "wb") as w:
+                w.write(out)
+            os.chmod(tmp, stat.S_IMODE(fst.st_mode))
+            os.utime(tmp, ns=(fst.st_atime_ns, fst.st_mtime_ns))
+            os.rename(tmp, path)  # 原子替换：正在运行的程序不受影响；同时断开与 conda 包缓存的硬链接
+            self.changed += 1
+        except OSError as e:
+            self.failed.append("%s（%s）" % (path, e.strerror))
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+
+    def walk(self, top):
+        try:
+            st = os.lstat(top)
+        except OSError:
+            return
+        if stat.S_ISLNK(st.st_mode):
+            return self.link(top)
+        if stat.S_ISREG(st.st_mode):
+            return self.file(top, st)
+        for dirpath, dirnames, filenames in os.walk(top):
+            if "conda-meta" in dirnames and dirpath not in self.prefixes:
+                self.prefixes[dirpath] = conda_binary_prefix_files(dirpath)
+            # 包缓存里装的是安装前的占位路径，不含家目录路径，也最大；.pyc 不需要改
+            dirnames[:] = [d for d in dirnames if d != "__pycache__" and not (d == "pkgs" and dirpath in self.prefixes)]
+            for name in dirnames + filenames:
+                p = os.path.join(dirpath, name)
+                try:
+                    st = os.lstat(p)
+                except OSError:
+                    continue
+                if stat.S_ISLNK(st.st_mode):
+                    self.link(p)
+                elif stat.S_ISREG(st.st_mode):
+                    self.file(p, st)
+
+    @staticmethod
+    def find_roots(home, limit=20000):
+        """家目录里的 conda 安装目录（第一层）和 Python 虚拟环境（含 pyvenv.cfg，最多找 4 层）。"""
+        roots, seen = [], 0
+        stack = [(home, 0)]
+        while stack and seen < limit:
+            d, depth = stack.pop()
+            try:
+                names = os.listdir(d)
+            except OSError:
+                continue
+            seen += 1
+            if "pyvenv.cfg" in names:
+                roots.append(d)
+                continue
+            if depth == 0:
+                roots += [os.path.join(d, n) for n in names
+                          if not n.startswith(".") and not os.path.islink(os.path.join(d, n)) and is_conda_root(os.path.join(d, n))]
+            if depth >= 4:
+                continue
+            for n in names:
+                p = os.path.join(d, n)
+                hidden = n.startswith(".") and n not in (".venv", ".env")
+                if hidden or n in ("node_modules", "__pycache__", "envs", "pkgs") or os.path.islink(p) or not os.path.isdir(p):
+                    continue
+                if depth == 0 and is_conda_root(p):
+                    continue
+                stack.append((p, depth + 1))
+        return roots
+
+    def run(self, home):
+        targets = [os.path.join(home, r) for r in RELOCATE_FILES + RELOCATE_DIRS]
+        try:
+            for n in os.listdir(home):  # 家目录第一层的符号链接（如 ~/data → /home/旧名/...）
+                p = os.path.join(home, n)
+                if os.path.islink(p):
+                    self.link(p)
+        except OSError:
+            pass
+        targets += self.find_roots(home)
+        for t in targets:
+            self.walk(t)
+        return {"changed": self.changed, "failed": self.failed[:20], "failed_count": len(self.failed)}
+
+
+def relocate_main(old, new):
+    """以成员身份在子进程里执行：改写 new 家目录里的 old 路径，结果以 JSON 打印。"""
+    try:
+        os.nice(10)
+    except OSError:
+        pass
+    print(json.dumps(Relocator(old, new).run(new), ensure_ascii=False))
+
 
 
 # 以成员身份执行：把准备好的文件放进家目录（已有的同名文件先备份）。
@@ -1583,8 +2037,11 @@ def main():
     ap.add_argument("--config", default=CONFIG_PATH)
     ap.add_argument("--once", action="store_true", help="只同步一次")
     ap.add_argument("--dry-run", action="store_true", help="只打印操作，不修改系统")
+    ap.add_argument("--relocate", nargs=2, metavar=("OLD_HOME", "NEW_HOME"), help=argparse.SUPPRESS)  # 内部使用：改名后修正路径
     ap.add_argument("--report-only", action="store_true", help="只打印采集到的 GPU 信息")
     args = ap.parse_args()
+    if args.relocate:
+        return relocate_main(*args.relocate)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
     with open(args.config) as f:
@@ -1600,6 +2057,8 @@ def main():
         agent.once()
         if agent.migration:
             agent.migration.join()
+        for t in list(agent.relocating.values()):
+            t.join()
         return
     threading.Thread(target=agent.candidate_loop, daemon=True, name="candidates").start()
     threading.Thread(target=agent.usage_loop, daemon=True, name="usage").start()

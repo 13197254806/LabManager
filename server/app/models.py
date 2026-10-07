@@ -213,6 +213,21 @@ class Setting(Base):
     value: Mapped[str] = mapped_column(Text, default="")
 
 
+class GpuViolation(Base):
+    """某个成员在某张没预约的卡上持续有进程：记下第一次发现的时间，超过缓冲期后由 Agent 终止这些进程。
+    进程消失或成员补上预约时记录删除，缓冲期重新计算。"""
+
+    __tablename__ = "gpu_violations"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    server_id: Mapped[int] = mapped_column(ForeignKey("servers.id", ondelete="CASCADE"))
+    gpu_index: Mapped[int] = mapped_column(Integer)
+    username: Mapped[str] = mapped_column(String(32))
+    first_seen: Mapped[datetime] = mapped_column(DateTime, default=now)
+
+    __table_args__ = (UniqueConstraint("server_id", "gpu_index", "username"),)
+
+
 class Notice(Base):
     """已发送通知的去重记录。"""
 

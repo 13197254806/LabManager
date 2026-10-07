@@ -281,7 +281,7 @@ function renderBanner() {
   const me = state.me;
   const missing = [];
   if (!me.linux_username) missing.push("设置 Linux 用户名");
-  if (!me.has_password && !me.key_count) missing.push("设置登录密码或添加 SSH 公钥");
+  if (!me.has_password && !me.key_count) missing.push("设置服务器密码或添加 SSH 公钥");
   const el = $("#setup-banner");
   if (!missing.length) return el.classList.add("hidden");
   el.innerHTML = `你还需要 <b>${missing.join("、")}</b>，否则无法登录服务器。<a href="#" id="banner-go">去设置 →</a>`;
@@ -355,10 +355,17 @@ function serverStats(s) {
   return `<div class="srv-stats">${parts.join("")}</div>`;
 }
 
+// 进程属主：本机 /proc 里找不到这个进程时（旧版 Agent 上报 "?"）显示“未知”，悬停说明原因
+function procUser(p) {
+  if (p.user && p.user !== "?") return esc(p.user);
+  const tip = `进程 ${p.pid} 在服务器的 /proc 里找不到：可能刚刚退出、运行在别的 PID 命名空间（容器）里，或进程已结束但驱动还没释放显存。在服务器上执行 sudo fuser -v /dev/nvidia* 可以进一步排查。`;
+  return `<span class="muted" title="${esc(tip)}">未知</span>`;
+}
+
 // 占用某张显卡的进程：每个进程一行（Linux 用户名、进程号、位置、显存），位置是进程所在目录
 function procTable(procs) {
   if (!procs.length) return `<div class="proc-empty">当前没有进程占用这张显卡</div>`;
-  const rows = procs.map((p) => `<tr><td>${esc(p.user || "?")}</td><td>${p.pid}</td><td class="path">${esc(p.path || "-")}</td><td>${p.used_memory == null ? "-" : `${gb(p.used_memory)} GB`}</td></tr>`).join("");
+  const rows = procs.map((p) => `<tr><td>${procUser(p)}</td><td>${p.pid}</td><td class="path">${esc(p.path || "-")}</td><td>${p.used_memory == null ? "-" : `${gb(p.used_memory)} GB`}</td></tr>`).join("");
   return `<table class="proc-table"><tr><th>Linux 用户名</th><th>进程号</th><th>位置</th><th>显存占用</th></tr>${rows}</table>`;
 }
 
@@ -1172,6 +1179,22 @@ document.addEventListener("toggle", (e) => {
   if (d.open) migOpen.add(id); else migOpen.delete(id);
 }, true);
 
+// 「文件迁移」卡片：按创建时间从新到旧排列，每页 5 条
+const MIG_PAGE_SIZE = 5;
+let migPage = 0;
+function renderMyMigrations() {
+  const all = [...state.migrations].sort((a, b) => (b.created_at < a.created_at ? -1 : b.created_at > a.created_at ? 1 : b.id - a.id));
+  const pages = Math.max(1, Math.ceil(all.length / MIG_PAGE_SIZE));
+  migPage = Math.min(migPage, pages - 1);
+  const rows = all.slice(migPage * MIG_PAGE_SIZE, (migPage + 1) * MIG_PAGE_SIZE);
+  const pager = pages > 1
+    ? `<div class="pager"><button class="btn small" data-mig-page="${migPage - 1}" ${migPage === 0 ? "disabled" : ""}>上一页</button>
+        <span>第 ${migPage + 1} / ${pages} 页 · 共 ${all.length} 条</span>
+        <button class="btn small" data-mig-page="${migPage + 1}" ${migPage >= pages - 1 ? "disabled" : ""}>下一页</button></div>`
+    : "";
+  $("#my-migrations").innerHTML = all.length ? rows.map((t) => taskHtml(t)).join("") + pager : `<p class="muted small">还没有迁移记录。</p>`;
+}
+
 let migTimer = null;
 async function refreshMigrations() {
   clearTimeout(migTimer);
@@ -1190,13 +1213,19 @@ async function refreshMigrations() {
   } else {
     chip.classList.add("hidden");
   }
-  const list = $("#my-migrations");
-  list.innerHTML = state.migrations.length ? state.migrations.map((t) => taskHtml(t)).join("") : `<p class="muted small">还没有迁移记录。</p>`;
+  renderMyMigrations();
   const wiz = $("#onboard-migrations");
   if (wiz) wiz.innerHTML = state.migrations.map((t) => taskHtml(t)).join("");
   // 有进行中的任务时每 3 秒刷新一次
   if (active.length) migTimer = setTimeout(refreshMigrations, 3000);
 }
+
+document.addEventListener("click", (e) => {
+  const pg = e.target.closest("[data-mig-page]");
+  if (!pg || pg.disabled) return;
+  migPage = Number(pg.dataset.migPage);
+  renderMyMigrations();
+});
 
 document.addEventListener("click", async (e) => {
   const el = e.target.closest("[data-mig-cancel],[data-mig-retry],[data-mig-approve],[data-mig-reject]");
@@ -1552,9 +1581,9 @@ function renderOnboarding() {
       <label>Linux 用户名<input id="ob-username" placeholder="小写字母开头，如 zhangsan" value="${esc(me.linux_username || "")}" required></label>`;
   } else if (step === 1) {
     body.innerHTML = `<h2>设置登录方式</h2>
-      <p class="muted small">密码和 SSH 公钥至少设置一种，两种都设也可以。</p>
+      <p class="muted small">服务器密码和 SSH 公钥至少设置一种，两种都设也可以。</p>
       <form id="ob-pw" class="stack">
-        <div class="label">登录密码 ${me.has_password ? `<span class="badge ok">已设置</span>` : ""}</div>
+        <div class="label">服务器密码 ${me.has_password ? `<span class="badge ok">已设置</span>` : ""}</div>
         <input type="password" name="password" placeholder="至少 8 位" autocomplete="new-password">
         <input type="password" name="confirm" placeholder="再输入一次" autocomplete="new-password">
         <div class="label">SSH 公钥（可选）${me.key_count ? `<span class="badge ok">已添加 ${me.key_count} 个</span>` : ""}</div>
@@ -1748,6 +1777,7 @@ async function loadAdmin() {
       r.require_reservation_to_login.checked = settings.require_reservation_to_login === "1";
       r.restrict_to_admin_tenant.checked = settings.restrict_to_admin_tenant === "1";
       r.refresh_interval_seconds.value = settings.refresh_interval_seconds;
+      r.process_kill_grace_hours.value = settings.process_kill_grace_hours;
       setRulesDirty(false);
     }
   } catch (err) {
@@ -1961,6 +1991,7 @@ $("#rules-form").addEventListener("submit", async (e) => {
         require_reservation_to_login: f.require_reservation_to_login.checked ? "1" : "0",
         restrict_to_admin_tenant: f.restrict_to_admin_tenant.checked ? "1" : "0",
         refresh_interval_seconds: f.refresh_interval_seconds.value,
+        process_kill_grace_hours: f.process_kill_grace_hours.value,
       },
     });
     state.config = await api("/api/config");
