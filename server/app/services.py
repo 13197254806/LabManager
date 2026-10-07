@@ -12,7 +12,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from . import feishu
 from .config import now, settings, today
-from .models import GPU, MigrationTask, Notice, Reservation, Server, Setting, User
+from .models import GPU, GpuViolation, MigrationTask, Notice, Reservation, Server, Setting, User
 
 # 预约的“检查冲突 + 写入”必须串行（网页请求和自动续约共用），避免两个人抢到同一张卡。
 # 依赖 web 以单进程运行（docker-compose 里就是单 worker）。
@@ -254,8 +254,39 @@ def book_long_term(db: Session, owner: User, gpus: list[GPU], note: str = "") ->
 
 def gpu_alerts(gpu: GPU, holders: set[str]) -> list[str]:
     """GPU 上有进程、但进程属主不是今天预约这张卡的人 → 返回这些用户名。"""
-    users = {p.get("user") or "?" for p in gpu.processes}
+    users = set()
+    for p in gpu.processes:
+        user = p.get("user")
+        # 属主未知（本机 /proc 里找不到该进程；旧版 Agent 上报 "?"）：单独标出进程号，不冒充成某个用户
+        users.add(user if user and user != "?" else f"未知进程 PID {p.get('pid')}")
     return sorted(u for u in users if u not in holders)
+
+
+def track_violations(db: Session, server: Server, holders: dict[int, set[str]]) -> list[dict]:
+    """记录“成员在没预约的卡上有进程”的持续时间，返回超过缓冲期、应由 Agent 终止的进程 [{gpu, pid, user}]。
+    只处理平台上有对应账号的成员；属主未知的进程从不终止。"""
+    grace = get_int_setting(db, "process_kill_grace_hours")
+    t = now()
+    known = {u for (u,) in db.execute(select(User.linux_username).where(User.linux_username.is_not(None)))}
+    current: dict[tuple[int, str], list[int]] = {}
+    for g in server.gpus:
+        for p in g.processes:
+            user = p.get("user")
+            if user in known and user not in holders.get(g.id, set()) and p.get("pid") is not None:
+                current.setdefault((g.index, user), []).append(p["pid"])
+    rows = {(v.gpu_index, v.username): v for v in db.scalars(select(GpuViolation).where(GpuViolation.server_id == server.id))}
+    for key, v in rows.items():
+        if key not in current:
+            db.delete(v)
+    kills = []
+    for (idx, user), pids in current.items():
+        v = rows.get((idx, user))
+        if v is None:
+            db.add(GpuViolation(server_id=server.id, gpu_index=idx, username=user, first_seen=t))
+        elif grace > 0 and t - v.first_seen >= timedelta(hours=grace):
+            kills += [{"gpu": idx, "pid": pid, "user": user} for pid in pids]
+    db.commit()
+    return kills
 
 
 def desired_state(db: Session, server: Server) -> list[dict]:
@@ -314,7 +345,7 @@ DEFAULT_SETTINGS = {
         "你好，欢迎加入实验室！下面是新人必读材料，请在第一周内看完：\n"
         "- **新人指南**：实验室日常、组会安排、常用联系人\n"
         "- **GPU 使用说明**：如何预约显卡、登录服务器\n\n"
-        "使用 GPU 前，请先打开实验室平台，按引导设置 Linux 用户名和登录密码；以前在共享账号（如 ubuntu）里的配置、conda 环境和项目文件，可以在平台上迁移到自己的账号下。"
+        "使用 GPU 前，请先打开实验室平台，按引导设置 Linux 用户名和服务器密码；以前在共享账号（如 ubuntu）里的配置、conda 环境和项目文件，可以在平台上迁移到自己的账号下。"
     ),
     # 每行一个按钮：按钮文字|链接。{base_url} 会被替换为平台地址
     "welcome_links": "打开实验室平台|{base_url}\n新人指南|https://example.feishu.cn/wiki/xxxx",
@@ -328,6 +359,8 @@ DEFAULT_SETTINGS = {
     "require_reservation_to_login": "0",
     # 网页自动刷新（GPU 日历、管理页）的间隔；Agent 也按这个间隔上报，让页面上的数据足够新（秒）
     "refresh_interval_seconds": "10",
+    # 成员在没预约的显卡上还有进程（预约结束后没停掉）：超过这么多小时由 Agent 终止并飞书通知；0 = 不自动终止
+    "process_kill_grace_hours": "24",
     # 1：只允许和管理员同一个飞书组织的成员登录（FEISHU_TENANT_KEY 配置了就以它为准）
     "restrict_to_admin_tenant": "1",
 }
@@ -449,9 +482,28 @@ def notify_violation(db: Session, server_id: int, gpu_index: int, username: str)
     md = (
         f"检测到你在 **{server.name}** 的 **GPU{gpu.index}** 上运行程序，但今天这张卡不在你的预约里。\n"
         "请尽快结束该进程，或在平台上补一个预约（如果这张卡空闲）。\n"
-        "提示：登录后执行 `lab-gpus` 可以查看你当前可用的卡。"
     )
+    grace = get_int_setting(db, "process_kill_grace_hours")
+    first = db.scalar(select(GpuViolation.first_seen).where(
+        GpuViolation.server_id == server.id, GpuViolation.gpu_index == gpu.index, GpuViolation.username == username))
+    if grace > 0 and first:
+        md += f"**{(first + timedelta(hours=grace)).strftime('%Y-%m-%d %H:%M')}** 之前没有处理的话，这些进程会被自动终止（未保存的结果会丢失）。\n"
+    md += "提示：登录后执行 `lab-gpus` 可以查看你当前可用的卡。"
     feishu.send_card(user.open_id, feishu.build_card("⚠️ 未预约使用 GPU", md, [("去预约", settings.base_url)], template="orange"))
+
+
+def notify_killed(db: Session, server_id: int, gpu_index: int, username: str, pids: list[int]):
+    user = db.scalar(select(User).where(User.linux_username == username))
+    server = db.get(Server, server_id)
+    if not user or not server:
+        return
+    grace = get_int_setting(db, "process_kill_grace_hours")
+    md = (
+        f"你在 **{server.name}** 的 **GPU{gpu_index}** 上的进程（PID {', '.join(str(p) for p in sorted(pids))}）"
+        f"在没有预约这张卡的情况下运行超过了 {grace} 小时，已被自动终止。\n"
+        "需要继续使用请先在平台上预约这张卡。"
+    )
+    feishu.send_card(user.open_id, feishu.build_card("⛔ 未预约的 GPU 进程已被终止", md, [("去预约", settings.base_url)], template="red"))
 
 
 def send_expiry_reminders(db: Session) -> int:

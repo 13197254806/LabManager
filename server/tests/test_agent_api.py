@@ -168,3 +168,74 @@ def test_login_restricted_to_admin_tenant(monkeypatch):
     # 环境变量优先
     monkeypatch.setattr(auth.settings, "feishu_tenant_key", "T9", raising=False)
     assert not callback("ou_admin", "T1")[0]
+
+
+def test_unknown_gpu_process_owner_is_not_shown_as_a_user(admin, alice, server):
+    _, token = server
+    agent = TestClient(app)
+    body = {"gpus": [{"index": 0, "uuid": "u0", "name": "A", "memory_total": 1, "memory_used": 1, "utilization": 1,
+                      "processes": [{"pid": 81315, "user": "", "used_memory": 1}, {"pid": 7, "user": "?", "used_memory": 1}]}]}
+    assert agent.post("/api/agent/sync", json=body, headers=agent_headers(token)).status_code == 200
+    cal = alice.get("/api/calendar").json()
+    assert cal["servers"][0]["gpus"][0]["alerts"] == ["未知进程 PID 7", "未知进程 PID 81315"]
+
+
+def _sync(token, procs, **extra):
+    body = {"gpus": [{"index": 0, "uuid": "u0", "name": "A", "memory_total": 1, "memory_used": 1, "utilization": 1,
+                      "processes": procs}], **extra}
+    r = TestClient(app).post("/api/agent/sync", json=body, headers=agent_headers(token))
+    assert r.status_code == 200, r.text
+    return r.json()
+
+
+def test_unreserved_process_is_killed_only_after_grace(admin, alice, server, db):
+    from datetime import datetime
+    from app.models import GpuViolation
+
+    _, token = server
+    procs = [{"pid": 11, "user": "alice", "used_memory": 1}, {"pid": 12, "user": "alice", "used_memory": 1},
+             {"pid": 13, "user": "", "used_memory": 1}, {"pid": 14, "user": "stranger", "used_memory": 1}]
+    assert _sync(token, procs)["kill"] == []                       # 刚发现：开始计时
+    v = db.query(GpuViolation).one()
+    assert (v.username, v.gpu_index) == ("alice", 0)               # 属主未知 / 平台上没有的账号不记录
+    v.first_seen -= timedelta(hours=23)
+    db.commit()
+    assert _sync(token, procs)["kill"] == []                       # 缓冲期内
+    v = db.query(GpuViolation).one()
+    v.first_seen -= timedelta(hours=2)
+    db.commit()
+    kill = _sync(token, procs)["kill"]
+    assert sorted(k["pid"] for k in kill) == [11, 12] and all(k["user"] == "alice" and k["gpu"] == 0 for k in kill)
+
+    # 缓冲时间设为 0：不自动终止
+    assert admin.put("/api/admin/settings", json={"process_kill_grace_hours": "0"}).status_code == 200
+    assert _sync(token, procs)["kill"] == []
+    assert admin.put("/api/admin/settings", json={"process_kill_grace_hours": "24"}).status_code == 200
+
+    # 进程没了，记录清掉；之后再出现重新计时
+    assert _sync(token, [])["kill"] == []
+    assert db.query(GpuViolation).count() == 0
+    assert _sync(token, procs)["kill"] == []
+
+    # 补了预约：不再算违规
+    gid = admin.get("/api/calendar").json()["servers"][0]["gpus"][0]["id"]
+    alice.post("/api/reservations", json={"gpu_ids": [gid], "start_date": str(today()), "end_date": str(today())})
+    assert _sync(token, procs)["kill"] == []
+    assert db.query(GpuViolation).count() == 0
+    # Agent 上报已终止的进程：平台正常收下（飞书未配置时不发送）
+    assert _sync(token, [], killed=[{"gpu": 0, "pid": 11, "user": "alice"}])["kill"] == []
+
+
+def test_editing_reservation_sends_no_card(admin, alice, server, monkeypatch):
+    from app import services
+
+    sent = []
+    monkeypatch.setattr(services, "notify_booked", lambda *a, **k: sent.append(a[2:]))
+    gid = admin.get("/api/calendar").json()["servers"][0]["gpus"][0]["id"]
+    d = today() + timedelta(days=1)
+    r = alice.post("/api/reservations", json={"gpu_ids": [gid], "start_date": str(d), "end_date": str(d)})
+    assert r.status_code == 200 and len(sent) == 1               # 新建：发
+    rid = r.json()[0]["id"]
+    assert alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d + timedelta(days=1))}).status_code == 200
+    assert alice.delete(f"/api/reservations/{rid}").status_code == 200
+    assert len(sent) == 1                                          # 修改、删除：不发

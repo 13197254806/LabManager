@@ -401,9 +401,7 @@ class ReservationPatch(BaseModel):
 
 
 @router.patch("/reservations/{rid}")
-def update_reservation(
-    rid: int, body: ReservationPatch, bg: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)
-):
+def update_reservation(rid: int, body: ReservationPatch, user: User = Depends(current_user), db: Session = Depends(get_db)):
     with _booking_lock:
         r = _own_reservation(db, rid, user)
         if r.end_date < today():
@@ -425,7 +423,6 @@ def update_reservation(
         if (span_start, span_end) != (start, end):
             _check_rules(db, user, span_start, span_end, is_new_start=False)
         _check_conflicts(db, [r.gpu_id], start, end, r.user_id, exclude_id=r.id, allow_self=True)
-        changed = (start, end) != (r.start_date, r.end_date)
         r.start_date, r.end_date = start, end
         if body.note is not None:
             r.note = body.note.strip()
@@ -435,8 +432,6 @@ def update_reservation(
         rid_after = services.merge_reservations(db, r.user_id, r.gpu_id).get(r.id, r.id)
         db.commit()
         r = db.get(Reservation, rid_after)
-    if changed:
-        bg.add_task(_bg, services.notify_booked, r.user_id, [r.id], "预约已修改")
     return res_out(r, user)
 
 
@@ -445,9 +440,7 @@ class ReservationSplit(BaseModel):
 
 
 @router.post("/reservations/{rid}/split")
-def split_reservation(
-    rid: int, body: ReservationSplit, bg: BackgroundTasks, user: User = Depends(current_user), db: Session = Depends(get_db)
-):
+def split_reservation(rid: int, body: ReservationSplit, user: User = Depends(current_user), db: Session = Depends(get_db)):
     """把跨过今天的预约拆成两条：今天之前的部分保留为已结束的历史（原记录），从 from_date 起另存一条新的，
     中间（今天 ~ from_date 前一天）释放掉。用来在日历上拖动“今天”这一条边界，缩短后半段的开始日期。"""
     with _booking_lock:
@@ -466,7 +459,6 @@ def split_reservation(
         db.add(new)
         db.commit()
         db.refresh(new)
-    bg.add_task(_bg, services.notify_booked, new.user_id, [new.id], "预约已修改")
     return res_out(new, user)
 
 
@@ -596,13 +588,13 @@ SETTING_KEYS = (
     "lab_name", "welcome_title", "welcome_markdown", "welcome_links", "welcome_chat_ids",
     "max_reservation_days", "max_advance_days", "max_gpu_sharers", "reminder_hour",
     "auto_renew_before_hours", "auto_renew_days", "migration_requires_approval", "require_reservation_to_login",
-    "refresh_interval_seconds", "restrict_to_admin_tenant",
+    "refresh_interval_seconds", "restrict_to_admin_tenant", "process_kill_grace_hours",
 )
 INT_SETTINGS = {
     "max_reservation_days": (1, 365), "max_advance_days": (0, 365), "max_gpu_sharers": (1, 10), "reminder_hour": (0, 23),
     "auto_renew_before_hours": (1, 24 * 14), "auto_renew_days": (1, 60),
     "migration_requires_approval": (0, 1), "require_reservation_to_login": (0, 1), "restrict_to_admin_tenant": (0, 1),
-    "refresh_interval_seconds": (3, 600),
+    "refresh_interval_seconds": (3, 600), "process_kill_grace_hours": (0, 24 * 30),
 }
 
 
@@ -676,7 +668,9 @@ def task_out(t: MigrationTask) -> dict:
 
 @router.get("/me/migrations")
 def my_migrations(user: User = Depends(current_user), db: Session = Depends(get_db)):
-    tasks = db.scalars(select(MigrationTask).where(MigrationTask.user_id == user.id).order_by(MigrationTask.id.desc()))
+    tasks = db.scalars(
+        select(MigrationTask).where(MigrationTask.user_id == user.id).order_by(MigrationTask.created_at.desc(), MigrationTask.id.desc())
+    )
     return [task_out(t) for t in tasks]
 
 
@@ -879,6 +873,12 @@ class CandidateIn(BaseModel):
     is_dir: bool = True
 
 
+class KilledIn(BaseModel):
+    gpu: int
+    pid: int
+    user: str = ""
+
+
 class AgentReport(BaseModel):
     hostname: str = ""
     agent_version: str = ""
@@ -889,6 +889,7 @@ class AgentReport(BaseModel):
     legacy: list[dict] | None = None
     home_free: int | None = None
     system: dict | None = None
+    killed: list[KilledIn] | None = None  # 上一轮按平台清单终止的进程
 
 
 def _agent_server(db: Session, authorization: str) -> Server:
@@ -963,9 +964,15 @@ def agent_sync(
     d = today()
     for r in services.overlapping(db, d, d, server_id=server.id):
         holders.setdefault(r.gpu_id, set()).add(r.user.linux_username)
+    kill = services.track_violations(db, server, holders)
     for g in server.gpus:
         for name in services.gpu_alerts(g, holders.get(g.id, set())):
             bg.add_task(_bg, services.notify_violation, server.id, g.index, name)
+    done: dict[tuple[int, str], list[int]] = {}
+    for k in body.killed or []:
+        done.setdefault((k.gpu, k.user), []).append(k.pid)
+    for (gpu_index, username), pids in done.items():
+        bg.add_task(_bg, services.notify_killed, server.id, gpu_index, username, pids)
 
     return {
         "server": server.name,
@@ -976,6 +983,8 @@ def agent_sync(
         # Agent 按这个间隔（秒）同步 / 上报，和网页刷新间隔一致
         "interval": services.get_int_setting(db, "refresh_interval_seconds"),
         "migrations": services.pending_migrations(db, server),
+        # 在没预约的卡上超过缓冲期的进程：Agent 核对后终止，下一轮同步时上报结果
+        "kill": kill,
     }
 
 
