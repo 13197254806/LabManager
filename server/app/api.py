@@ -975,6 +975,13 @@ def agent_sync(
                 {"user": str(u.get("user", ""))[:64], "size": int(u["size"])}
                 for u in users[:100] if isinstance(u, dict) and isinstance(u.get("size"), (int, float))
             ]
+        disks = body.system.get("disks")
+        if isinstance(disks, list):  # 每块硬盘（MiB），家目录所在的排第一
+            info["disks"] = [
+                {"mount": str(d.get("mount", ""))[:128], "total": int(d["total"]), "used": int(d["used"]), "home": bool(d.get("home"))}
+                for d in disks[:20]
+                if isinstance(d, dict) and isinstance(d.get("total"), (int, float)) and isinstance(d.get("used"), (int, float))
+            ]
         server.sysinfo_json = json.dumps(info)
     db.commit()
 

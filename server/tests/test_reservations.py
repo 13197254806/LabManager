@@ -314,12 +314,14 @@ def test_refresh_interval_setting_and_system_report(admin, alice, server):
     assert admin.put("/api/admin/settings", json={"refresh_interval_seconds": "30"}).status_code == 200
     _, token = server
     body = {"gpus": [], "system": {"cpu": 12.5, "mem_used": 1000, "mem_total": 4000, "disk_used": 10, "disk_total": 100, "evil": 1,
-                       "users": [{"user": "alice", "size": 2048}, {"user": "x", "size": "bad"}]}}
+                       "users": [{"user": "alice", "size": 2048}, {"user": "x", "size": "bad"}],
+                       "disks": [{"mount": "/", "total": 100, "used": 10, "home": True}, {"mount": "/data", "total": 3000}]}}
     r = TestClient(app).post("/api/agent/sync", json=body, headers=agent_headers(token)).json()
     assert r["interval"] == 30
     srv = admin.get("/api/admin/servers").json()[0]
     assert srv["system"] == {"cpu": 12.5, "mem_used": 1000, "mem_total": 4000, "disk_used": 10, "disk_total": 100,
-                             "users": [{"user": "alice", "size": 2048}]}
+                             "users": [{"user": "alice", "size": 2048}],
+                             "disks": [{"mount": "/", "total": 100, "used": 10, "home": True}]}
     assert "description" not in srv
 
 

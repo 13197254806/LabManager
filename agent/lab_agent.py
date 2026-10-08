@@ -52,7 +52,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.9.0"
+VERSION = "0.9.1"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -688,8 +688,40 @@ class Agent(object):
             out["disk_used"] = (st.f_blocks - st.f_bfree) * st.f_frsize // (1024 * 1024)
         except OSError:
             pass
+        try:
+            out["disks"] = self.collect_disks()
+        except (IOError, OSError, ValueError):
+            pass
         if self.home_usage is not None:
             out["users"] = self.home_usage
+        return out
+
+    def collect_disks(self):
+        """本机挂载的每块硬盘（MiB）：/dev/ 下的真实设备，跳过 loop（snap）、/boot 和小于 1 GiB 的分区；
+        同一个设备挂了多处（bind mount、docker 卷等）只算一次。家目录所在的盘排第一个。"""
+        home_dev = os.stat(self.home_base).st_dev
+        seen, out = set(), []
+        with open("/proc/self/mounts") as f:
+            for line in f:
+                parts = line.split()
+                if len(parts) < 2:
+                    continue
+                dev = parts[0]
+                mnt = re.sub(r"\\([0-7]{3})", lambda m: chr(int(m.group(1), 8)), parts[1])  # 路径里的空格等是八进制转义
+                if (not dev.startswith("/dev/") or dev.startswith("/dev/loop") or mnt == "/boot" or mnt.startswith("/boot/")
+                        or not os.path.isdir(mnt)):  # 挂到单个文件上的（容器里常见）不是一块盘
+                    continue
+                try:
+                    st, did = os.statvfs(mnt), os.stat(mnt).st_dev
+                except OSError:
+                    continue
+                total = st.f_blocks * st.f_frsize // (1024 * 1024)
+                if dev in seen or did in seen or total < 1024:
+                    continue
+                seen.update((dev, did))
+                out.append({"mount": mnt, "total": total, "used": (st.f_blocks - st.f_bfree) * st.f_frsize // (1024 * 1024),
+                            "home": did == home_dev})
+        out.sort(key=lambda d: (not d["home"], d["mount"]))
         return out
 
     def sync(self):
