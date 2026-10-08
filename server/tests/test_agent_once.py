@@ -236,3 +236,31 @@ def test_kill_job_only_kills_verified_processes(monkeypatch):
                  (11, "alice", 1)])     # 序号对不上
     assert killed == [(11, lab_agent.signal.SIGTERM)]
     assert a.killed == [{"gpu": 0, "pid": 11, "user": "alice"}]
+
+
+def test_heal_tunnel_restarts_chisel_only_after_long_silence(monkeypatch):
+    a = lab_agent.Agent({"server_url": "http://127.0.0.1:18765", "token": "t"})
+    monkeypatch.setattr(lab_agent.os.path, "exists", lambda p: True)
+    calls = []
+    monkeypatch.setattr(lab_agent.subprocess, "run",
+                        lambda cmd, **kw: calls.append(cmd) or type("P", (), {"returncode": 0, "stdout": ""})())
+    t = [1000.0]
+    monkeypatch.setattr(lab_agent.time, "time", lambda: t[0])
+    a.last_contact = 1000.0
+    t[0] += lab_agent.TUNNEL_HEAL_SECONDS - 1
+    a.heal_tunnel()
+    assert calls == []                      # 断得不够久
+    t[0] += 2
+    a.heal_tunnel()
+    assert calls == [["systemctl", "restart", "lab-chisel"]]
+    t[0] += 10
+    a.heal_tunnel()
+    assert len(calls) == 1                  # 冷却期内不重复重启
+
+
+def test_heal_tunnel_skips_direct_connection(monkeypatch):
+    a = lab_agent.Agent({"server_url": "https://lab.example.com", "token": "t"})
+    monkeypatch.setattr(lab_agent.os.path, "exists", lambda p: True)
+    monkeypatch.setattr(lab_agent.subprocess, "run", lambda *a, **k: pytest.fail("不该重启"))
+    a.last_contact = 0
+    a.heal_tunnel()

@@ -38,12 +38,14 @@ import argparse
 import json
 import logging
 import os
+import re
 import signal
 import subprocess
 import sys
 import threading
 import time
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from app import webvpn
 
@@ -113,8 +115,14 @@ SESSION_FILE = os.path.join(TUNNEL_DIR, "session.json")  # 上次的 WebVPN 会�
 SILENT_RESTART_MIN_SECONDS = int(_env("TUNNEL_SILENT_SECONDS", "300"))
 
 
+TZ = ZoneInfo(_env("TZ_NAME", "Asia/Shanghai"))
+# chisel 日志行开头自带的时间（容器里是 UTC），写进状态前去掉，避免和平台时间对不上
+_CHISEL_TS = re.compile(r"^\d{4}/\d\d/\d\d \d\d:\d\d:\d\d ")
+
+
 def now():
-    return datetime.now().isoformat(timespec="seconds")
+    """平台时区的时间（容器默认是 UTC，管理页上要和 Agent 上报时间对得上）。"""
+    return datetime.now(TZ).replace(tzinfo=None).isoformat(timespec="seconds")
 
 
 def webvpn_url(host, port):
@@ -356,7 +364,7 @@ class Tunnels:
                 log.info("[%s] 隧道已建立", name)
                 set_status(name, "connected")
             elif "handshake" in line or "Connection error" in line or "ERR" in line:
-                err = line[-200:]
+                err = _CHISEL_TS.sub("", line)[-200:]
                 if "bad handshake" in line:
                     ts, result = self.probes.get(name, (0, ""))
                     if time.time() - ts > 600:

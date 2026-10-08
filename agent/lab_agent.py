@@ -52,7 +52,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.8.0"
+VERSION = "0.8.1"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -62,6 +62,9 @@ PROTECTED_GROUPS = ("sudo", "admin", "wheel", GROUP_ADMIN)
 KEYS_DIR = "/etc/ssh/lab_authorized_keys"
 GPU_DIR = "/etc/lab-gpu"
 GECOS_PREFIX = "lab-agent #"
+CHISEL_UNIT = "lab-chisel"
+# 经隧道连不上平台超过这么久，就重启本机 chisel 服务端（清掉 WebVPN 留下的假死会话）
+TUNNEL_HEAL_SECONDS = 180
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,30}$")
 KEY_RE = re.compile(r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+|sk-[a-z0-9-]+@openssh\.com) [A-Za-z0-9+/=]+( [\w.@+=:/-]*)?$")
 HASH_RE = re.compile(r"^\$[0-9a-z]+\$[^:\s]+$")
@@ -198,6 +201,8 @@ class Agent(object):
         self.finished = set()      # 本进程内已经执行完的迁移 id
         self.pending_migrations = False
         self.wake = threading.Event()  # 扫描完成 / 迁移结束时立即触发一次同步
+        self.last_contact = time.time()  # 最近一次收到平台响应（含 HTTP 错误）的时间
+        self.last_heal = 0.0
         self._size_cache = {}
         self.gpu_uuid = {}         # nvidia-smi 序号 → UUID（上一次上报时采集）
         self.killed = []           # 已终止、等待上报给平台的进程
@@ -247,8 +252,35 @@ class Agent(object):
             data=json.dumps(payload).encode(),
             headers={"Content-Type": "application/json", "Authorization": "Bearer " + self.cfg["token"]},
         )
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode())
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                self.last_contact = time.time()
+                return json.loads(resp.read().decode())
+        except urllib.error.HTTPError:
+            self.last_contact = time.time()  # 平台回了错误码，说明隧道是通的
+            raise
+
+    def heal_tunnel(self):
+        """经 WebVPN 的隧道断掉时，WebVPN 常常不关闭到本机的连接：chisel 服务端以为旧会话还在，
+        一直占着 127.0.0.1 上的回连端口，公网服务器重连时就报 "Server cannot listen"，
+        要等很久（有时几十分钟）才自己放开。连续一段时间连不上平台，就重启 chisel 服务端清掉旧会话，
+        公网服务器那边会在 30 秒内自动重连。隧道正常时 Agent 一定连得上平台，不会误重启。"""
+        url = self.cfg.get("server_url", "")
+        if not re.match(r"^https?://(127\.0\.0\.1|localhost)[:/]", url):
+            return  # 没走隧道（直连平台）
+        if not os.path.exists("/etc/systemd/system/%s.service" % CHISEL_UNIT):
+            return
+        t = time.time()
+        if t - self.last_contact < TUNNEL_HEAL_SECONDS or t - self.last_heal < 2 * TUNNEL_HEAL_SECONDS:
+            return
+        self.last_heal = t
+        log.warning("已 %d 秒连不上平台，重启 %s 清掉隧道的旧会话", t - self.last_contact, CHISEL_UNIT)
+        if self.dry_run:
+            return
+        p = subprocess.run(["systemctl", "restart", CHISEL_UNIT], stdout=subprocess.PIPE,
+                           stderr=subprocess.STDOUT, universal_newlines=True, timeout=60)
+        if p.returncode != 0:
+            log.error("重启 %s 失败：%s", CHISEL_UNIT, p.stdout.strip()[:200])
 
     # ---------------- 采集 GPU 信息 ----------------
 
@@ -2070,6 +2102,10 @@ def main():
             log.error("平台返回错误 %s: %s", e.code, e.read()[:200])
         except Exception as e:  # noqa: BLE001  网络抖动等：保持现状，下次再试
             log.error("同步失败（保持当前状态）: %s", e)
+        try:
+            agent.heal_tunnel()
+        except Exception as e:  # noqa: BLE001
+            log.error("检查隧道失败: %s", e)
         # 迁移进行中时缩短间隔，让新任务和状态更快生效
         busy = (agent.migration and agent.migration.is_alive()) or agent.pending_migrations
         agent.wake.wait(min(10, agent.interval) if busy else agent.interval)
