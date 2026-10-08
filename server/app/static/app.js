@@ -1788,7 +1788,7 @@ async function loadAdmin() {
 function renderAdminServers(servers, tunnel) {
   $("#admin-vpn").innerHTML = webvpnLine(tunnel);
   $("#admin-servers").innerHTML = servers.length
-    ? `<div class="tbl-row head srv-grid"><span>服务器</span><span>状态</span><span>显卡</span><span>公共用户名<span class="help" title="迁移前大家共用的 Linux 账号（如 ubuntu）。成员可以把这个账号里的配置、conda 环境和项目文件，迁移到自己的个人账号下。">?</span></span><span>校园网隧道</span><span></span></div>
+    ? `<div class="tbl-row head srv-grid"><span>服务器</span><span>状态</span><span>显卡</span><span>公共用户名<span class="help" title="迁移前大家共用的 Linux 账号（如 ubuntu）。成员可以把这个账号里的配置、conda 环境和项目文件，迁移到自己的个人账号下。">?</span></span><span>连接方式</span><span></span></div>
       ${servers.map((s) => {
         const models = [...new Set(s.gpus.map((g) => g.name.replace(/^NVIDIA (GeForce )?/, "")))].join(", ");
         return `<div class="tbl-row srv-grid">
@@ -1797,7 +1797,7 @@ function renderAdminServers(servers, tunnel) {
             <div class="cell-sub">${s.last_seen_at ? s.last_seen_at.replace("T", " ") : "从未连接"}</div></div>
           <div>${s.gpus.length ? `<span class="gpu-chip">${s.gpus.length} × ${esc(models)}</span>` : `<span class="muted">-</span>`}</div>
           <div>${s.legacy_users?.length ? s.legacy_users.map((u) => `<code class="inline-code">${esc(u)}</code>`).join(" ") : `<span class="muted">-</span>`}</div>
-          <div>${tunnelCell(s.tunnel)}</div>
+          <div>${linkCell(s)}</div>
           <div class="row-actions">${registerCell(s)}
             <button class="btn small" data-edit-server="${s.id}">编辑</button>
             <div class="menu-wrap"><button class="btn ghost icon small" data-menu title="更多">${icon("more")}</button>
@@ -1842,6 +1842,12 @@ function webvpnLine(tunnel) {
   return `<div class="card vpn"><span class="icon-box ${cls === "ok" ? "ok" : "warn"}">${icon("globe")}</span>
     <div class="grow"><b>校园网通道</b> <span class="path">公网服务器 → 学校 WebVPN</span>${w.error ? `<div class="cell-sub">${esc(w.error)}</div>` : ""}</div>
     <span class="badge ${cls} has-dot">${esc(text)}</span></div>`;
+}
+// 直连为主的服务器（能上外网、IP 不固定）：显示"直连"，隧道只是备用
+function linkCell(s) {
+  if (s.link !== "direct" || !s.online) return tunnelCell(s.tunnel);
+  const t = s.tunnel && (TUNNEL_STATE[s.tunnel.state] || ["", s.tunnel.state])[1];
+  return `<span class="badge ok has-dot" title="Agent 直接访问平台公网地址，不依赖内网 IP">直连</span><div class="cell-sub">${t ? `备用隧道：${esc(t)}` : "无备用隧道"}</div>`;
 }
 function tunnelCell(t) {
   if (!t) return `<span class="muted">-</span>`;

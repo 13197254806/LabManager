@@ -1,7 +1,7 @@
 """校园网隧道的健壮性：会话沿用、巡检出错不退出、半死不活的隧道自动重启。不会真的联网或启动 chisel。"""
 
 import json
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 import pytest
 
@@ -138,3 +138,31 @@ def test_watchdog_leaves_healthy_tunnels_alone(tun, monkeypatch):
     restarted = _watchdog_setup(tun, monkeypatch, connected_ago=30, seen_ago=None)
     tun.watchdog()
     assert restarted == []
+
+
+def test_status_time_uses_platform_timezone_and_strips_chisel_timestamp(tun, monkeypatch):
+    import io
+    monkeypatch.setattr(tunnel, "TARGETS", {"gpu1": ("10.0.0.1", 9000)})
+    line = "2026/10/08 12:48:23 client: Connection error: server: Server cannot listen on R:127.0.0.1:18765=>web:8000\n"
+    p = type("P", (), {"stdout": io.StringIO(line), "wait": lambda self: 0})()
+    tun.stopping = True
+    tun._watch("gpu1", p)
+    st = json.load(open(tunnel.STATUS))["gpu1"]
+    assert st["error"].startswith("client: Connection error")
+    assert abs((now() - datetime.fromisoformat(st["updated_at"])).total_seconds()) < 5
+
+
+def test_tick_reconnects_when_host_changes(tun, monkeypatch):
+    started = []
+    monkeypatch.setattr(tun, "start_one", lambda n, h, p: (started.append((n, h)), tun.target_of.__setitem__(n, (h, p))))
+    monkeypatch.setattr(tun.client, "logged_in", lambda: True)
+    monkeypatch.setattr(tun, "watchdog", lambda: None)
+    alive = type("P", (), {"poll": lambda self: None})()
+    tun.procs["gpu1"] = alive
+    tun.target_of["gpu1"] = ("10.86.14.146", 9000)
+    monkeypatch.setattr(tunnel, "TARGETS", {"gpu1": ("10.86.14.146", 9000)})
+    tun.tick()
+    assert started == []
+    monkeypatch.setattr(tunnel, "TARGETS", {"gpu1": ("10.86.20.7", 9000)})
+    tun.tick()
+    assert started == [("gpu1", "10.86.20.7")]

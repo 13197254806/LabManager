@@ -1,4 +1,6 @@
+import ipaddress
 import json
+import logging
 import posixpath
 import re
 from datetime import date, timedelta
@@ -13,6 +15,8 @@ from .auth import admin_user, current_user
 from .config import now, settings, today
 from .db import SessionLocal, get_db
 from .models import GPU, MigrationTask, Reservation, Server, SSHKey, User
+
+log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api")
 
@@ -97,7 +101,7 @@ def server_out(s: Server, holders: dict[int, set[str]] | None = None, admin: boo
         ],
     }
     if admin:
-        d.update(hostname=s.hostname, agent_version=s.agent_version, token=s.token,
+        d.update(hostname=s.hostname, agent_version=s.agent_version, token=s.token, link=s.link,
                  legacy_users=[l.get("user") for l in s.legacy if l.get("user")])
     return d
 
@@ -890,6 +894,16 @@ class AgentReport(BaseModel):
     home_free: int | None = None
     system: dict | None = None
     killed: list[KilledIn] | None = None  # 上一轮按平台清单终止的进程
+    link: str = ""          # "direct" / "tunnel"：这次是怎么连上平台的
+    lan_ip: str | None = None  # 直连为主的机器上报的当前内网 IP（IP 不固定时，备用隧道跟着换地址）
+
+
+def _is_lan_ip(value: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        return False
+    return ip.version == 4 and ip.is_private and not (ip.is_loopback or ip.is_link_local)
 
 
 def _agent_server(db: Session, authorization: str) -> Server:
@@ -925,6 +939,11 @@ def agent_sync(
     server.last_seen_at = now()
     server.hostname = body.hostname[:128]
     server.agent_version = body.agent_version[:32]
+    if body.link in ("direct", "tunnel"):
+        server.link = body.link
+    if body.lan_ip and body.lan_ip != server.host and _is_lan_ip(body.lan_ip):
+        log.info("服务器 %s 的内网地址变为 %s（原 %s），备用隧道改连新地址", server.name, body.lan_ip, server.host or "空")
+        server.host = body.lan_ip
     existing = {g.index: g for g in server.gpus}
     for gi in body.gpus:
         g = existing.get(gi.index)
