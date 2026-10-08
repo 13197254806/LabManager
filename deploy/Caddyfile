@@ -6,7 +6,14 @@
 
 # 临时入口：域名还不能用时（如备案中），用 http://公网IP 访问（不加密）。
 # 在 .env 里设置 HTTP_SITE=http://<公网IP> 开启；删掉这一行即关闭（默认值只匹配 localhost，等于不开放）
+# BASE_URL 已改回 https://域名 时，浏览器访问这里会跳转到域名；/api/agent/* 照常转发，
+# 给安装时记下 IP 地址的直连 GPU Agent 用（跨主机跳转会丢掉 Authorization 头，不能让它们跳）
 {$HTTP_SITE:http://localhost} {
 	encode gzip
+	@to_https {
+		not path /api/agent/*
+		expression `"{$BASE_URL}".startsWith("https://")`
+	}
+	redir @to_https {$BASE_URL}{uri} 308
 	reverse_proxy web:8000
 }

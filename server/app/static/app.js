@@ -347,9 +347,15 @@ function serverStats(s) {
   const pct = (u, t) => (t ? (u * 100) / t : 0);
   const parts = [item("CPU", y.cpu, `${Math.round(y.cpu)}%`, `CPU 利用率 ${y.cpu}%（各核平均）`)];
   if (y.mem_total) parts.push(item("内存", pct(y.mem_used, y.mem_total), `${gb(y.mem_used)}/${gb(y.mem_total)} GB`, `内存已用 ${gb(y.mem_used)} GB，共 ${gb(y.mem_total)} GB（${Math.round(pct(y.mem_used, y.mem_total))}%）`));
-  if (y.disk_total) {
-    // 各用户家目录占用（Agent 后台统计，新版 Agent 才会上报）：悬停显示，点击固定
-    const usage = y.users?.length ? `<span class="bubble-link" data-pin data-tip-html="${esc(diskTable(y.users))}">占用情况</span>` : "";
+  // 各用户家目录占用（Agent 后台统计，新版 Agent 才会上报）：悬停显示，点击固定
+  const usage = y.users?.length ? `<span class="bubble-link" data-pin data-tip-html="${esc(diskTable(y.users))}">占用情况</span>` : "";
+  if (y.disks?.length > 1) {
+    // 有多块硬盘（0.9.1 起的 Agent 上报）：每块一项，用挂载位置区分，家目录所在的排第一
+    for (const d of y.disks) {
+      const tip = `挂载在 ${d.mount} 的硬盘已用 ${gb(d.used)} GB，共 ${gb(d.total)} GB（${Math.round(pct(d.used, d.total))}%）${d.home ? "，家目录在这块盘上" : ""}`;
+      parts.push(item(`磁盘 ${esc(d.mount)}`, pct(d.used, d.total), `${gb(d.used)}/${gb(d.total)} GB`, tip, d.home ? usage : ""));
+    }
+  } else if (y.disk_total) {
     parts.push(item("磁盘", pct(y.disk_used, y.disk_total), `${gb(y.disk_used)}/${gb(y.disk_total)} GB`, `家目录所在磁盘已用 ${gb(y.disk_used)} GB，共 ${gb(y.disk_total)} GB（${Math.round(pct(y.disk_used, y.disk_total))}%）`, usage));
   }
   return `<div class="srv-stats">${parts.join("")}</div>`;

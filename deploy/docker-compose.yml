@@ -108,6 +108,7 @@ services:
     environment:
       DOMAIN: ${DOMAIN:?请在 .env 里设置 DOMAIN}
       HTTP_SITE: ${HTTP_SITE:-http://localhost}
+      BASE_URL: ${BASE_URL:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data
