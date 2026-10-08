@@ -17,6 +17,10 @@
 #   --admin-user LIST         可选：其他本机管理员账号（加入 lab-admin 组，任何时候都能登录）
 #   --root-login keep|yes|key|no   root 远程登录：keep=保持系统现状（默认） yes=密码和公钥 key=只允许公钥 no=禁止
 #   --migration-roots LIST    旧账号家目录之外、也允许迁移的旧数据目录，逗号分隔（默认 /lab,/data,/workspace）
+#   --link auto|direct|tunnel Agent 怎么连平台（平台启用了校园网隧道时才有区别）：
+#                             auto=不挂代理能直连平台就直连、隧道留作备用，否则走隧道（默认）
+#                             direct=直连为主、隧道备用   tunnel=只走隧道
+#                             直连时 IP 变了也不影响：Agent 会把当前内网 IP 报给平台，隧道跟着换地址
 #   --chisel-port PORT        在本机启动 chisel 服务端监听的端口（公网服务器经 WebVPN 连入，建反向隧道）
 #   --chisel-secret SECRET    chisel 认证口令（和公网服务器共用，防止别人冒连）
 #   --chisel-key FILE         可选：chisel 服务端私钥文件（固定指纹，防中间人）；不填则每次重启指纹变化、不校验
@@ -37,6 +41,8 @@ CHISEL_PORT=""
 CHISEL_SECRET=""
 CHISEL_KEY=""
 CHISEL_ALLOW="59.69.127.0/24"
+LINK=auto
+FALLBACK_URL=""
 CONFIGURE_SSHD=1
 UNINSTALL=0
 SSHD_DROPIN=/etc/ssh/sshd_config.d/00-lab.conf
@@ -56,6 +62,7 @@ while [ $# -gt 0 ]; do
         --adopt-user) ADOPT_USERS="$2"; shift 2 ;;
         --root-login) ROOT_LOGIN="$2"; shift 2 ;;
         --migration-roots) MIGRATION_ROOTS="$2"; shift 2 ;;
+        --link) LINK="$2"; shift 2 ;;
         --chisel-port) CHISEL_PORT="$2"; shift 2 ;;
         --chisel-secret) CHISEL_SECRET="$2"; shift 2 ;;
         --chisel-key) CHISEL_KEY="$2"; shift 2 ;;
@@ -98,6 +105,7 @@ case "$ROOT_LOGIN" in
     no) PERMIT_ROOT=no ;;
     *) die "--root-login 只能是 keep / yes / key / no" ;;
 esac
+case "$LINK" in auto|direct|tunnel) ;; *) die "--link 只能是 auto / direct / tunnel" ;; esac
 # 逗号分隔 → 空格分隔
 ADMINS="$(echo "$LEGACY_USERS,$ADMIN_USER" | tr ',' ' ')"
 command -v python3 >/dev/null || die "需要 python3"
@@ -123,6 +131,16 @@ if [ -n "$PLATFORM_URL" ]; then
     CHISEL_ALLOW_API="$(cfg chisel_allow)"
     [ "$CHISEL_ALLOW" != "59.69.127.0/24" ] || CHISEL_ALLOW="${CHISEL_ALLOW_API:-$CHISEL_ALLOW}"
     [ -n "$CHISEL_SECRET" ] || CHISEL_PORT=""   # 平台没启用隧道：不装 chisel，Agent 直连平台
+    # 启用了隧道、但这台不挂代理就能直连平台（比如校园网认证后能上外网）：直连为主，隧道备用。
+    # 这类机器的 IP 常常不固定，直连不依赖 IP；Agent 还会上报当前内网 IP，平台据此更新隧道地址
+    if [ -n "$CHISEL_PORT" ] && [ "$LINK" != tunnel ]; then
+        if curl -fsS -m 8 --noproxy '*' "$PLATFORM_URL/healthz" >/dev/null 2>&1; then
+            FALLBACK_URL="$SERVER_URL"; SERVER_URL="$PLATFORM_URL"
+            info "本机不经代理就能访问平台：Agent 直连平台，校园网隧道作为备用"
+        elif [ "$LINK" = direct ]; then
+            die "--link direct：本机不经代理访问不了 $PLATFORM_URL/healthz"
+        fi
+    fi
     files="lab_agent.py lab-gpus lab-gpu.sh"
     [ -z "$CHISEL_PORT" ] || files="$files chisel"
     info "下载 Agent 文件"
@@ -267,7 +285,7 @@ done
 
 # 写配置（保留已有配置里的其他字段，如 adopt_users）
 umask 077
-SERVER_URL="$SERVER_URL" TOKEN="$TOKEN" ROOTS="$MIGRATION_ROOTS" LEGACY="$LEGACY_USERS" ADOPT="$ADOPT_USERS" python3 -c '
+SERVER_URL="$SERVER_URL" FALLBACK_URL="$FALLBACK_URL" TOKEN="$TOKEN" ROOTS="$MIGRATION_ROOTS" LEGACY="$LEGACY_USERS" ADOPT="$ADOPT_USERS" python3 -c '
 import json, os
 path = "/etc/lab-agent/config.json"
 try:
@@ -276,6 +294,9 @@ except (IOError, ValueError):
     cfg = {"interval": 60, "adopt_users": []}
 split = lambda v: [r.strip() for r in v.split(",") if r.strip()]
 cfg.update(server_url=os.environ["SERVER_URL"], token=os.environ["TOKEN"], migration_roots=split(os.environ["ROOTS"]))
+cfg.pop("fallback_url", None)
+if os.environ["FALLBACK_URL"]:
+    cfg["fallback_url"] = os.environ["FALLBACK_URL"]  # 直连不通时改走校园网隧道
 if os.environ["LEGACY"]:
     cfg["legacy_users"] = split(os.environ["LEGACY"])
 if os.environ["ADOPT"]:
@@ -286,7 +307,7 @@ umask 022
 
 # ---------- 4. 首次同步 ----------
 TUNNEL_OK=1
-if [ -n "$CHISEL_PORT" ]; then
+if [ -n "$CHISEL_PORT" ] && [ -z "$FALLBACK_URL" ]; then
     info "等待公网服务器经 WebVPN 建立隧道（最多 3 分钟）..."
     for i in $(seq 1 90); do
         curl -fsS -m 5 --noproxy '*' "$SERVER_URL/healthz" >/dev/null 2>&1 && break

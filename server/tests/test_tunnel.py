@@ -150,3 +150,19 @@ def test_status_time_uses_platform_timezone_and_strips_chisel_timestamp(tun, mon
     st = json.load(open(tunnel.STATUS))["gpu1"]
     assert st["error"].startswith("client: Connection error")
     assert abs((now() - datetime.fromisoformat(st["updated_at"])).total_seconds()) < 5
+
+
+def test_tick_reconnects_when_host_changes(tun, monkeypatch):
+    started = []
+    monkeypatch.setattr(tun, "start_one", lambda n, h, p: (started.append((n, h)), tun.target_of.__setitem__(n, (h, p))))
+    monkeypatch.setattr(tun.client, "logged_in", lambda: True)
+    monkeypatch.setattr(tun, "watchdog", lambda: None)
+    alive = type("P", (), {"poll": lambda self: None})()
+    tun.procs["gpu1"] = alive
+    tun.target_of["gpu1"] = ("10.86.14.146", 9000)
+    monkeypatch.setattr(tunnel, "TARGETS", {"gpu1": ("10.86.14.146", 9000)})
+    tun.tick()
+    assert started == []
+    monkeypatch.setattr(tunnel, "TARGETS", {"gpu1": ("10.86.20.7", 9000)})
+    tun.tick()
+    assert started == [("gpu1", "10.86.20.7")]

@@ -222,6 +222,7 @@ class Tunnels:
         self.stopping = False
         self.connected_at = {}  # name -> chisel 报告“已连接”的时间戳
         self.last_kick = {}     # name -> 上次因“Agent 长时间没上报”而重启的时间戳
+        self.target_of = {}     # name -> 这条隧道连的 (host, port)；平台里地址变了（手动改或 Agent 上报新 IP）就重连
 
     def _throttle(self):
         """登录前的硬限速：读持久化的尝试时间戳，一小时内超过上限就等到名额释放再试。
@@ -347,6 +348,7 @@ class Tunnels:
         self.stop_one(name)
         self.connected_at.pop(name, None)
         set_status(name, "connecting")
+        self.target_of[name] = (host, port)
         p = subprocess.Popen(self.chisel_cmd(host, port),
                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
         self.procs[name] = p
@@ -452,10 +454,13 @@ class Tunnels:
                 log.info("[%s] 已从平台移除，停止隧道", name)
                 self.stop_one(name)
         prune_status()
-        # 新增的、或进程退出的（崩溃/GPU 重启）：启动/重启
+        # 新增的、进程退出的（崩溃/GPU 重启）、或地址变了的：启动/重启
         for name, (host, port) in TARGETS.items():
             p = self.procs.get(name)
             if p is None or p.poll() is not None:
+                self.start_one(name, host, port)
+            elif self.target_of.get(name) != (host, port):
+                log.info("[%s] 地址变为 %s:%d，重连隧道", name, host, port)
                 self.start_one(name, host, port)
         self.watchdog()
 

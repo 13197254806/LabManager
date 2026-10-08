@@ -52,7 +52,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.8.1"
+VERSION = "0.9.0"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -65,6 +65,11 @@ GECOS_PREFIX = "lab-agent #"
 CHISEL_UNIT = "lab-chisel"
 # 经隧道连不上平台超过这么久，就重启本机 chisel 服务端（清掉 WebVPN 留下的假死会话）
 TUNNEL_HEAL_SECONDS = 180
+TUNNEL_URL_RE = re.compile(r"^https?://(127\.0\.0\.1|localhost)[:/]")
+# 直连为主、隧道备用时：直连失败后这么久内先走隧道，过后再试直连
+PRIMARY_RETRY_SECONDS = 300
+# WebVPN 访问内网时的出口地址：本机连它所用的源 IP，就是 WebVPN 能连到本机的地址
+WEBVPN_EGRESS_IP = "59.69.127.72"
 USERNAME_RE = re.compile(r"^[a-z][a-z0-9_-]{1,30}$")
 KEY_RE = re.compile(r"^(ssh-ed25519|ssh-rsa|ecdsa-sha2-nistp\d+|sk-[a-z0-9-]+@openssh\.com) [A-Za-z0-9+/=]+( [\w.@+=:/-]*)?$")
 HASH_RE = re.compile(r"^\$[0-9a-z]+\$[^:\s]+$")
@@ -203,6 +208,8 @@ class Agent(object):
         self.wake = threading.Event()  # 扫描完成 / 迁移结束时立即触发一次同步
         self.last_contact = time.time()  # 最近一次收到平台响应（含 HTTP 错误）的时间
         self.last_heal = 0.0
+        self.base_url = cfg.get("server_url", "")  # 当前在用的平台地址（直连或隧道）
+        self.primary_failed_at = 0.0
         self._size_cache = {}
         self.gpu_uuid = {}         # nvidia-smi 序号 → UUID（上一次上报时采集）
         self.killed = []           # 已终止、等待上报给平台的进程
@@ -246,28 +253,72 @@ class Agent(object):
             if not self.dry_run:
                 os.remove(path)
 
+    def _urls(self):
+        """按优先级排好的平台地址。配了 fallback_url（直连为主、隧道备用）时，直连刚失败过就先走隧道。"""
+        primary, fallback = self.cfg["server_url"], self.cfg.get("fallback_url")
+        if not fallback:
+            return [primary]
+        if time.time() - self.primary_failed_at < PRIMARY_RETRY_SECONDS:
+            return [fallback, primary]
+        return [primary, fallback]
+
+    def _reached(self, base):
+        self.last_contact = time.time()
+        if base != self.base_url:
+            log.warning("改用%s连接平台：%s", "校园网隧道" if TUNNEL_URL_RE.match(base) else "直连", base)
+            self.base_url = base
+
     def post(self, path, payload, timeout=20):
-        req = urllib.request.Request(
-            self.cfg["server_url"].rstrip("/") + path,
-            data=json.dumps(payload).encode(),
-            headers={"Content-Type": "application/json", "Authorization": "Bearer " + self.cfg["token"]},
-        )
+        data = json.dumps(payload).encode()
+        urls = self._urls()
+        for i, base in enumerate(urls):
+            req = urllib.request.Request(
+                base.rstrip("/") + path, data=data,
+                headers={"Content-Type": "application/json", "Authorization": "Bearer " + self.cfg["token"]},
+            )
+            try:
+                try:
+                    with urllib.request.urlopen(req, timeout=timeout) as resp:
+                        body = json.loads(resp.read().decode())
+                except ValueError:
+                    # 校园网认证掉线时，访问外网会被重定向到认证页面（HTML），当作没连上
+                    raise OSError("平台返回的不是 JSON（可能被校园网认证页面拦截）")
+                except urllib.error.HTTPError as e:
+                    if "json" not in (e.headers.get("Content-Type") or ""):
+                        raise OSError("HTTP %s，不是平台的响应" % e.code)
+                    self._reached(base)  # 平台回了错误码，说明连接是通的
+                    raise
+                self._reached(base)
+                return body
+            except urllib.error.HTTPError:
+                raise
+            except OSError as e:  # 含 URLError、超时
+                if base == self.cfg["server_url"]:
+                    self.primary_failed_at = time.time()
+                if i == len(urls) - 1:
+                    raise
+                log.info("经 %s 连不上平台（%s），换另一条路", base, e)
+
+    def lan_ip(self):
+        """本机在校园网里的 IP（连 WebVPN 出口所用的源地址）。只查路由，不发包。"""
         try:
-            with urllib.request.urlopen(req, timeout=timeout) as resp:
-                self.last_contact = time.time()
-                return json.loads(resp.read().decode())
-        except urllib.error.HTTPError:
-            self.last_contact = time.time()  # 平台回了错误码，说明隧道是通的
-            raise
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            try:
+                s.connect((self.cfg.get("webvpn_egress_ip", WEBVPN_EGRESS_IP), 9))
+                return s.getsockname()[0]
+            finally:
+                s.close()
+        except OSError:
+            return None
 
     def heal_tunnel(self):
         """经 WebVPN 的隧道断掉时，WebVPN 常常不关闭到本机的连接：chisel 服务端以为旧会话还在，
         一直占着 127.0.0.1 上的回连端口，公网服务器重连时就报 "Server cannot listen"，
         要等很久（有时几十分钟）才自己放开。连续一段时间连不上平台，就重启 chisel 服务端清掉旧会话，
         公网服务器那边会在 30 秒内自动重连。隧道正常时 Agent 一定连得上平台，不会误重启。"""
-        url = self.cfg.get("server_url", "")
-        if not re.match(r"^https?://(127\.0\.0\.1|localhost)[:/]", url):
-            return  # 没走隧道（直连平台）
+        urls = (self.cfg.get("server_url", ""), self.cfg.get("fallback_url") or "")
+        if not any(TUNNEL_URL_RE.match(u) for u in urls):
+            return  # 没装隧道（只直连平台）
         if not os.path.exists("/etc/systemd/system/%s.service" % CHISEL_UNIT):
             return
         t = time.time()
@@ -645,7 +696,11 @@ class Agent(object):
         gpus = self.collect_gpus()
         self.gpu_uuid = {g["index"]: g["uuid"] for g in gpus if g.get("index") is not None} or self.gpu_uuid
         payload = {"hostname": socket.gethostname(), "agent_version": VERSION, "gpus": gpus,
-                   "system": self.collect_system()}
+                   "system": self.collect_system(),
+                   "link": "tunnel" if TUNNEL_URL_RE.match(self.base_url) else "direct"}
+        if self.cfg.get("fallback_url"):
+            # 直连为主的机器 IP 往往不固定：报上当前内网 IP，平台据此更新备用隧道的地址
+            payload["lan_ip"] = self.lan_ip()
         with self._lock:
             sent_kills = list(self.killed)
         if sent_kills:

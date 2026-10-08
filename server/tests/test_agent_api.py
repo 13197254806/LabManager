@@ -239,3 +239,17 @@ def test_editing_reservation_sends_no_card(admin, alice, server, monkeypatch):
     assert alice.patch(f"/api/reservations/{rid}", json={"end_date": str(d + timedelta(days=1))}).status_code == 200
     assert alice.delete(f"/api/reservations/{rid}").status_code == 200
     assert len(sent) == 1                                          # 修改、删除：不发
+
+
+def test_direct_agent_reports_lan_ip_and_platform_follows(admin, server):
+    _, token = server
+    agent = TestClient(app)
+    body = {"gpus": [], "link": "direct", "lan_ip": "10.86.14.146"}
+    assert agent.post("/api/agent/sync", json=body, headers=agent_headers(token)).status_code == 200
+    s = admin.get("/api/admin/servers").json()[0]
+    assert s["host"] == "10.86.14.146" and s["link"] == "direct"
+    # IP 变了：跟着更新；公网 / 回环等不像内网地址的值忽略
+    agent.post("/api/agent/sync", json={**body, "lan_ip": "10.86.20.7"}, headers=agent_headers(token))
+    for bad in ("8.8.8.8", "127.0.0.1", "169.254.1.1", "not-an-ip"):
+        agent.post("/api/agent/sync", json={**body, "lan_ip": bad}, headers=agent_headers(token))
+    assert admin.get("/api/admin/servers").json()[0]["host"] == "10.86.20.7"

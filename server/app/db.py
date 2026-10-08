@@ -51,7 +51,7 @@ def init_db():
 _EXTRA_COLUMNS = {
     "users": {"tenant_key": "VARCHAR(64)"},
     "servers": {"token": "VARCHAR(64)", "sysinfo_json": "TEXT DEFAULT '{}'",
-                "browse_roots_json": "TEXT DEFAULT '[]'"},
+                "browse_roots_json": "TEXT DEFAULT '[]'", "link": "VARCHAR(16)"},
 }
 
 

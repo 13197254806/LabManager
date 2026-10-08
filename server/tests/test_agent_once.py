@@ -264,3 +264,58 @@ def test_heal_tunnel_skips_direct_connection(monkeypatch):
     monkeypatch.setattr(lab_agent.subprocess, "run", lambda *a, **k: pytest.fail("不该重启"))
     a.last_contact = 0
     a.heal_tunnel()
+
+
+class _Resp:
+    def __init__(self, body):
+        self.body = body
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def read(self):
+        return self.body
+
+
+def test_post_falls_back_to_tunnel_and_retries_direct_later(monkeypatch):
+    a = lab_agent.Agent({"server_url": "http://1.2.3.4", "fallback_url": "http://127.0.0.1:18765", "token": "t"})
+    direct_up = [False]
+    seen = []
+
+    def urlopen(req, timeout):
+        seen.append(req.full_url)
+        if req.full_url.startswith("http://1.2.3.4"):
+            if not direct_up[0]:
+                return _Resp(b"<html>campus login</html>")  # 认证掉线：被重定向到认证页
+        return _Resp(b'{"ok": 1}')
+
+    monkeypatch.setattr(lab_agent.urllib.request, "urlopen", urlopen)
+    t = [1000.0]
+    monkeypatch.setattr(lab_agent.time, "time", lambda: t[0])
+    assert a.post("/x", {}) == {"ok": 1}
+    assert seen == ["http://1.2.3.4/x", "http://127.0.0.1:18765/x"] and a.base_url.startswith("http://127.0.0.1")
+    seen.clear()
+    a.post("/x", {})
+    assert seen == ["http://127.0.0.1:18765/x"]          # 刚失败过，先走隧道
+    direct_up[0] = True
+    t[0] += lab_agent.PRIMARY_RETRY_SECONDS + 1
+    seen.clear()
+    a.post("/x", {})
+    assert seen == ["http://1.2.3.4/x"] and a.base_url == "http://1.2.3.4"
+
+
+def test_sync_reports_link_and_lan_ip_only_with_fallback(monkeypatch):
+    sent = []
+    for cfg, has_ip in (({"server_url": "http://127.0.0.1:18765", "token": "t"}, False),
+                        ({"server_url": "http://1.2.3.4", "fallback_url": "http://127.0.0.1:18765", "token": "t"}, True)):
+        a = lab_agent.Agent(cfg)
+        monkeypatch.setattr(a, "collect_gpus", lambda: [])
+        monkeypatch.setattr(a, "collect_system", lambda: {})
+        monkeypatch.setattr(a, "lan_ip", lambda: "10.0.0.5")
+        monkeypatch.setattr(a, "post", lambda path, payload, **kw: sent.append(payload) or {})
+        a.sync()
+        assert ("lan_ip" in sent[-1]) is has_ip
+    assert [p["link"] for p in sent] == ["tunnel", "direct"]
