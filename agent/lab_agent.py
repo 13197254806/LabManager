@@ -17,6 +17,7 @@
   4. 在后台线程执行成员发起的文件迁移，每隔几秒上报进度：
      - 旧共享账号（如 ubuntu）家目录里的项目目录：移动或复制给成员
      - 旧共享账号的配置文件、用户级软件、选中的 conda 环境：复制给成员，并把路径改成新家目录
+  5. 校园网内网往往连不上任何 NTP 服务器，本机时钟会越走越偏：本机没在 NTP 同步时，按平台的时间校准
 
 安全约束（即使云端被攻破，也不会扩大到 root 权限）：
   - 只管理 lab-users 组里的账号；不碰 UID < 1000、sudo/admin/lab-admin 组成员
@@ -52,7 +53,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.9.3"
+VERSION = "0.9.4"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -64,7 +65,10 @@ GPU_DIR = "/etc/lab-gpu"
 GECOS_PREFIX = "lab-agent #"
 CHISEL_UNIT = "lab-chisel"
 # 经隧道连不上平台超过这么久，就重启本机 chisel 服务端（清掉 WebVPN 留下的假死会话）
-TUNNEL_HEAL_SECONDS = 180
+TUNNEL_HEAL_SECONDS = 60
+# 本机时钟和平台相差超过这么多秒才校准；同步请求往返超过 CLOCK_MAX_RTT 秒时误差太大，这一轮不校
+CLOCK_STEP_SECONDS = 2
+CLOCK_MAX_RTT = 3
 TUNNEL_URL_RE = re.compile(r"^https?://(127\.0\.0\.1|localhost)[:/]")
 # 直连为主、隧道备用时：直连失败后这么久内先走隧道，过后再试直连
 PRIMARY_RETRY_SECONDS = 300
@@ -223,6 +227,7 @@ class Agent(object):
         self.wake = threading.Event()  # 扫描完成 / 迁移结束时立即触发一次同步
         self.last_contact = time.time()  # 最近一次收到平台响应（含 HTTP 错误）的时间
         self.last_heal = 0.0
+        self._ntp_checked = (0.0, False)  # (上次查看的时间, 本机 NTP 是否已同步)
         self.base_url = cfg.get("server_url", "")  # 当前在用的平台地址（直连或隧道）
         self.primary_failed_at = 0.0
         self._size_cache = {}
@@ -330,7 +335,7 @@ class Agent(object):
         """经 WebVPN 的隧道断掉时，WebVPN 常常不关闭到本机的连接：chisel 服务端以为旧会话还在，
         一直占着 127.0.0.1 上的回连端口，公网服务器重连时就报 "Server cannot listen"，
         要等很久（有时几十分钟）才自己放开。连续一段时间连不上平台，就重启 chisel 服务端清掉旧会话，
-        公网服务器那边会在 30 秒内自动重连。隧道正常时 Agent 一定连得上平台，不会误重启。"""
+        公网服务器那边会在 10 秒内自动重连。隧道正常时 Agent 一定连得上平台，不会误重启。"""
         urls = (self.cfg.get("server_url", ""), self.cfg.get("fallback_url") or "")
         if not any(TUNNEL_URL_RE.match(u) for u in urls):
             return  # 没装隧道（只直连平台）
@@ -762,10 +767,53 @@ class Agent(object):
             payload["browse_roots"] = self.browse_bases()
             payload["legacy"] = self.legacy
             payload["home_free"] = self.home_free
+        t0 = time.time()
         res = self.post("/api/agent/sync", payload)
+        t1 = time.time()
         with self._lock:  # 平台收到了才从待上报里去掉
             self.killed = [k for k in self.killed if k not in sent_kills]
+        try:
+            self.fix_clock(res.get("server_time"), t0, t1)
+        except Exception as e:  # noqa: BLE001  校时失败不影响同步
+            log.warning("校准时钟失败：%s", e)
         return res
+
+    # ---------------- 时钟 ----------------
+
+    def ntp_synced(self):
+        """本机是否已经由 NTP 同步（能连上 NTP 时交给系统，Agent 不插手）。结果缓存 10 分钟。"""
+        at, ok = self._ntp_checked
+        if time.time() - at < 600 and at:
+            return ok
+        try:
+            p = subprocess.run(["timedatectl", "show", "-p", "NTPSynchronized", "--value"],
+                               stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, universal_newlines=True, timeout=10)
+            ok = p.stdout.strip() == "yes"
+        except (OSError, subprocess.SubprocessError):
+            ok = False
+        self._ntp_checked = (time.time(), ok)
+        return ok
+
+    def fix_clock(self, server_time, t0, t1):
+        """校园网内网的 GPU 往往连不上任何 NTP 服务器（UDP 123 被挡），时钟会越走越偏，
+        日志、文件时间都对不上。用平台的时间校准：平台时间对应这次同步请求往返的中点，
+        相差超过 CLOCK_STEP_SECONDS 秒就把本机时钟拨过去（误差不超过往返时间的一半）。"""
+        if not isinstance(server_time, (int, float)) or isinstance(server_time, bool):
+            return  # 旧平台不下发时间
+        rtt = t1 - t0
+        if rtt < 0 or rtt > CLOCK_MAX_RTT:
+            return
+        offset = server_time - (t0 + t1) / 2
+        if abs(offset) < CLOCK_STEP_SECONDS or self.ntp_synced():
+            return
+        log.warning("本机时钟比平台%s %.1f 秒（本机没有 NTP 同步），按平台时间校准", "快" if offset < 0 else "慢", abs(offset))
+        if self.dry_run:
+            return
+        time.clock_settime(time.CLOCK_REALTIME, time.time() + offset)
+        # 本进程按墙上时间记的时刻一起平移，“多久没连上平台”之类的判断不被拨钟打乱
+        for attr in ("last_contact", "last_heal", "primary_failed_at"):
+            if getattr(self, attr):
+                setattr(self, attr, getattr(self, attr) + offset)
 
     # ---------------- 账号对齐 ----------------
 

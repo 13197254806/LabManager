@@ -3,6 +3,7 @@ import json
 import logging
 import posixpath
 import re
+import time
 from datetime import date, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
@@ -1078,6 +1079,8 @@ def agent_sync(
         "migration_attempts": attempts,
         # 在没预约的卡上超过缓冲期的进程：Agent 核对后终止，下一轮同步时上报结果
         "kill": kill,
+        # 平台的时间（Unix 秒）：内网 GPU 连不上 NTP，Agent 据此校准本机时钟
+        "server_time": time.time(),
     }
 
 

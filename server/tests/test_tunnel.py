@@ -125,8 +125,46 @@ def test_watchdog_restarts_a_silent_tunnel(tun, monkeypatch):
     restarted = _watchdog_setup(tun, monkeypatch, connected_ago=900, seen_ago=900)
     tun.watchdog()
     assert restarted == ["gpu1"]
-    tun.watchdog()  # 10 分钟内不重复重启
+    tun.watchdog()  # 刚重启过，不马上再重启
     assert restarted == ["gpu1"]
+
+
+def test_watchdog_notices_a_dead_tunnel_within_a_minute(tun, monkeypatch):
+    restarted = _watchdog_setup(tun, monkeypatch, connected_ago=900, seen_ago=65)
+    tun.watchdog()
+    assert restarted == ["gpu1"]
+
+
+def test_watchdog_backs_off_while_agent_stays_silent(tun, monkeypatch):
+    import time
+
+    restarted = _watchdog_setup(tun, monkeypatch, connected_ago=900, seen_ago=900)
+    clock = [time.time()]
+    monkeypatch.setattr(tunnel.time, "time", lambda: clock[0])
+    tun.watchdog()
+    assert len(restarted) == 1
+    for n, gap in enumerate((120, 240, 480, 600, 600), start=1):  # 每次翻倍，最长 10 分钟
+        clock[0] += gap - 1
+        tun.watchdog()
+        assert len(restarted) == n      # 还没到间隔
+        clock[0] += 1
+        tun.watchdog()
+        assert len(restarted) == n + 1
+    # Agent 恢复上报后清零：下次断了又从 1 分钟开始
+    monkeypatch.setattr(tunnel, "LAST_SEEN", {"gpu1": now()})
+    tun.watchdog()
+    assert "gpu1" not in tun.kicks
+
+
+def test_session_is_checked_less_often_than_tunnels(tun, monkeypatch):
+    monkeypatch.setattr(tunnel, "CHECK_INTERVAL", 60)
+    monkeypatch.setattr(tunnel, "TARGETS", {})
+    checks, watched = [], []
+    monkeypatch.setattr(tun.client, "logged_in", lambda: checks.append(1) or True)
+    monkeypatch.setattr(tun, "watchdog", lambda: watched.append(1))
+    tun.tick()
+    tun.tick()
+    assert len(checks) == 1 and len(watched) == 2
 
 
 def test_watchdog_leaves_healthy_tunnels_alone(tun, monkeypatch):

@@ -31,6 +31,8 @@ WebVPN 会话 Cookie 过期（被挤或超时）时自动重新登录（含滑�
     PLATFORM_ADDR         web:8000
     REMOTE_PLATFORM_PORT  18765
     WEBVPN_CHECK_INTERVAL 校验会话间隔秒数（默认 60）
+    TUNNEL_WATCH_INTERVAL 巡检隧道进程和 Agent 上报的间隔秒数（默认 15）
+    TUNNEL_SILENT_SECONDS 隧道显示已连接、Agent 却这么久没上报就重启这一条（默认 60）
     WEBVPN_MAX_ATTEMPTS_PER_HOUR  每小时最多登录尝试次数（默认 4，硬限速防封号）
 """
 
@@ -108,11 +110,17 @@ TUNNEL_DIR = _env("TUNNEL_DIR", "/data/tunnel")
 PLATFORM_ADDR = _env("PLATFORM_ADDR", "web:8000")
 REMOTE_PLATFORM_PORT = int(_env("REMOTE_PLATFORM_PORT", "18765"))
 CHECK_INTERVAL = int(_env("WEBVPN_CHECK_INTERVAL", "60"))
+# 巡检隧道进程和 Agent 上报的间隔：比会话校验勤，假死的隧道能尽快发现
+WATCH_INTERVAL = int(_env("TUNNEL_WATCH_INTERVAL", "15"))
 
 STATUS = os.path.join(TUNNEL_DIR, "status.json")
 SESSION_FILE = os.path.join(TUNNEL_DIR, "session.json")  # 上次的 WebVPN 会话 Cookie（仅本容器可读）
-# 隧道已连接却迟迟没有 Agent 上报时，多久认为“半死不活”并重启这一条
-SILENT_RESTART_MIN_SECONDS = int(_env("TUNNEL_SILENT_SECONDS", "300"))
+# 隧道已连接却迟迟没有 Agent 上报时，多久认为“半死不活”并重启这一条。
+# 经 WebVPN 的连接常常对端断了本端不知道（chisel 的心跳不设超时，发不出去就一直等），
+# 只能靠 Agent 有没有上报来发现；Agent 每个刷新间隔（默认 10 秒）上报一次，1 分钟没动静就是断了
+SILENT_RESTART_MIN_SECONDS = int(_env("TUNNEL_SILENT_SECONDS", "60"))
+# 重启后 Agent 仍不上报（比如 Agent 自己挂了）时，再次重启的间隔按 1、2、4…倍递增，最长 10 分钟
+SILENT_RESTART_MAX_BACKOFF = 600
 
 
 TZ = ZoneInfo(_env("TZ_NAME", "Asia/Shanghai"))
@@ -222,6 +230,8 @@ class Tunnels:
         self.stopping = False
         self.connected_at = {}  # name -> chisel 报告“已连接”的时间戳
         self.last_kick = {}     # name -> 上次因“Agent 长时间没上报”而重启的时间戳
+        self.kicks = {}         # name -> 连续重启了几次（Agent 恢复上报后清零），决定下次重启要隔多久
+        self.checked_at = 0.0   # 上次校验 WebVPN 会话的时间戳
         self.target_of = {}     # name -> 这条隧道连的 (host, port)；平台里地址变了（手动改或 Agent 上报新 IP）就重连
 
     def _throttle(self):
@@ -331,9 +341,10 @@ class Tunnels:
     def chisel_cmd(self, host, port):
         # 无限重试：短暂网络抖动、GPU 重启由 chisel 自愈，不触发重新登录；
         # 会话真正过期（Cookie 失效）由主循环的 logged_in() 轮询发现后重登并换新 Cookie 重连。
+        # 重试间隔最长 10 秒：对端恢复后很快连上（每次只是一个 WebSocket 请求，不是登录）
         cmd = [CHISEL_BIN, "client",
                "--auth", f"{CHISEL_USER}:{CHISEL_SECRET}",
-               "--keepalive", "25s", "--max-retry-count", "-1", "--max-retry-interval", "30s",
+               "--keepalive", "25s", "--max-retry-count", "-1", "--max-retry-interval", "10s",
                "--header", f"Cookie: {self.cookie}"]
         if WEBVPN_PROXY:
             cmd += ["--proxy", WEBVPN_PROXY]   # 经家宽代理连 WebVPN（封了云 IP）
@@ -417,7 +428,8 @@ class Tunnels:
     def watchdog(self):
         """对端已经断了而本端没发现（半死不活的连接）时，chisel 进程还在、状态也还是“已连接”，
         但 GPU 上的 Agent 再也连不上平台。判断依据：连上超过一段时间，Agent 仍没上报，就重启这一条。
-        同一台最多每 10 分钟重启一次，不会因为 Agent 本身挂了而反复折腾。"""
+        重启只是重连一次 WebSocket（不重新登录），代价很小；但重启后还是不上报（Agent 本身挂了、
+        GPU 关机）时，下次重启的间隔逐次翻倍，最长 10 分钟，不会一直折腾。"""
         from app.config import now as platform_now
         limit = max(SILENT_RESTART_MIN_SECONDS, 5 * self._refresh_interval())
         t, wall = platform_now(), time.time()
@@ -425,29 +437,34 @@ class Tunnels:
             p = self.procs[name]
             if p.poll() is not None or name not in TARGETS:
                 continue
+            seen = LAST_SEEN.get(name)
+            if seen and (t - seen).total_seconds() < limit:
+                self.kicks.pop(name, None)
+                continue  # Agent 在正常上报
             up = self.connected_at.get(name)
             if not up or wall - up < limit:
                 continue  # 刚连上，给 Agent 一点时间
-            seen = LAST_SEEN.get(name)
-            if seen and (t - seen).total_seconds() < limit:
-                continue  # Agent 在正常上报
-            if wall - self.last_kick.get(name, 0) < 600:
+            n = self.kicks.get(name, 0)
+            if wall - self.last_kick.get(name, 0) < min(SILENT_RESTART_MAX_BACKOFF, limit * 2 ** n):
                 continue
             log.warning("[%s] 隧道显示已连接，但 Agent 超过 %d 秒没有上报，重启这条隧道", name, limit)
             self.last_kick[name] = wall
+            self.kicks[name] = n + 1
             host, port = TARGETS[name]
             self.start_one(name, host, port)
 
     # --- 一轮巡检：校验会话，掉线 / 过期就重登并重连，补起缺失的隧道 ---
     def tick(self):
         refresh_targets()  # 平台里新增/删除服务器后自动生效
-        if self.client.logged_in() is False:
-            # WebVPN 会话失效（被挤或超时）：重新登录，换新 Cookie 重连全部
-            log.info("WebVPN 会话失效，重新登录")
-            self.stop_all()
-            if self.login():
-                self.start_all()
-            return
+        if time.time() - self.checked_at >= CHECK_INTERVAL:
+            self.checked_at = time.time()
+            if self.client.logged_in() is False:
+                # WebVPN 会话失效（被挤或超时）：重新登录，换新 Cookie 重连全部
+                log.info("WebVPN 会话失效，重新登录")
+                self.stop_all()
+                if self.login():
+                    self.start_all()
+                return
         # 平台里已删除的服务器：停掉隧道并清理状态
         for name in list(self.procs):
             if name not in TARGETS:
@@ -482,8 +499,9 @@ class Tunnels:
             return
         refresh_targets()
         self.start_all()
+        self.checked_at = time.time()
         while not self.stopping:
-            self._sleep(CHECK_INTERVAL)
+            self._sleep(WATCH_INTERVAL)
             if self.stopping:
                 break
             try:
