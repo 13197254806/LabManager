@@ -60,6 +60,48 @@ def test_migration_flow(admin, alice, server):
     assert [m["id"] for m in sync["migrations"]] == [tid]
 
 
+def test_stalled_migration_can_be_marked_failed_and_retried(admin, alice, server):
+    """完成时连不上平台、结果丢了：任务一直停在“进行中”。超过 30 分钟没有进度可以标记为失败再重试；
+    Agent 晚些送到的真实结果照样接受。管理员也能操作别人的任务。"""
+    from app.db import SessionLocal
+    from app.models import MigrationTask
+
+    srv, token = server
+    agent = TestClient(app)
+    cand = {"path": "/data/proj", "size": 10, "mtime": "2026-01-01", "owner": "root", "same_fs": True, "in_home": False, "is_dir": True}
+    agent.post("/api/agent/sync", json={"gpus": [], "candidates": [cand]}, headers=agent_headers(token))
+    sid = admin.get("/api/admin/servers").json()[0]["id"]
+    tid = alice.post("/api/migrations", json={"server_id": sid, "source": "/data/proj", "mode": "move", "dest_name": "proj"}).json()["id"]
+    agent.post(f"/api/agent/migrations/{tid}", json={"status": "running", "phase": "复制文件"}, headers=agent_headers(token))
+    # 刚有进度：不能标记
+    assert not alice.get("/api/me/migrations").json()[0]["stalled"]
+    assert alice.post(f"/api/migrations/{tid}/abandon").status_code == 400
+
+    with SessionLocal() as db:
+        t = db.get(MigrationTask, tid)
+        t.updated_at = t.updated_at - timedelta(minutes=31)
+        db.commit()
+    assert alice.get("/api/me/migrations").json()[0]["stalled"]
+    r = admin.post(f"/api/migrations/{tid}/abandon")
+    assert r.status_code == 200 and r.json()["status"] == "failed"
+    sync = agent.post("/api/agent/sync", json={"gpus": []}, headers=agent_headers(token)).json()
+    assert sync["migrations"] == []
+
+    # 标记之后 Agent 才把真实结果送到：接受
+    agent.post(f"/api/agent/migrations/{tid}", json={"status": "done", "phase": "完成", "dest_path": "/home/alice/proj"},
+               headers=agent_headers(token))
+    t = alice.get("/api/me/migrations").json()[0]
+    assert t["status"] == "done" and t["dest_path"] == "/home/alice/proj"
+
+    # 管理员可以重试别人失败的任务
+    agent.post(f"/api/agent/migrations/{tid}", json={"status": "failed"}, headers=agent_headers(token))  # 已完成：忽略
+    with SessionLocal() as db:
+        db.get(MigrationTask, tid).status = "failed"
+        db.commit()
+    assert admin.post(f"/api/migrations/{tid}/retry").status_code == 200
+    assert alice.get("/api/me/migrations").json()[0]["status"] == "queued"
+
+
 def test_username_rules(admin, alice):
     assert alice.put("/api/me/linux-username", json={"username": "Root"}).status_code == 400
     assert alice.put("/api/me/linux-username", json={"username": "ubuntu"}).status_code == 400

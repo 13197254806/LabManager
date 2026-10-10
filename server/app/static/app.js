@@ -1147,7 +1147,8 @@ function taskHtml(t, admin = false) {
     : "";
   const actions = [];
   if (["pending_approval", "queued"].includes(t.status) && !admin) actions.push(`<button class="btn small" data-mig-cancel="${t.id}">取消</button>`);
-  if (t.status === "failed" && !admin) actions.push(`<button class="btn small" data-mig-retry="${t.id}">重试</button>`);
+  if (t.stalled) actions.push(`<button class="btn small" data-mig-abandon="${t.id}">标记为失败</button>`);
+  if (t.status === "failed") actions.push(`<button class="btn small primary" data-mig-retry="${t.id}">重试</button>`);
   if (admin && t.status === "pending_approval") {
     actions.push(`<button class="btn small primary" data-mig-approve="${t.id}">同意</button><button class="btn small danger" data-mig-reject="${t.id}">拒绝</button>`);
   }
@@ -1160,7 +1161,9 @@ function taskHtml(t, admin = false) {
     ? `<div class="progress ${t.status === "done" ? "done" : ""} ${pct == null ? "indeterminate" : ""}"><i style="width:${pct ?? 30}%"></i></div>` : "";
   const metaLeft = `${t.status === "running" ? esc(t.phase) + "　" : ""}${detail}`;
   const meta = metaLeft || speed ? `<div class="mig-meta"><span>${metaLeft}</span><span>${speed}</span></div>` : "";
-  const msg = t.message ? `<div class="note ${t.status === "failed" ? "error" : ""}">${esc(t.message)}</div>` : "";
+  const msg = t.stalled
+    ? `<div class="note error">已超过 30 分钟没有收到服务器的进度（可能是迁移完成时平台正好连不上，结果没传回来）。可以先“标记为失败”再“重试”：已完成的迁移会直接确认完成，不会重复复制</div>`
+    : t.message ? `<div class="note ${t.status === "failed" ? "error" : ""}">${esc(t.message)}</div>` : "";
   const body = `<div class="mig-body">${progress}${meta}${msg}</div>`;
   // 已结束的任务折叠成一行，点开才看详情；进行中 / 等待 / 失败的保持展开
   if (["done", "cancelled", "rejected"].includes(t.status)) {
@@ -1234,17 +1237,22 @@ document.addEventListener("click", (e) => {
 });
 
 document.addEventListener("click", async (e) => {
-  const el = e.target.closest("[data-mig-cancel],[data-mig-retry],[data-mig-approve],[data-mig-reject]");
+  const el = e.target.closest("[data-mig-cancel],[data-mig-retry],[data-mig-abandon],[data-mig-approve],[data-mig-reject]");
   if (!el) return;
   const d = el.dataset;
+  if (d.migAbandon && !confirm("确定把这条迁移标记为失败吗？标记后可以点“重试”。")) return;
+  el.disabled = true;
   try {
     if (d.migCancel) await api(`/api/migrations/${d.migCancel}`, { method: "DELETE" });
     if (d.migRetry) await api(`/api/migrations/${d.migRetry}/retry`, { method: "POST" });
+    if (d.migAbandon) await api(`/api/migrations/${d.migAbandon}/abandon`, { method: "POST" });
     if (d.migApprove) await api(`/api/admin/migrations/${d.migApprove}/approve`, { method: "POST" });
     if (d.migReject) await api(`/api/admin/migrations/${d.migReject}/reject`, { method: "POST" });
-    if (d.migApprove || d.migReject) loadAdmin();
+    if (d.migRetry) toast("已重新排队，服务器约 1 分钟内开始执行");
+    if (el.closest("#admin-migrations") || d.migApprove || d.migReject) loadAdmin();
     refreshMigrations();
   } catch (err) {
+    el.disabled = false;
     toast(err.message);
   }
 });
