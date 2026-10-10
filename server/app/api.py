@@ -82,6 +82,7 @@ def server_out(s: Server, holders: dict[int, set[str]] | None = None, admin: boo
         "id": s.id,
         "name": s.name,
         "host": s.host,
+        "ssh_host": s.ssh_host or "",  # 成员 SSH 登录地址，空 = 用 host
         "online": s.online,
         "last_seen_at": s.last_seen_at.isoformat() if s.last_seen_at else None,
         # 整机资源（CPU 利用率 %、内存 / 磁盘用量 MiB），离线时不显示
@@ -226,6 +227,7 @@ def my_servers(user: User = Depends(current_user), db: Session = Depends(get_db)
                 "id": s.id,
                 "name": s.name,
                 "host": s.host,
+                "ssh_host": s.ssh_host or "",
                 "online": s.online,
                 "home_free": s.home_free,
                 "account": acct,
@@ -542,6 +544,18 @@ def admin_tunnel(_: User = Depends(admin_user)):
 class ServerIn(BaseModel):
     name: str = Field(min_length=1, max_length=64)
     host: str = Field(default="", max_length=128)
+    ssh_host: str = Field(default="", max_length=128)
+
+
+SSH_HOST_RE = re.compile(r"^[A-Za-z0-9.:-]*$")
+
+
+def _ssh_host(body: ServerIn) -> str:
+    """成员 SSH 登录地址：只允许 IP / 域名（会拼进成员复制的 ssh 命令里）。"""
+    v = body.ssh_host.strip()
+    if not SSH_HOST_RE.fullmatch(v):
+        raise HTTPException(400, "SSH 登录地址只能填 IP 或域名")
+    return v
 
 
 @router.post("/admin/servers")
@@ -549,7 +563,7 @@ def admin_create_server(body: ServerIn, _: User = Depends(admin_user), db: Sessi
     if db.scalar(select(Server).where(Server.name == body.name.strip())):
         raise HTTPException(400, "服务器名称已存在")
     token, token_hash = services.new_agent_token()
-    s = Server(name=body.name.strip(), host=body.host.strip(), token=token, token_hash=token_hash)
+    s = Server(name=body.name.strip(), host=body.host.strip(), ssh_host=_ssh_host(body), token=token, token_hash=token_hash)
     db.add(s)
     db.commit()
     return {"server": server_out(s, admin=True), "token": token}
@@ -560,7 +574,7 @@ def admin_update_server(sid: int, body: ServerIn, _: User = Depends(admin_user),
     s = db.get(Server, sid)
     if not s:
         raise HTTPException(404)
-    s.name, s.host = body.name.strip(), body.host.strip()
+    s.name, s.host, s.ssh_host = body.name.strip(), body.host.strip(), _ssh_host(body)
     db.commit()
     return server_out(s, admin=True)
 

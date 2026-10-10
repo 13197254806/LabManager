@@ -451,7 +451,9 @@ function renderCalendar() {
 
   const byGpu = {};
   cal.reservations.forEach((r) => (byGpu[r.gpu_id] ||= []).push(r));
-  const busyToday = (g) => (byGpu[g.id] || []).some((r) => r.start_date <= today && today <= r.end_date);
+  // 今天预约了这张卡的人数：同一张卡每天最多 max_gpu_sharers 人共用，没到上限就还能再约
+  const cap = state.config.max_gpu_sharers;
+  const holdersToday = (g) => new Set((byGpu[g.id] || []).filter((r) => r.start_date <= today && today <= r.end_date).map((r) => r.user_id)).size;
   // 已过去的日期共用一层斜线、今天这一列盖在色块上面：都是整段的覆盖层
   const pastN = Math.min(days, Math.max(0, diffDays(vStart, today))), todayIdx = diffDays(vStart, today);
 
@@ -460,13 +462,16 @@ function renderCalendar() {
   for (const s of cal.servers) {
     const alertGpus = s.gpus.filter((g) => g.alerts.length);
     const collapsed = state.collapsed.has(s.id);
-    const freeN = s.gpus.filter((g) => !busyToday(g)).length;
+    const freeN = s.gpus.filter((g) => !holdersToday(g)).length;
+    const roomN = s.gpus.filter((g) => holdersToday(g) < cap).length;  // 还能再约的卡（含空闲的）
+    const freeTag = freeN ? `今天空闲 ${freeN}` : roomN ? `今天可共用 ${roomN}` : "今天已满";
+    const freeTip = `同一张卡每天最多 ${cap} 人共用。今天 ${freeN} 张卡没人预约，${roomN} 张卡还能再预约`;
     html += `<div class="cal-server-group ${collapsed ? "collapsed" : ""}" data-srv="${s.id}">
       <div class="cal-row cal-server" data-toggle-srv="${s.id}" role="button" tabindex="0" aria-expanded="${!collapsed}">
         <div class="cal-label">
           <span class="srv-title">${icon("chev", "chev")}<span class="dot ${s.online ? "on" : ""}"></span><span class="server-name">${esc(s.name)}</span>
             ${alertGpus.length ? `<span class="alert-ico" title="${esc(`${alertGpus.length} 张卡上有未预约的用户正在使用`)}">${ALERT_ICON}</span>` : ""}</span>
-          <span class="srv-host"><span class="mono">${esc(s.host)}</span>${s.gpus.length ? `<span class="srv-free ${freeN ? "" : "none"}">${freeN ? `今天空闲 ${freeN}` : "今天已满"}</span>` : ""}</span></div>
+          <span class="srv-host"><span class="mono">${esc(s.ssh_host || s.host)}</span>${s.gpus.length ? `<span class="srv-free ${roomN ? "" : "none"}" title="${esc(freeTip)}">${freeTag}</span>` : ""}</span></div>
         <div class="cal-track">${serverStats(s)}</div></div>
       <div class="srv-body"><div class="srv-inner">`;
     for (const g of s.gpus) {
@@ -479,10 +484,10 @@ function renderCalendar() {
       const alert = g.alerts.length
         ? `<span class="alert-ico" title="${esc(`这些用户未预约，但正在使用 GPU：\n${g.alerts.map((a) => `• ${a}`).join("\n")}`)}">${ALERT_ICON}</span>`
         : `<span></span>`;
-      const busy = busyToday(g);
+      const n = holdersToday(g);
       const { blocks, lanes } = buildBlocks(byGpu[g.id] || [], today, vStart, vEnd);
       html += `<div class="cal-row cal-gpu"><div class="cal-label gpu-label">
-        <span class="gpu-free ${busy ? "" : "free"}" title="${busy ? "今天已有人预约" : "今天空闲"}"></span>
+        <span class="gpu-free ${!n ? "free" : n < cap ? "part" : ""}" title="${!n ? "今天空闲" : n < cap ? `今天已有 ${n} 人预约，还能再有 ${cap - n} 人共用` : `今天已满（${n}/${cap} 人）`}"></span>
         <div class="gpu-l1"><b>GPU${g.index}</b><span>${esc(g.name.replace(/^NVIDIA (GeForce )?/, ""))}</span></div>
         <div class="gpu-l2">${stat}</div>
         <div class="gpu-extra">${alert}${detail}</div></div>
@@ -973,7 +978,7 @@ async function renderAccount() {
         : `<span class="badge ${a.state} has-dot" title="${esc(a.message)}">${ACCOUNT_STATE[a.state] || a.state}</span>`;
       const local = a && a.username !== me.linux_username ? `<div class="srv-acct-msg small warn-text">当前仍为 ${esc(a.username)}：${esc(a.message)}</div>`
         : a?.state === "error" ? `<div class="srv-acct-msg small" style="color:var(--danger)">${esc(a.message)}</div>` : "";
-      const cmd = `ssh ${a?.username || me.linux_username}@${s.host || s.name}`;
+      const cmd = `ssh ${a?.username || me.linux_username}@${s.ssh_host || s.host || s.name}`;
       return `<div class="srv-acct"><div class="name"><span class="dot ${s.online ? "on" : ""}"></span>${esc(s.name)}</div>
         <div class="cmd"><span class="prompt mono">$</span><code>${esc(cmd)}</code><button class="btn ghost icon small" data-copy="${esc(cmd)}" title="复制">${icon("copy")}</button></div>
         ${st}${local}</div>`;
@@ -1806,7 +1811,7 @@ function renderAdminServers(servers, tunnel) {
       ${servers.map((s) => {
         const models = [...new Set(s.gpus.map((g) => g.name.replace(/^NVIDIA (GeForce )?/, "")))].join(", ");
         return `<div class="tbl-row srv-grid">
-          <div><div class="cell-main">${esc(s.name)}</div><div class="cell-sub mono">${esc(s.host)}</div></div>
+          <div><div class="cell-main">${esc(s.name)}</div><div class="cell-sub mono" title="内网地址（隧道连接用）">${esc(s.host)}</div>${s.ssh_host ? `<div class="cell-sub mono" title="成员 SSH 登录用的地址">登录 ${esc(s.ssh_host)}</div>` : ""}</div>
           <div title="${esc(`主机名 ${s.hostname || "-"}\nAgent 版本 ${s.agent_version || "-"}`)}"><div class="srv-status"><span class="dot ${s.online ? "on" : ""}"></span>${s.online ? "在线" : "离线"}</div>
             <div class="cell-sub">${s.last_seen_at ? s.last_seen_at.replace("T", " ") : "从未连接"}</div></div>
           <div>${s.gpus.length ? `<span class="gpu-chip">${s.gpus.length} × ${esc(models)}</span>` : `<span class="muted">-</span>`}</div>
@@ -1915,14 +1920,14 @@ function openServerDialog(s) {
   serverForm.reset();
   $("#server-error").textContent = "";
   $("#server-dialog-title").textContent = s ? "编辑服务器" : "添加服务器";
-  if (s) { serverForm.name.value = s.name; serverForm.host.value = s.host; }
+  if (s) { serverForm.name.value = s.name; serverForm.host.value = s.host; serverForm.ssh_host.value = s.ssh_host || ""; }
   serverDialog.showModal();
 }
 $("#add-server").onclick = () => openServerDialog(null);
 serverForm.addEventListener("submit", async (e) => {
   if (e.submitter?.value === "cancel") return;
   e.preventDefault();
-  const body = { name: serverForm.name.value.trim(), host: serverForm.host.value.trim() };
+  const body = { name: serverForm.name.value.trim(), host: serverForm.host.value.trim(), ssh_host: serverForm.ssh_host.value.trim() };
   $("#server-submit").disabled = true;
   try {
     const r = editingServer

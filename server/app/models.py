@@ -55,6 +55,8 @@ class Server(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True)
     host: Mapped[str] = mapped_column(String(128), default="")
+    # 成员 SSH 登录用的地址；空 = 用 host。本机网卡 IP 在校园网里连不上（经 NAT 映射）时由管理员填写
+    ssh_host: Mapped[str | None] = mapped_column(String(128), default="")
     description: Mapped[str] = mapped_column(String(256), default="")
     token_hash: Mapped[str] = mapped_column(String(64), unique=True)
     # 明文注册 token：只给管理员在平台上查看 / 复制安装命令用（DB 在私有服务器上）

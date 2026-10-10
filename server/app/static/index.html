@@ -344,6 +344,7 @@
       <label>名称<input name="name" placeholder="如 gpu-01（中文 / 空格也行）" required maxlength="64"></label>
       <label>内网地址<input name="host" placeholder="如 192.168.247.150" maxlength="128"></label>
       <p class="muted small">内网地址要和 GPU 服务器在校园网里的 IP 一致，公网服务器靠它经 WebVPN 建立隧道。能直接上外网的服务器（如校园网认证后）会直连平台，IP 不固定也没关系：可以先留空，Agent 连上后会自动填写并随 IP 变化更新。</p>
+      <label>SSH 登录地址<span class="field-hint">可选。成员 SSH 登录用的地址，留空就用内网地址。本机网卡上的 IP 别人连不上（经过 NAT）时，填成员在校园网里实际能连上的 IP 或域名</span><input name="ssh_host" placeholder="留空 = 同内网地址" maxlength="128" class="mono"></label>
       <p class="error" id="server-error"></p>
       <div class="actions">
         <button class="btn" value="cancel" formnovalidate>取消</button>

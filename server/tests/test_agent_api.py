@@ -399,3 +399,16 @@ def test_direct_agent_reports_lan_ip_and_platform_follows(admin, server):
     for bad in ("8.8.8.8", "127.0.0.1", "169.254.1.1", "not-an-ip"):
         agent.post("/api/agent/sync", json={**body, "lan_ip": bad}, headers=agent_headers(token))
     assert admin.get("/api/admin/servers").json()[0]["host"] == "10.86.20.7"
+
+
+def test_ssh_login_address_is_separate_from_tunnel_address(admin, alice, server):
+    """本机网卡 IP 在校园网里连不上（经 NAT）时，管理员单独填成员 SSH 登录地址；Agent 自动更新内网地址不影响它。"""
+    srv, token = server
+    sid = admin.get("/api/admin/servers").json()[0]["id"]
+    assert admin.patch(f"/api/admin/servers/{sid}", json={"name": "gpu_01", "host": "10.86.14.146", "ssh_host": "a b"}).status_code == 400
+    r = admin.patch(f"/api/admin/servers/{sid}", json={"name": "gpu_01", "host": "10.86.14.146", "ssh_host": " 218.197.141.221 "})
+    assert r.status_code == 200 and r.json()["ssh_host"] == "218.197.141.221"
+    TestClient(app).post("/api/agent/sync", json={"gpus": [], "lan_ip": "10.86.20.7"}, headers=agent_headers(token))
+    mine = alice.get("/api/me/servers").json()[0]
+    assert mine["host"] == "10.86.20.7" and mine["ssh_host"] == "218.197.141.221"
+    assert alice.get("/api/calendar").json()["servers"][0]["ssh_host"] == "218.197.141.221"
