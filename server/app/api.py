@@ -1085,6 +1085,7 @@ def agent_sync(
         if isinstance(disks, list):  # 每块硬盘（MiB），家目录所在的排第一
             info["disks"] = [
                 {"mount": str(d.get("mount", ""))[:128], "total": int(d["total"]), "used": int(d["used"]), "home": bool(d.get("home")),
+                 **({"data": bool(d["data"])} if "data" in d else {}),
                  **({"usage": _disk_usage(d["usage"])} if isinstance(d.get("usage"), list) else {})}
                 for d in disks[:20]
                 if isinstance(d, dict) and isinstance(d.get("total"), (int, float)) and isinstance(d.get("used"), (int, float))

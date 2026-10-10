@@ -534,3 +534,25 @@ def test_data_disk_usage_lists_top_level_entries(tmp_path, monkeypatch):
     rows = a.data_usage[str(mount)]
     assert [r["path"] for r in rows] == ["alice", "big.tar"]   # 迁移暂存目录不列出
     assert rows[0]["size"] == 3 and rows[0]["user"] == lab_agent.pwd.getpwuid(os.getuid()).pw_name
+
+
+def test_data_disks_are_migration_sources(tmp_path, monkeypatch):
+    """数据盘上不属于成员的一级目录可以迁移（认领），lost+found 和迁移暂存目录不列出；系统挂载点不算数据盘。"""
+    assert lab_agent.is_data_mount("/media/zdd") and lab_agent.is_data_mount("/data2")
+    assert not any(lab_agent.is_data_mount(m) for m in ("/", "/var/lib/docker", "/boot/efi", "/usr", "/run/media"))
+    base = lab_agent.os.path.realpath(str(tmp_path))
+    mount = os.path.join(base, "zdd")
+    for n in ("SBG", "lost+found", ".lab-migrate"):
+        os.makedirs(os.path.join(mount, n))
+    a = lab_agent.Agent({"server_url": "http://x", "token": "t", "home_base": base, "migration_roots": [os.path.join(base, "data")]})
+    a.data_disks = lambda: [mount]
+    a.legacy_accounts = lambda: []
+    a._du = lambda path, *args: 1
+    monkeypatch.setattr(lab_agent, "group_members", lambda g: set())
+    assert mount in a.migration_roots() and mount in a.browse_bases()
+    a.scan_candidates()
+    assert [(c["path"], c["disk"]) for c in a.candidates] == [(os.path.join(mount, "SBG"), mount)]
+    assert [(e["name"], e["disk"]) for e in a.browse_list(mount)] == [("SBG", mount)]
+    assert a.check_browsable(os.path.join(mount, "SBG")) == mount
+    a.cfg["data_disk_roots"] = False   # 管理员可以关掉
+    assert mount not in a.migration_roots()

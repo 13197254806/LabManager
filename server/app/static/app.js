@@ -1404,14 +1404,16 @@ async function renderPicker(container, onSubmitted, onClose) {
           ${roots}<input class="dest" data-pdest="${i}" value="${esc(p.dest)}" title="放到目标目录下的名字">
         </span>
         <button type="button" class="link-btn" data-pdel="${i}">移除</button>
-        <span class="meta">${p.size === undefined ? "大小统计中…" : p.size == null ? "大小未知" : fmtBytes(p.size)} · 修改于 ${esc(p.mtime)} · 属主 ${esc(p.owner)}${p.same_fs ? "" : " · 与家目录不在同一磁盘"}</span>
+        <span class="meta">${p.size === undefined ? "大小统计中…" : p.size == null ? "大小未知" : fmtBytes(p.size)} · 修改于 ${esc(p.mtime)} · 属主 ${esc(p.owner)}${p.disk ? ` · 在数据盘 ${esc(p.disk)} 上` : p.same_fs ? "" : " · 与家目录不在同一磁盘"}</span>
       </div>`;
     }).join("");
     update();
   };
   const addPicked = async (s, e) => {
     if (picked.some((p) => p.path === e.path)) return;
-    const p = { ...e, mode: "move", root: "", dest: e.name, size: e.is_dir ? undefined : e.size };
+    // 本来就在数据盘上的，默认还放在这块盘上（自己的目录里）：同盘移动瞬间完成，也不占家目录所在的盘
+    const root = e.disk && s.data_disks.some((d) => d.mount === e.disk) ? e.disk : "";
+    const p = { ...e, mode: "move", root, dest: e.name, size: e.is_dir ? undefined : e.size };
     picked.push(p);
     renderPicked();
     if (e.is_dir) {  // 目录大小要在服务器上统计，慢一点，先显示“统计中”
@@ -1437,7 +1439,7 @@ async function renderPicker(container, onSubmitted, onClose) {
       });
       return { legacy_user: lg.user, configs, conda, bytes };
     }).filter((p) => p.configs.length || p.conda.length);
-    const dirs = picked.map((p) => ({ cand: { path: p.path, size: p.size, same_fs: p.same_fs }, mode: p.mode, dest: p.dest.trim(),
+    const dirs = picked.map((p) => ({ cand: { path: p.path, size: p.size, same_fs: p.same_fs, disk: p.disk || "" }, mode: p.mode, dest: p.dest.trim(),
       root: p.mode === "link" ? "" : p.root }));
     return { s, profiles, dirs };
   };
@@ -1447,9 +1449,9 @@ async function renderPicker(container, onSubmitted, onClose) {
     // 需要占用家目录空间的：复制的内容 + 跨盘移动的内容
     const copyBytes = profiles.reduce((a, p) => a + p.bytes, 0)
       + dirs.filter((d) => !d.root && (d.mode === "copy" || (d.mode === "move" && !d.cand.same_fs))).reduce((a, d) => a + (d.cand.size || 0), 0);
-    // 放到数据盘的：要迁移的内容都在别的盘上，移动也是复制过去再删除源
-    const toDisk = s.data_disks.map((dk) => ({ ...dk, bytes: dirs.filter((d) => d.root === dk.mount).reduce((a, d) => a + (d.cand.size || 0), 0) }))
-      .filter((dk) => dk.bytes);
+    // 放到数据盘的：复制的，以及从别的盘移动过来的（移动也是复制过去再删除源）；同一块数据盘上移动不占空间
+    const toDisk = s.data_disks.map((dk) => ({ ...dk, bytes: dirs.filter((d) => d.root === dk.mount && (d.mode === "copy" || d.cand.disk !== dk.mount))
+      .reduce((a, d) => a + (d.cand.size || 0), 0) })).filter((dk) => dk.bytes);
     const n = profiles.length + dirs.length;
     $(".pk-total", container).textContent = n
       ? [`将复制约 ${fmtBytes(copyBytes)} 到家目录${s.home_free != null ? `（家目录所在磁盘剩余 ${fmtBytes(s.home_free)}）` : ""}`,

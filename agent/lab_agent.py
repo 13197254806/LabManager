@@ -24,7 +24,7 @@
   - 已存在的非托管账号默认不接管（除非写进配置 adopt_users）
   - 从不授予 sudo，从不删除任何用户
   - 不碰旧共享账号本身（不锁定、不改密码），它由管理员自行管理
-  - 迁移只接受旧账号家目录和 migration_roots 之下的内容（成员在网页的文件浏览器里选择，浏览同样限制在这些位置，
+  - 迁移只接受旧账号家目录、migration_roots 和数据盘之下的内容（成员在网页的文件浏览器里选择，浏览同样限制在这些位置，
     且不进入其他成员的目录）；不跟随符号链接、不修改目录外硬链接指向的文件、不把设备文件交给普通用户；
     复制时只复制原属主自己的或公开可读的文件
 
@@ -53,7 +53,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.9.5"
+VERSION = "0.9.6"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -80,6 +80,13 @@ HASH_RE = re.compile(r"^\$[0-9a-z]+\$[^:\s]+$")
 DEST_RE = re.compile(r"^[\w.-][\w .+@-]{0,126}$")
 ENV_RE = re.compile(r"^[\w.-]{1,64}$")
 DEFAULT_ROOTS = ["/lab", "/data", "/workspace"]
+# 系统目录：挂在这些位置的盘不算数据盘。/home 单独分区时，根分区 / 也不是“家目录所在的盘”，但绝不能让成员往里放东西
+SYSTEM_DIRS = ("/usr", "/var", "/etc", "/opt", "/srv", "/snap", "/root", "/tmp", "/boot", "/proc", "/sys", "/dev", "/run")
+
+
+def is_data_mount(mnt):
+    """挂载点能不能当数据盘（成员可以把文件放到 <挂载点>/<用户名>/、可以从这里迁移）：不是 / 也不在系统目录下。"""
+    return mnt != "/" and not any(mnt == d or mnt.startswith(d + "/") for d in SYSTEM_DIRS)
 O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
 
 # 旧共享账号家目录里可以复制给成员的内容：(键, 显示名, 分组, 相对家目录的路径)
@@ -472,7 +479,7 @@ class Agent(object):
                 out.append({"name": e, "size": self._du(p, True)})
         return out
 
-    def _candidate(self, out, path, managed, home_dev, in_home):
+    def _candidate(self, out, path, managed, home_dev, in_home, devs=None):
         try:
             st = os.lstat(path)
         except OSError:
@@ -489,12 +496,13 @@ class Agent(object):
             "mtime": time.strftime("%Y-%m-%d", time.localtime(st.st_mtime)),
             "owner": owner,
             "same_fs": st.st_dev == home_dev,
+            "disk": (devs or {}).get(st.st_dev, ""),  # 在哪块数据盘上（不在数据盘上为空）
             "in_home": in_home,
             "is_dir": stat.S_ISDIR(st.st_mode),
         })
 
     def scan_candidates(self):
-        """可迁移内容：旧账号家目录里的文件 / 目录 + migration_roots 下不属于任何成员的一级目录。"""
+        """可迁移内容：旧账号家目录里的文件 / 目录 + migration_roots 和数据盘下不属于任何成员的一级目录。"""
         managed = {pwd.getpwnam(n).pw_uid for n in group_members(GROUP_MANAGED) if self._exists(n)}
         try:
             home_dev = os.stat(self.home_base).st_dev
@@ -511,11 +519,12 @@ class Agent(object):
             for name in sorted(os.listdir(info["home"])):
                 if not name.startswith(".") and name not in skip:
                     self._candidate(out, os.path.join(info["home"], name), managed, home_dev, True)
-        for root in self.roots:
+        devs = self.data_devs()
+        for root in self.migration_roots():
             if os.path.isdir(root):
                 for name in sorted(os.listdir(root)):
-                    if not name.startswith("."):
-                        self._candidate(out, os.path.join(root, name), managed, home_dev, False)
+                    if not name.startswith(".") and name != "lost+found":
+                        self._candidate(out, os.path.join(root, name), managed, home_dev, False, devs)
         if out != self.candidates or legacy != self.legacy:
             self.candidates, self.legacy = out, legacy
             self.wake.set()
@@ -531,9 +540,9 @@ class Agent(object):
     # ---------------- 文件浏览（成员在网页上选择要迁移的文件 / 目录） ----------------
 
     def browse_bases(self):
-        """可浏览 / 可迁移的位置：旧共享账号的家目录，以及 migration_roots。"""
+        """可浏览 / 可迁移的位置：旧共享账号的家目录，以及 migration_roots 和数据盘。"""
         bases = [os.path.realpath(pw.pw_dir) for pw in self.legacy_accounts()]
-        return bases + [r for r in self.roots if os.path.isdir(r) and r not in bases]
+        return bases + [r for r in self.migration_roots() if os.path.isdir(r) and r not in bases]
 
     def managed_uids(self):
         out = set()
@@ -567,6 +576,7 @@ class Agent(object):
         except OSError:
             home_dev = None
         homes = [os.path.realpath(pw.pw_dir) for pw in self.legacy_accounts()]
+        devs = self.data_devs()
 
         def info(full, name, st, top=False):
             try:
@@ -580,6 +590,7 @@ class Agent(object):
                 "mtime": time.strftime("%Y-%m-%d", time.localtime(st.st_mtime)), "owner": owner,
                 "selectable": not top and st.st_uid not in managed,
                 "same_fs": st.st_dev == home_dev,
+                "disk": devs.get(st.st_dev, ""),
                 "in_home": any(full.startswith(h.rstrip("/") + "/") for h in homes),
             }
 
@@ -594,7 +605,7 @@ class Agent(object):
         self.check_browsable(path, managed)
         out = []
         for name in sorted(os.listdir(path)):
-            if name.startswith(".lab-"):  # 迁移程序自己的暂存 / 备份目录，不显示
+            if name.startswith(".lab-") or name == "lost+found":  # 迁移程序自己的暂存 / 备份目录、文件系统的 lost+found，不显示
                 continue
             full = os.path.join(path, name)
             try:
@@ -657,11 +668,28 @@ class Agent(object):
         self.home_usage = out[:100]
 
     def data_disks(self):
-        """数据盘：家目录所在盘以外的硬盘（挂载点），如外挂的 /media/zdd。"""
+        """数据盘：家目录所在盘以外、挂在非系统目录的硬盘（挂载点），如外挂的 /media/zdd。"""
         try:
-            return [d["mount"] for d in self.collect_disks() if not d["home"]]
+            return [d["mount"] for d in self.collect_disks() if d["data"]]
         except (IOError, OSError, ValueError):
             return []
+
+    def data_devs(self):
+        """设备号 → 数据盘挂载点：标出一个文件 / 目录在哪块数据盘上。"""
+        out = {}
+        for m in self.data_disks():
+            try:
+                out[os.stat(m).st_dev] = m
+            except OSError:
+                pass
+        return out
+
+    def migration_roots(self):
+        """可以从中迁移的位置（旧账号家目录之外）：配置的 migration_roots，加上数据盘（配置 data_disk_roots: false 可不加）。"""
+        roots = list(self.roots)
+        if self.cfg.get("data_disk_roots", True):
+            roots += [m for m in self.data_disks() if m not in roots]
+        return roots
 
     def scan_data_usage(self):
         """各数据盘上每个一级目录 / 文件占用的空间（MiB）和属主，按从大到小排。成员自己的目录就是 <挂载点>/<用户名>。"""
@@ -754,7 +782,7 @@ class Agent(object):
         try:
             out["disks"] = self.collect_disks()
             for d in out["disks"]:
-                if not d["home"] and d["mount"] in self.data_usage:
+                if d["data"] and d["mount"] in self.data_usage:
                     d["usage"] = self.data_usage[d["mount"]]
         except (IOError, OSError, ValueError):
             pass
@@ -786,7 +814,7 @@ class Agent(object):
                     continue
                 seen.update((dev, did))
                 out.append({"mount": mnt, "total": total, "used": (st.f_blocks - st.f_bfree) * st.f_frsize // (1024 * 1024),
-                            "home": did == home_dev})
+                            "home": did == home_dev, "data": did != home_dev and is_data_mount(mnt)})
         out.sort(key=lambda d: (not d["home"], d["mount"]))
         return out
 
@@ -2133,7 +2161,7 @@ class Migration(threading.Thread):
 
     def _allowed_parents(self):
         homes = {os.path.realpath(pw.pw_dir) for pw in self.agent.legacy_accounts()}
-        return set(self.agent.roots), homes
+        return set(self.agent.migration_roots()), homes
 
     def execute_dir(self):
         src = os.path.normpath(self.t["source"])

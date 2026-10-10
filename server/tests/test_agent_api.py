@@ -446,3 +446,15 @@ def test_migrate_to_data_disk(admin, alice, server):
     assert "dest_root" not in tasks["/data/other"]   # 放家目录的任务不带这个字段：指纹和旧版一致
     disk = alice.get("/api/calendar").json()["servers"][0]["system"]["disks"][1]
     assert disk["usage"] == [{"path": "alice", "user": "alice", "size": 5}]
+
+
+def test_root_partition_is_never_a_data_disk(admin, alice, server):
+    """/home 单独分区时根分区 / 不是“家目录所在的盘”，但不能让成员往 /<用户名>/ 里放东西；系统目录下的盘同理。"""
+    _, token = server
+    disks = [{"mount": "/home", "total": 100, "used": 1, "home": True},
+             {"mount": "/", "total": 100, "used": 1, "home": False},
+             {"mount": "/var/lib/docker", "total": 100, "used": 1, "home": False},
+             {"mount": "/media/zdd", "total": 100, "used": 1, "home": False, "data": True}]
+    TestClient(app).post("/api/agent/sync", json={"gpus": [], "agent_version": "0.9.6", "system": {"cpu": 1, "disks": disks}},
+                         headers=agent_headers(token))
+    assert [d["mount"] for d in alice.get("/api/me/servers").json()[0]["data_disks"]] == ["/media/zdd"]
