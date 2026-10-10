@@ -102,6 +102,102 @@ def test_stalled_migration_can_be_marked_failed_and_retried(admin, alice, server
     assert alice.get("/api/me/migrations").json()[0]["status"] == "queued"
 
 
+def _age_task(tid, minutes):
+    from app.db import SessionLocal
+    from app.models import MigrationTask
+
+    with SessionLocal() as db:
+        t = db.get(MigrationTask, tid)
+        t.updated_at = t.updated_at - timedelta(minutes=minutes)
+        db.commit()
+
+
+def _dir_task(admin, client, server, path="/data/proj", mode="move"):
+    _, token = server
+    cand = {"path": path, "size": 10, "mtime": "2026-01-01", "owner": "root", "same_fs": True, "in_home": False, "is_dir": True}
+    TestClient(app).post("/api/agent/sync", json={"gpus": [], "candidates": [cand]}, headers=agent_headers(token))
+    sid = admin.get("/api/admin/servers").json()[0]["id"]
+    return client.post("/api/migrations", json={"server_id": sid, "source": path, "mode": mode, "dest_name": "proj"})
+
+
+def test_stalled_uses_agent_reported_current_migration(admin, alice, server):
+    """新版 Agent 报告正在执行哪个迁移：它在做的，再久没进度也不算卡住；它没在做的，几分钟没进度就算。"""
+    _, token = server
+    agent = TestClient(app)
+    tid = _dir_task(admin, alice, server).json()["id"]
+    agent.post(f"/api/agent/migrations/{tid}", json={"status": "running"}, headers=agent_headers(token))
+    agent.post("/api/agent/sync", json={"gpus": [], "current_migration": tid}, headers=agent_headers(token))
+    _age_task(tid, 120)  # conda 自检等步骤很久不报进度
+    assert not alice.get("/api/me/migrations").json()[0]["stalled"]
+    agent.post("/api/agent/sync", json={"gpus": [], "current_migration": 0}, headers=agent_headers(token))
+    assert alice.get("/api/me/migrations").json()[0]["stalled"]
+
+
+def test_retry_bumps_attempt_and_rechecks_claims(admin, alice, server):
+    _, token = server
+    agent = TestClient(app)
+    tid = _dir_task(admin, alice, server).json()["id"]
+    agent.post(f"/api/agent/migrations/{tid}", json={"status": "failed", "message": "boom"}, headers=agent_headers(token))
+    # alice 失败期间 admin 申请移动同一个目录：alice 不能再重试
+    other = _dir_task(admin, admin, server)
+    assert other.status_code == 200, other.text
+    assert alice.post(f"/api/migrations/{tid}/retry").status_code == 409
+    agent.post(f"/api/agent/migrations/{other.json()['id']}", json={"status": "failed"}, headers=agent_headers(token))
+    assert alice.post(f"/api/migrations/{tid}/retry").status_code == 200
+    sync = agent.post("/api/agent/sync", json={"gpus": []}, headers=agent_headers(token)).json()
+    assert sync["migration_attempts"] == {str(tid): 1}
+    # 次数不放进任务本身：旧版 Agent 的任务指纹（完成标记）不受影响
+    assert "attempt" not in sync["migrations"][0]
+
+
+def test_conda_env_cannot_be_moved_by_two_members(admin, alice, server):
+    _, token = server
+    agent = TestClient(app)
+    legacy = {"user": "ubuntu", "home": "/home/ubuntu", "configs": [],
+              "conda": [{"name": "anaconda3", "base_size": 1, "envs": [{"name": "torch", "size": 1}, {"name": "tf", "size": 1}]}]}
+    agent.post("/api/agent/sync", json={"gpus": [], "legacy": [legacy], "candidates": []}, headers=agent_headers(token))
+    sid = admin.get("/api/admin/servers").json()[0]["id"]
+
+    def pick(c, envs):
+        return c.post("/api/migrations/profile", json={"server_id": sid, "legacy_user": "ubuntu",
+                                                      "conda": [{"name": "anaconda3", "envs": envs}]})
+
+    assert pick(alice, ["torch"]).status_code == 200
+    r = pick(admin, ["tf", "torch"])
+    assert r.status_code == 409 and "torch" in r.json()["detail"]
+    assert pick(admin, ["tf"]).status_code == 200
+
+
+def test_long_final_result_is_clipped_not_rejected(admin, alice, server):
+    """结果太长时平台截断后接受：拒收的话 Agent 永远送不到，任务一直显示“进行中”。"""
+    _, token = server
+    tid = _dir_task(admin, alice, server).json()["id"]
+    r = TestClient(app).post(f"/api/agent/migrations/{tid}", headers=agent_headers(token),
+                             json={"status": "done", "phase": "完成" * 50, "message": "m" * 5000, "dest_path": "/home/" + "x" * 800})
+    assert r.status_code == 200
+    t = alice.get("/api/me/migrations").json()[0]
+    assert t["status"] == "done" and len(t["dest_path"]) == 512
+
+
+def test_sync_accepts_unknown_pid_and_matches_local_username(admin, alice, server):
+    """nvidia-smi 读不出进程号也不能让整次同步失败；改名还没生效时进程按本机旧名字上报，仍算预约者本人。"""
+    _, token = server
+    agent = TestClient(app)
+    me = alice.get("/api/me").json()
+    gid = admin.get("/api/calendar").json()["servers"][0]["gpus"][0]["id"]
+    d = str(today())
+    assert alice.post("/api/reservations", json={"gpu_ids": [gid], "start_date": d, "end_date": d}).status_code == 200
+    body = {"gpus": [{"index": 0, "uuid": "u0", "name": "A", "memory_total": 10, "memory_used": 5, "utilization": 1,
+                      "processes": [{"pid": None, "user": "", "used_memory": 1},
+                                    {"pid": 8, "user": "alice_old", "used_memory": 3}]}],
+            "accounts": [{"id": me["id"], "username": "alice_old", "state": "pending", "message": "改名暂缓"}]}
+    r = agent.post("/api/agent/sync", json=body, headers=agent_headers(token))
+    assert r.status_code == 200, r.text
+    assert r.json()["kill"] == []
+    alerts = admin.get("/api/calendar").json()["servers"][0]["gpus"][0]["alerts"]
+    assert "alice_old" not in alerts
+
+
 def test_username_rules(admin, alice):
     assert alice.put("/api/me/linux-username", json={"username": "Root"}).status_code == 400
     assert alice.put("/api/me/linux-username", json={"username": "ubuntu"}).status_code == 400

@@ -252,6 +252,43 @@ def book_long_term(db: Session, owner: User, gpus: list[GPU], note: str = "") ->
     return ids
 
 
+def local_names(server: Server) -> dict[int, str]:
+    """各成员在这台服务器上的本机用户名（Agent 上报的）：改名还没生效时仍是旧名字，和平台上的不同。
+    显卡进程按本机用户名上报，判断“是不是预约者本人”时要用它。"""
+    out = {}
+    for uid, a in server.accounts.items():
+        if isinstance(a, dict) and a.get("username") and a.get("state") != "error":
+            try:
+                out[int(uid)] = a["username"]
+            except ValueError:
+                continue
+    return out
+
+
+def today_holders(db: Session, server_id: int | None = None) -> dict[int, set[str]]:
+    """今天每张卡（gpu_id）的预约者：平台用户名 + 在那台服务器上的本机用户名。"""
+    holders: dict[int, set[str]] = {}
+    names: dict[int, dict[int, str]] = {}
+    d = today()
+    for r in overlapping(db, d, d, server_id=server_id):
+        if not r.user.linux_username:
+            continue
+        srv = r.gpu.server
+        if srv.id not in names:
+            names[srv.id] = local_names(srv)
+        local = names[srv.id].get(r.user_id)
+        holders.setdefault(r.gpu_id, set()).update(n for n in (r.user.linux_username, local) if n)
+    return holders
+
+
+def user_by_local_name(db: Session, server: Server, username: str) -> User | None:
+    """本机用户名 → 平台成员（先按 Agent 上报的对应关系，其次按平台用户名）。"""
+    for uid, name in local_names(server).items():
+        if name == username:
+            return db.get(User, uid)
+    return db.scalar(select(User).where(User.linux_username == username))
+
+
 def gpu_alerts(gpu: GPU, holders: set[str]) -> list[str]:
     """GPU 上有进程、但进程属主不是今天预约这张卡的人 → 返回这些用户名。"""
     users = set()
@@ -268,6 +305,7 @@ def track_violations(db: Session, server: Server, holders: dict[int, set[str]]) 
     grace = get_int_setting(db, "process_kill_grace_hours")
     t = now()
     known = {u for (u,) in db.execute(select(User.linux_username).where(User.linux_username.is_not(None)))}
+    known |= set(local_names(server).values())
     current: dict[tuple[int, str], list[int]] = {}
     for g in server.gpus:
         for p in g.processes:
@@ -314,12 +352,14 @@ def desired_state(db: Session, server: Server) -> list[dict]:
     ]
 
 
-def pending_migrations(db: Session, server: Server) -> list[dict]:
+def pending_migrations(db: Session, server: Server) -> tuple[list[dict], dict[str, int]]:
+    """待 Agent 执行的迁移，以及各任务是第几次执行（单独返回：放进任务本身会改变旧版 Agent 的任务指纹）。"""
     tasks = db.scalars(
         select(MigrationTask)
         .where(MigrationTask.server_id == server.id, MigrationTask.status.in_(("queued", "running")))
         .order_by(MigrationTask.id)
     )
+    tasks = [t for t in tasks if t.user.enabled and t.user.linux_username]
     return [
         {
             "id": t.id,
@@ -333,8 +373,7 @@ def pending_migrations(db: Session, server: Server) -> list[dict]:
             "created_at": t.created_at.isoformat(),
         }
         for t in tasks
-        if t.user.enabled and t.user.linux_username
-    ]
+    ], {str(t.id): t.attempt or 0 for t in tasks}
 
 
 # ---------------- 可配置项 ----------------
@@ -472,8 +511,8 @@ def notify_booked(db: Session, user_id: int, res_ids: list[int], action: str):
 
 
 def notify_violation(db: Session, server_id: int, gpu_index: int, username: str):
-    user = db.scalar(select(User).where(User.linux_username == username))
     server = db.get(Server, server_id)
+    user = user_by_local_name(db, server, username) if server else None
     if not user or not server:
         return
     gpu = next(g for g in server.gpus if g.index == gpu_index)
@@ -493,8 +532,8 @@ def notify_violation(db: Session, server_id: int, gpu_index: int, username: str)
 
 
 def notify_killed(db: Session, server_id: int, gpu_index: int, username: str, pids: list[int]):
-    user = db.scalar(select(User).where(User.linux_username == username))
     server = db.get(Server, server_id)
+    user = user_by_local_name(db, server, username) if server else None
     if not user or not server:
         return
     grace = get_int_setting(db, "process_kill_grace_hours")

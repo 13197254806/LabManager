@@ -371,7 +371,7 @@ function procUser(p) {
 // 占用某张显卡的进程：每个进程一行（Linux 用户名、进程号、位置、显存），位置是进程所在目录
 function procTable(procs) {
   if (!procs.length) return `<div class="proc-empty">当前没有进程占用这张显卡</div>`;
-  const rows = procs.map((p) => `<tr><td>${procUser(p)}</td><td>${p.pid}</td><td class="path">${esc(p.path || "-")}</td><td>${p.used_memory == null ? "-" : `${gb(p.used_memory)} GB`}</td></tr>`).join("");
+  const rows = procs.map((p) => `<tr><td>${procUser(p)}</td><td>${p.pid ?? "-"}</td><td class="path">${esc(p.path || "-")}</td><td>${p.used_memory == null ? "-" : `${gb(p.used_memory)} GB`}</td></tr>`).join("");
   return `<table class="proc-table"><tr><th>Linux 用户名</th><th>进程号</th><th>位置</th><th>显存占用</th></tr>${rows}</table>`;
 }
 
@@ -1162,7 +1162,7 @@ function taskHtml(t, admin = false) {
   const metaLeft = `${t.status === "running" ? esc(t.phase) + "　" : ""}${detail}`;
   const meta = metaLeft || speed ? `<div class="mig-meta"><span>${metaLeft}</span><span>${speed}</span></div>` : "";
   const msg = t.stalled
-    ? `<div class="note error">已超过 30 分钟没有收到服务器的进度（可能是迁移完成时平台正好连不上，结果没传回来）。可以先“标记为失败”再“重试”：已完成的迁移会直接确认完成，不会重复复制</div>`
+    ? `<div class="note error">服务器已不在执行这个迁移，或长时间没有回应（可能是迁移完成时平台正好连不上，结果没传回来）。可以先“标记为失败”再“重试”：已完成的迁移会直接确认完成，不会重复复制</div>`
     : t.message ? `<div class="note ${t.status === "failed" ? "error" : ""}">${esc(t.message)}</div>` : "";
   const body = `<div class="mig-body">${progress}${meta}${msg}</div>`;
   // 已结束的任务折叠成一行，点开才看详情；进行中 / 等待 / 失败的保持展开

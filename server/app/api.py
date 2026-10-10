@@ -279,10 +279,7 @@ def calendar(start: date | None = None, days: int = 14, user: User = Depends(cur
     end = start + timedelta(days=days - 1)
     servers = db.scalars(select(Server).options(joinedload(Server.gpus)).order_by(Server.name)).unique().all()
     d = today()
-    holders: dict[int, set[str]] = {}
-    for r in services.overlapping(db, d, d):
-        if r.user.linux_username:
-            holders.setdefault(r.gpu_id, set()).add(r.user.linux_username)
+    holders = services.today_holders(db)
     return {
         "start": start.isoformat(),
         "days": days,
@@ -644,14 +641,23 @@ def admin_test_welcome(me: User = Depends(admin_user), db: Session = Depends(get
 # ---------------- 文件迁移 ----------------
 
 
-# 进行中的迁移超过这么久没有收到进度：可能是完成时正好连不上平台、结果丢了，或 Agent 停了。
-# conda 自检、删除原环境等步骤中间不上报进度，所以留得宽一些
+# “进行中”的迁移已经没人在做：比如完成时正好连不上平台、结果丢了，或 Agent 停了
+# 新版 Agent 每次同步都报告自己正在执行哪个迁移，据此判断（留几分钟给 Agent 重启后接着做）；
+# 旧版不报告、或 Agent 长时间没同步时，只能按多久没收到进度来猜（conda 自检等步骤中间不上报，所以留得宽一些）
 MIGRATION_STALL = timedelta(minutes=30)
+MIGRATION_ORPHAN = timedelta(minutes=5)
 STALLED_PHASE = "失去联系"
 
 
 def _stalled(t: MigrationTask) -> bool:
-    return t.status == "running" and t.updated_at is not None and now() - t.updated_at > MIGRATION_STALL
+    if t.status != "running" or t.updated_at is None:
+        return False
+    idle = now() - t.updated_at
+    srv = t.server
+    agent_fresh = srv.last_seen_at is not None and now() - srv.last_seen_at < MIGRATION_ORPHAN
+    if srv.current_migration is None or not agent_fresh:
+        return idle > MIGRATION_STALL
+    return srv.current_migration != t.id and idle > MIGRATION_ORPHAN
 
 
 def task_out(t: MigrationTask) -> dict:
@@ -698,6 +704,46 @@ def _related(a: str, b: str) -> bool:
 DEST_NAME_RE = re.compile(r"^[\w.-][\w .+@-]{0,126}$")
 
 
+def _check_dir_claim(db: Session, server_id: int, source: str, exclude: int | None = None):
+    """移动 / 原地保留会把文件从共享位置拿走：同一个目录只能有一个人这样做，已被别人申请移走的也不能再复制。
+    路径有包含关系（上级或下级已被别人移走）同样算冲突。"""
+    claimed = db.scalars(
+        select(MigrationTask).where(
+            MigrationTask.server_id == server_id,
+            MigrationTask.kind == "dir",
+            MigrationTask.mode.in_(("move", "link")),
+            MigrationTask.status.in_(MigrationTask.ACTIVE + ("done",)),
+            MigrationTask.id != (exclude or 0),
+        )
+    ).all()
+    clash = next((t for t in claimed if _related(t.source, source)), None)
+    if clash:
+        raise HTTPException(409, f"该目录已被 {clash.user.name} 申请迁移")
+
+
+def _check_env_claim(db: Session, server_id: int, options: dict, exclude: int | None = None):
+    """conda 环境是“移动”（迁完删掉共享账号里的原环境）：同一个环境同时只能有一个人在迁。"""
+    legacy = options.get("legacy_user")
+    want = {(c.get("name"), e) for c in options.get("conda") or [] for e in c.get("envs") or []}
+    if not want:
+        return
+    active = db.scalars(
+        select(MigrationTask).where(
+            MigrationTask.server_id == server_id,
+            MigrationTask.kind == "profile",
+            MigrationTask.status.in_(MigrationTask.ACTIVE),
+            MigrationTask.id != (exclude or 0),
+        )
+    ).all()
+    for t in active:
+        o = t.options
+        if o.get("legacy_user") != legacy:
+            continue
+        both = want & {(c.get("name"), e) for c in o.get("conda") or [] for e in c.get("envs") or []}
+        if both:
+            raise HTTPException(409, f"conda 环境 {'、'.join(sorted(e for _n, e in both))} 已被 {t.user.name} 申请迁移")
+
+
 class MigrationIn(BaseModel):
     server_id: int
     source: str = Field(max_length=512)
@@ -726,19 +772,7 @@ def create_migration(body: MigrationIn, bg: BackgroundTasks, user: User = Depend
     dest = body.dest_name.strip()
     if not DEST_NAME_RE.match(dest) or dest in (".", ".."):
         raise HTTPException(400, "目标文件夹名只能包含字母、数字、中文和 . _ - 等字符")
-    # 移动 / 原地保留会把文件从共享位置拿走，同一个目录只能有一个人这样做；复制不受限制
-    # 路径有包含关系（上级或下级已被别人移走）同样算冲突
-    claimed = db.scalars(
-        select(MigrationTask).where(
-            MigrationTask.server_id == server.id,
-            MigrationTask.kind == "dir",
-            MigrationTask.mode.in_(("move", "link")),
-            MigrationTask.status.in_(MigrationTask.ACTIVE + ("done",)),
-        )
-    ).all()
-    clash = next((t for t in claimed if _related(t.source, source)), None)
-    if clash:
-        raise HTTPException(409, f"该目录已被 {clash.user.name} 申请迁移")
+    _check_dir_claim(db, server.id, source)
     need_approval = (
         body.mode != "copy" and services.get_setting(db, "migration_requires_approval") == "1" and not user.is_admin
     )
@@ -796,6 +830,7 @@ def create_profile_migration(
     if not body.configs and not picks:
         raise HTTPException(400, "请至少选择一项")
     options = {"legacy_user": body.legacy_user, "configs": sorted(set(body.configs)), "conda": picks}
+    _check_env_claim(db, server.id, options)
     t = MigrationTask(
         user_id=user.id, server_id=server.id, kind="profile", source=legacy.get("home", ""), mode="copy",
         dest_name="", options_json=json.dumps(options, ensure_ascii=False), status="queued", phase="排队中",
@@ -827,7 +862,14 @@ def retry_migration(tid: int, user: User = Depends(current_user), db: Session = 
     t = _own_task(db, tid, user)
     if t.status != "failed":
         raise HTTPException(400, "只有失败的迁移可以重试")
+    # 失败期间别人可能已经申请了同一个目录 / 环境
+    if t.kind == "dir":
+        _check_dir_claim(db, t.server_id, t.source, exclude=t.id)
+    if t.kind == "profile":
+        _check_env_claim(db, t.server_id, t.options, exclude=t.id)
     t.status, t.phase, t.message = "queued", "排队中", ""
+    t.finished_at = None
+    t.attempt = (t.attempt or 0) + 1
     db.commit()
     return task_out(t)
 
@@ -837,9 +879,9 @@ def abandon_migration(tid: int, user: User = Depends(current_user), db: Session 
     """长时间没有进度的迁移标记为失败，之后可以重试。Agent 晚些送到的真实结果仍会被接受（见 agent_migration_progress）。"""
     t = _own_task(db, tid, user)
     if not _stalled(t):
-        raise HTTPException(400, "迁移仍在正常进行，不能标记为失败")
+        raise HTTPException(400, "服务器还在执行这个迁移，不能标记为失败")
     t.status, t.phase, t.finished_at = "failed", STALLED_PHASE, now()
-    t.message = "长时间没有收到服务器的进度，已标记为失败，可以点“重试”。如果迁移其实已在服务器上完成，重试会直接确认完成，不会重复复制"
+    t.message = "服务器已不在执行这个迁移（或长时间没有回应），已标记为失败，可以点“重试”。如果迁移其实已在服务器上完成，重试会直接确认完成，不会重复复制"
     db.commit()
     return task_out(t)
 
@@ -867,7 +909,7 @@ def admin_review_migration(tid: int, action: str, _: User = Depends(admin_user),
 
 
 class ProcessIn(BaseModel):
-    pid: int
+    pid: int | None = None  # nvidia-smi 在容器 / vGPU 等环境里可能给出 [N/A]
     user: str = ""
     used_memory: int | None = None
     path: str = ""
@@ -918,6 +960,7 @@ class AgentReport(BaseModel):
     system: dict | None = None
     killed: list[KilledIn] | None = None  # 上一轮按平台清单终止的进程
     link: str = ""          # "direct" / "tunnel"：这次是怎么连上平台的
+    current_migration: int | None = None  # 正在执行的迁移 id，0 = 没有；旧版 Agent 不报（None）
     lan_ip: str | None = None  # 直连为主的机器上报的当前内网 IP（IP 不固定时，备用隧道跟着换地址）
 
 
@@ -964,6 +1007,7 @@ def agent_sync(
     server.agent_version = body.agent_version[:32]
     if body.link in ("direct", "tunnel"):
         server.link = body.link
+    server.current_migration = body.current_migration
     if body.lan_ip and body.lan_ip != server.host and _is_lan_ip(body.lan_ip):
         log.info("服务器 %s 的内网地址变为 %s（原 %s），备用隧道改连新地址", server.name, body.lan_ip, server.host or "空")
         server.host = body.lan_ip
@@ -1009,10 +1053,8 @@ def agent_sync(
     db.commit()
 
     users = services.desired_state(db, server)
-    holders: dict[int, set[str]] = {}
     d = today()
-    for r in services.overlapping(db, d, d, server_id=server.id):
-        holders.setdefault(r.gpu_id, set()).add(r.user.linux_username)
+    holders = services.today_holders(db, server_id=server.id)
     kill = services.track_violations(db, server, holders)
     for g in server.gpus:
         for name in services.gpu_alerts(g, holders.get(g.id, set())):
@@ -1022,6 +1064,7 @@ def agent_sync(
         done.setdefault((k.gpu, k.user), []).append(k.pid)
     for (gpu_index, username), pids in done.items():
         bg.add_task(_bg, services.notify_killed, server.id, gpu_index, username, pids)
+    migrations, attempts = services.pending_migrations(db, server)
 
     return {
         "server": server.name,
@@ -1031,21 +1074,23 @@ def agent_sync(
         "require_reservation_to_login": services.get_setting(db, "require_reservation_to_login") == "1",
         # Agent 按这个间隔（秒）同步 / 上报，和网页刷新间隔一致
         "interval": services.get_int_setting(db, "refresh_interval_seconds"),
-        "migrations": services.pending_migrations(db, server),
+        "migrations": migrations,
+        "migration_attempts": attempts,
         # 在没预约的卡上超过缓冲期的进程：Agent 核对后终止，下一轮同步时上报结果
         "kill": kill,
     }
 
 
 class MigrationProgress(BaseModel):
+    # 文字字段不限长度、在下面截断：超长就拒收的话，最终结果永远送不到，任务一直卡在“进行中”
     status: str = Field(pattern="^(running|done|failed)$")
-    phase: str = Field(default="", max_length=64)
+    phase: str = ""
     bytes_done: int = 0
     bytes_total: int = 0
     files_done: int = 0
     files_total: int = 0
-    message: str = Field(default="", max_length=2000)
-    dest_path: str = Field(default="", max_length=512)
+    message: str = ""
+    dest_path: str = ""
 
 
 class BrowseIn(BaseModel):
@@ -1127,7 +1172,7 @@ def agent_migration_progress(
     if t.status not in ("queued", "running") and not late:
         return {"ok": False, "status": t.status}
     t.status = body.status
-    t.phase, t.message, t.dest_path = body.phase[:32], body.message, body.dest_path or t.dest_path
+    t.phase, t.message, t.dest_path = body.phase[:32], body.message[:4000], body.dest_path[:512] or t.dest_path
     t.bytes_done, t.bytes_total = body.bytes_done, body.bytes_total
     t.files_done, t.files_total = body.files_done, body.files_total
     t.updated_at = now()  # 进度没变也算一次心跳（值都没变时 onupdate 不会触发）

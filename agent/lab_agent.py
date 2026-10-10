@@ -52,7 +52,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.9.2"
+VERSION = "0.9.3"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -154,6 +154,21 @@ def is_conda_root(path):
     return os.path.isdir(os.path.join(path, "conda-meta")) and os.path.exists(os.path.join(path, "bin", "conda"))
 
 
+def gecos_id(pw):
+    """账号 GECOS 里记的平台成员 id（"lab-agent #13"，chfn 可能在后面追加“,房间号,...”）；没有记录时返回 None。"""
+    m = re.match(r"^%s(\d+)$" % re.escape(GECOS_PREFIX), pw.pw_gecos.split(",")[0])
+    return int(m.group(1)) if m else None
+
+
+def same_member(pw, member_id, uid):
+    """本机账号 pw 是否属于平台成员 member_id。GECOS 里记了平台 id 的只认 id：建号时平台 uid 被占用会改用
+    系统分配的 uid（max+1），它可能正好等于以后某个成员的平台 uid。没记 id 的（早期账号）才按 uid 认。"""
+    tagged = gecos_id(pw)
+    if tagged is not None:
+        return member_id is not None and tagged == int(member_id)
+    return uid is not None and pw.pw_uid == int(uid)
+
+
 def has_processes(uid):
     for pid in os.listdir("/proc"):
         if pid.isdigit():
@@ -203,7 +218,7 @@ class Agent(object):
         self._cpu_prev = None
         self._last_summary = None
         self.migration = None      # 正在执行的 Migration
-        self.finished = set()      # 本进程内已经执行完的迁移 id
+        self.finished = set()      # 本进程内已经执行完的迁移 (id, 第几次执行)
         self.pending_migrations = False
         self.wake = threading.Event()  # 扫描完成 / 迁移结束时立即触发一次同步
         self.last_contact = time.time()  # 最近一次收到平台响应（含 HTTP 错误）的时间
@@ -360,7 +375,7 @@ class Agent(object):
             return []
         gpus, by_uuid = [], {}
         for r in rows:
-            if len(r) < 6:
+            if len(r) < 6 or self._num(r[0]) is None:
                 continue
             g = {
                 "index": self._num(r[0]), "uuid": r[1], "name": r[2],
@@ -737,6 +752,8 @@ class Agent(object):
             sent_kills = list(self.killed)
         if sent_kills:
             payload["killed"] = sent_kills
+        m = self.migration
+        payload["current_migration"] = m.id if m and m.is_alive() else 0  # 平台据此判断“进行中”的任务是否还有人在做
         if self.accounts is not None:
             payload["accounts"] = self.accounts
             self._sent_accounts = self.accounts
@@ -774,15 +791,19 @@ class Agent(object):
         return name in group_members(GROUP_MANAGED) or name in self.adopt
 
     def find_local(self, u, managed):
-        """按 uid（其次按 GECOS 里的平台 id）找到这个成员在本机的托管账号。"""
-        for name in managed:
+        """找到这个成员在本机的托管账号（见 same_member）。GECOS 里 id 对得上的优先于只有 uid 对得上的。"""
+        by_uid = None
+        for name in sorted(managed):
             try:
                 pw = pwd.getpwnam(name)
             except KeyError:
                 continue
-            if pw.pw_uid == int(u["uid"]) or pw.pw_gecos == GECOS_PREFIX + str(u["id"]):
+            if not same_member(pw, u.get("id"), u.get("uid")):
+                continue
+            if gecos_id(pw) is not None:
                 return pw
-        return None
+            by_uid = by_uid or pw
+        return by_uid
 
     def create_user(self, u):
         name, uid = u["username"], int(u["uid"])
@@ -963,6 +984,11 @@ class Agent(object):
                 if self._exists(name):
                     if not self.can_manage(name):
                         status.update(state="error", message="本机已存在同名账号（非平台管理），请换一个用户名或联系管理员")
+                        continue
+                    owner = gecos_id(pwd.getpwnam(name))
+                    if owner is not None and owner != u.get("id"):
+                        # 另一位成员的账号（他改名还没生效，暂时还叫这个名字）：不能接管，否则两人共用一个账号
+                        status.update(state="pending", message="本机账号 %s 仍属于另一位成员（他的改名还没生效），生效后会自动创建" % name)
                         continue
                     log.info("接管已有账号 %s（配置 adopt_users）", name)
                     self.run("usermod", "-aG", GROUP_MANAGED, "-c", GECOS_PREFIX + str(u["id"]), name)
@@ -1176,7 +1202,7 @@ class Agent(object):
         if self.migration and self.migration.is_alive():
             return
         for t in tasks:
-            if t["id"] not in self.finished:
+            if (t["id"], t.get("_attempt", 0)) not in self.finished:
                 self.migration = Migration(self, t)
                 self.migration.start()
                 return
@@ -1200,10 +1226,13 @@ class Agent(object):
         if self.accounts != getattr(self, "_sent_accounts", None):
             self.sync()  # 账号状态有变化（新建、改名、出错），立即上报给平台
         listed = state.get("migrations") or []
-        # 平台已不再把它列为待执行（完成 / 失败已上报）的，就不必再记着：否则管理员或成员点“重试”后，
-        # 同一个任务 id 会被一直当作“已执行过”而跳过，直到 Agent 重启
-        self.finished &= {t["id"] for t in listed}
-        tasks = [t for t in listed if t["id"] not in self.finished]
+        # 已执行过的按 (任务 id, 第几次执行) 记：成员点“重试”后次数加一，即使平台一直列着它（结果上报后很快就点了重试），
+        # 也会当作新的一次执行。次数放在单独的字段里而不放进任务本身，任务指纹（完成标记）不受影响
+        attempts = state.get("migration_attempts") or {}
+        for t in listed:
+            t["_attempt"] = int(attempts.get(str(t["id"]), 0))
+        self.finished &= {(t["id"], t["_attempt"]) for t in listed}
+        tasks = [t for t in listed if (t["id"], t["_attempt"]) not in self.finished]
         self.pending_migrations = bool(tasks)
         self.handle_migrations(tasks)
 
@@ -1513,8 +1542,9 @@ class Migration(threading.Thread):
     def __init__(self, agent, task):
         threading.Thread.__init__(self, daemon=True, name="migration-%s" % task["id"])
         self.agent = agent
-        self.t = task
+        self.t = {k: v for k, v in task.items() if k != "_attempt"}
         self.id = int(task["id"])
+        self.key = (self.id, int(task.get("_attempt", 0)))
         self.kind = task.get("kind") or "dir"
         self.p = {"phase": "", "bytes_done": 0, "bytes_total": 0, "files_done": 0, "files_total": 0}
         self.notes = []
@@ -1524,7 +1554,7 @@ class Migration(threading.Thread):
         self._last = 0
         self.marker = os.path.join(STATE_DIR, "migration-%d.json" % self.id)
         # 任务指纹：平台数据库重建后任务 id 会重新从 1 开始，不能只凭 id 认定“这个任务以前做完了”
-        self.sig = json.dumps(task, sort_keys=True, ensure_ascii=False)
+        self.sig = json.dumps(self.t, sort_keys=True, ensure_ascii=False)
 
     def report(self, status="running", force=False, **kw):
         self.p.update(kw)
@@ -1540,9 +1570,11 @@ class Migration(threading.Thread):
 
     def _post(self, status):
         payload = dict(self.p, status=status)
-        payload["phase"] = payload["phase"][:60]  # 平台限制 64 字符，过长会被拒绝，进度就不再更新
-        payload.setdefault("message", "")
-        self.agent.post("/api/agent/migrations/%d" % self.id, payload, timeout=10)
+        # 不超过平台的字段长度（新平台会自己截断，旧平台超长直接拒收，最终结果就永远送不到）
+        payload["phase"] = payload["phase"][:60]
+        payload["message"] = payload.get("message", "")[:1900]
+        payload["dest_path"] = payload.get("dest_path", "")[:500]
+        return self.agent.post("/api/agent/migrations/%d" % self.id, payload, timeout=10)
 
     def report_final(self, status, **kw):
         """上报完成 / 失败。这一次丢了，平台上就一直显示“进行中”（之后平台仍列着它，但本机已记为做过、不会再报），
@@ -1563,7 +1595,29 @@ class Migration(threading.Thread):
 
     retry_wait = staticmethod(time.sleep)
 
+    def claim(self):
+        """动手之前先向平台认领（状态改为进行中）：成员可能在 Agent 取到任务之后、开始之前取消了它。
+        返回 True 才开始；连不上平台时返回 None（不算执行过，下次同步再试）。"""
+        try:
+            res = self._post("running")
+        except urllib.error.HTTPError as e:
+            log.warning("平台拒绝了迁移 #%d: %s", self.id, e)
+            return False
+        except Exception as e:  # noqa: BLE001
+            log.warning("迁移 #%d 暂不开始（连不上平台）: %s", self.id, e)
+            return None
+        if isinstance(res, dict) and res.get("ok") is False:
+            log.info("迁移 #%d 在平台上已是“%s”，不执行", self.id, res.get("status"))
+            return False
+        return True
+
     def run(self):
+        self.p["phase"] = "准备中"
+        claimed = self.claim()
+        if not claimed:
+            if claimed is False:
+                self.agent.finished.add(self.key)
+            return
         log.info("开始迁移 #%d (%s): %s", self.id, self.kind, self.t.get("source"))
         try:
             dest = self.execute_profile() if self.kind == "profile" else self.execute_dir()
@@ -1584,7 +1638,7 @@ class Migration(threading.Thread):
             log.exception("迁移 #%d 出错", self.id)
             self.report_final("failed", phase="失败", message="内部错误：%s" % e)
         finally:
-            self.agent.finished.add(self.id)
+            self.agent.finished.add(self.key)
             try:
                 self.agent.scan_candidates()  # 刷新可迁移列表
             except Exception:  # noqa: BLE001
@@ -1617,8 +1671,8 @@ class Migration(threading.Thread):
             pass
 
     def owns(self, pw):
-        """pw 是否就是这个任务的成员的本机账号（和同步账号时一样按 uid，其次按 GECOS 里的平台 id）。"""
-        return pw.pw_uid == int(self.t["uid"]) or pw.pw_gecos == GECOS_PREFIX + str(self.t.get("user_id"))
+        """pw 是否就是这个任务的成员的本机账号（与同步账号时的规则相同，见 same_member）。"""
+        return same_member(pw, self.t.get("user_id"), self.t.get("uid"))
 
     def _user(self):
         # 不能只按平台 uid 找：接管的已有账号（adopt_users）或建号时 uid 被占用的账号，本机 uid 与平台不同
@@ -2144,9 +2198,9 @@ class Migration(threading.Thread):
             self.notes.append("conda 环境 %s 已从共享账号移走" % name if err is None
                               else "conda 环境 %s 已复制到你的家目录，但没能删除共享账号里的原环境：%s" % (name, err))
         self._rmdir_quiet(stage_parent)
-        final = "%s（%s）" % (home, "、".join(labels))
-        self._save_marker(final, check=home)
-        return final
+        log.info("迁移 #%d 放入 %s：%s", self.id, home, "、".join(labels))
+        self._save_marker(home)
+        return home
 
     @staticmethod
     def _makedirs_owned(stage, rel_dir, uid, gid):
