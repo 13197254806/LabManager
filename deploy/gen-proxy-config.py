@@ -3,8 +3,9 @@
 
 学校 WebVPN 封了云服务器 IP，隧道要经家宽代理出口访问。这里用 mihomo 把 ss 家宽节点
 变成本机一个 HTTP/SOCKS 代理（mixed-port 7891），隧道的 WebVPN 流量都走它。
-多个节点做成 fallback：第一个（建议填家宽）不通自动切下一个。健康检查打的是
-generate_204，不碰 WebVPN。
+多个节点做成 fallback：按顺序用第一个通的。健康检查直接打 WebVPN 登录页并要求 200：
+节点能上外网却到不了学校（TLS 被掐 / 502），或出口 IP 被 WebVPN 封（403），都算不通，
+自动换下一个；前面的恢复了再切回去。每 2 分钟 GET 一次登录页，不登录、不计入登录次数。
 
 用法：WEBVPN_PROXY_NODES='ss://...,ss://...' python3 gen-proxy-config.py > config.yaml
     或  python3 gen-proxy-config.py <.env 路径> <输出路径>
@@ -100,7 +101,7 @@ def _scalar(v):
     return s
 
 
-def build_config(nodes_str):
+def build_config(nodes_str, portal="https://webvpn.whut.edu.cn"):
     urls = [u.strip() for u in nodes_str.split(",") if u.strip()]
     if not urls:
         sys.exit("WEBVPN_PROXY_NODES 为空：请在 .env 里填至少一个 ss:// 家宽节点")
@@ -126,7 +127,8 @@ def build_config(nodes_str):
         "proxies": proxies,
         "proxy-groups": [{
             "name": "PROXY", "type": "fallback", "proxies": names,
-            "url": "http://www.gstatic.com/generate_204", "interval": 300,
+            "url": portal.rstrip("/") + "/login", "expected-status": 200,
+            "interval": 120, "timeout": 10000,
         }],
         "rules": ["MATCH,PROXY"],
     }
@@ -149,7 +151,8 @@ def read_env_var(env_path, key):
 def main():
     if len(sys.argv) >= 2:
         nodes = read_env_var(sys.argv[1], "WEBVPN_PROXY_NODES")
-        out = build_config(nodes)
+        portal = read_env_var(sys.argv[1], "WEBVPN_PORTAL") or "https://webvpn.whut.edu.cn"
+        out = build_config(nodes, portal)
         if len(sys.argv) >= 3:
             os.makedirs(os.path.dirname(sys.argv[2]) or ".", exist_ok=True)
             with open(sys.argv[2], "w") as f:
@@ -158,7 +161,8 @@ def main():
         else:
             sys.stdout.write(out)
     else:
-        sys.stdout.write(build_config(os.environ.get("WEBVPN_PROXY_NODES", "")))
+        sys.stdout.write(build_config(os.environ.get("WEBVPN_PROXY_NODES", ""),
+                                      os.environ.get("WEBVPN_PORTAL") or "https://webvpn.whut.edu.cn"))
 
 
 if __name__ == "__main__":

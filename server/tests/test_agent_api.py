@@ -29,6 +29,14 @@ def test_desired_state(admin, alice, server):
     assert not users["adminuser"]["active"]
 
 
+def test_sync_returns_platform_time(server):
+    import time
+
+    _, token = server
+    r = TestClient(app).post("/api/agent/sync", json={"gpus": []}, headers=agent_headers(token)).json()
+    assert abs(r["server_time"] - time.time()) < 5
+
+
 def test_violation_alert_does_not_crash(admin, alice, server):
     _, token = server
     agent = TestClient(app)

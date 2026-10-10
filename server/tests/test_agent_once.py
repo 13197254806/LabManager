@@ -461,3 +461,38 @@ def test_sync_reports_link_and_lan_ip_only_with_fallback(monkeypatch):
         a.sync()
         assert ("lan_ip" in sent[-1]) is has_ip
     assert [p["link"] for p in sent] == ["tunnel", "direct"]
+
+
+def _clock_agent(monkeypatch, synced=False):
+    a = lab_agent.Agent({"server_url": "http://127.0.0.1:18765", "token": "t"})
+    monkeypatch.setattr(a, "ntp_synced", lambda: synced)
+    t = [10000.0]
+    monkeypatch.setattr(lab_agent.time, "time", lambda: t[0])
+    stepped = []
+
+    def settime(clk, value):
+        stepped.append(value - t[0])
+        t[0] = value
+
+    monkeypatch.setattr(lab_agent.time, "clock_settime", settime, raising=False)
+    return a, t, stepped
+
+
+def test_clock_is_set_to_platform_time_when_off(monkeypatch):
+    a, t, stepped = _clock_agent(monkeypatch)
+    a.last_contact = 10000.0
+    a.fix_clock(server_time=10000.5 - 960, t0=10000.0, t1=10001.0)  # 本机快 16 分钟
+    assert stepped == [-960]
+    assert a.last_contact == 10000.0 - 960   # 记下的时刻跟着平移
+    assert a.last_heal == 0.0                # 没记过的不动
+
+
+def test_clock_left_alone_when_close_ntp_synced_slow_or_old_platform(monkeypatch):
+    a, t, stepped = _clock_agent(monkeypatch)
+    a.fix_clock(10000.5 + 1, 10000.0, 10001.0)   # 差 1 秒：不动
+    a.fix_clock(10002.5 - 600, 10000.0, 10005.0)  # 往返 5 秒：误差太大，这轮不校
+    a.fix_clock(None, 10000.0, 10001.0)           # 旧平台不下发时间
+    assert stepped == []
+    a, t, stepped = _clock_agent(monkeypatch, synced=True)
+    a.fix_clock(10000.5 - 960, 10000.0, 10001.0)  # 本机 NTP 正常：交给系统
+    assert stepped == []
