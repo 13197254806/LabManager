@@ -114,8 +114,10 @@ class Server(Base):
 
     @property
     def data_disks(self) -> list[dict]:
-        """数据盘（家目录所在盘以外的硬盘，Agent 上报）：[{mount, total, used}]，单位 MiB。"""
-        return [d for d in self.sysinfo.get("disks") or [] if not d.get("home") and d.get("mount")]
+        """数据盘（家目录所在盘以外、挂在非系统目录的硬盘，Agent 上报）：[{mount, total, used}]，单位 MiB。
+        0.9.6 起 Agent 直接标出 data；平台再按挂载点核对一遍（/home 单独分区时，根分区 / 不能当数据盘）。"""
+        return [d for d in self.sysinfo.get("disks") or []
+                if not d.get("home") and d.get("data", True) and is_data_mount(d.get("mount") or "")]
 
     @property
     def supports_data_disk(self) -> bool:
@@ -123,6 +125,14 @@ class Server(Base):
             return tuple(int(x) for x in (self.agent_version or "").split(".")[:3]) >= self.DATA_DISK_AGENT
         except ValueError:
             return False
+
+
+# 系统目录：挂在这些位置的盘不算数据盘（与 Agent 的 is_data_mount 一致）
+SYSTEM_DIRS = ("/usr", "/var", "/etc", "/opt", "/srv", "/snap", "/root", "/tmp", "/boot", "/proc", "/sys", "/dev", "/run")
+
+
+def is_data_mount(mnt: str) -> bool:
+    return mnt.startswith("/") and mnt != "/" and not any(mnt == d or mnt.startswith(d + "/") for d in SYSTEM_DIRS)
 
 
 def _loads(text, default):
