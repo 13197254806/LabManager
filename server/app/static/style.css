@@ -266,6 +266,7 @@ svg.i.chev { width: 14px; height: 14px; color: var(--faint); transition: transfo
 .gpu-detail { font-size: 12px; }
 .gpu-free { position: absolute; left: 14px; top: 50%; width: 8px; height: 8px; margin-top: -4px; border-radius: 50%; background: var(--line-strong); }
 .gpu-free.free { background: var(--ok); }
+.gpu-free.part { background: linear-gradient(90deg, var(--ok) 50%, var(--line-strong) 50%); }  /* 有人预约、还能共用 */
 /* “?” 提示 */
 .help { display: inline-flex; align-items: center; justify-content: center; width: 15px; height: 15px; margin-left: 4px; border-radius: 50%; border: 1px solid var(--line-strong); color: var(--muted); font-size: 11px; font-weight: 400; cursor: help; vertical-align: 1px; }
 .help:hover { color: var(--primary); border-color: var(--primary); }
