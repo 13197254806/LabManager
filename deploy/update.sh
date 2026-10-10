@@ -31,6 +31,17 @@ done
 # Caddyfile 有改动时生效（Caddy 不会自动重读配置文件）
 "${DC[@]}" exec -T caddy caddy reload --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1 || true
 
+# gen-proxy-config.py 改了（比如健康检查规则）时重新生成家宽代理配置；没变化就不动，隧道不断
+if grep -q '^COMPOSE_PROFILES=.*campus' .env && grep -q '^WEBVPN_PROXY_NODES=.\+' .env; then
+    mkdir -p data/proxy
+    if python3 gen-proxy-config.py .env data/proxy/config.yaml.new && ! cmp -s data/proxy/config.yaml.new data/proxy/config.yaml; then
+        mv data/proxy/config.yaml.new data/proxy/config.yaml
+        "${DC[@]}" restart proxy && echo "==> 家宽代理配置已更新，proxy 已重启"
+    else
+        rm -f data/proxy/config.yaml.new
+    fi
+fi
+
 "${DC[@]}" ps
 # 清理构建留下的无用镜像层，避免磁盘越用越满
 "${DOCKER[@]}" image prune -f >/dev/null 2>&1 || true

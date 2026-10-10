@@ -3,9 +3,11 @@
 
 学校 WebVPN 封了云服务器 IP，隧道要经家宽代理出口访问。这里用 mihomo 把 ss 家宽节点
 变成本机一个 HTTP/SOCKS 代理（mixed-port 7891），隧道的 WebVPN 流量都走它。
-多个节点做成 fallback：按顺序用第一个通的。健康检查直接打 WebVPN 登录页并要求 200：
+多个节点做成 fallback：按顺序用第一个通的。健康检查直接打 WebVPN 登录页：
 节点能上外网却到不了学校（TLS 被掐 / 502），或出口 IP 被 WebVPN 封（403），都算不通，
-自动换下一个；前面的恢复了再切回去。每 2 分钟 GET 一次登录页，不登录、不计入登录次数。
+自动换下一个；前面的恢复了再切回去。每分钟请求一次登录页，不登录、不计入登录次数。
+注意 mihomo 健康检查发的是 HEAD 且不跟随跳转，WebVPN 对 HEAD /login 回 302（GET 才是 200），
+所以 200 和 302 都算通；只写 200 会把所有节点都判死，fallback 就一直卡在第一个节点上。
 
 用法：WEBVPN_PROXY_NODES='ss://...,ss://...' python3 gen-proxy-config.py > config.yaml
     或  python3 gen-proxy-config.py <.env 路径> <输出路径>
@@ -127,8 +129,8 @@ def build_config(nodes_str, portal="https://webvpn.whut.edu.cn"):
         "proxies": proxies,
         "proxy-groups": [{
             "name": "PROXY", "type": "fallback", "proxies": names,
-            "url": portal.rstrip("/") + "/login", "expected-status": 200,
-            "interval": 120, "timeout": 10000,
+            "url": portal.rstrip("/") + "/login", "expected-status": "200/302",
+            "interval": 60, "timeout": 10000,
         }],
         "rules": ["MATCH,PROXY"],
     }
