@@ -74,6 +74,8 @@ class Server(Base):
     sysinfo_json: Mapped[str] = mapped_column(Text, default="{}")
     # Agent 最近一次怎么连上平台的："direct" 直连公网地址 / "tunnel" 经校园网隧道
     link: Mapped[str | None] = mapped_column(String(16))
+    # Agent 最近一次同步时正在执行的迁移 id：0 = 没有在执行；NULL = 旧版 Agent 不报告
+    current_migration: Mapped[int | None] = mapped_column(Integer)
 
     gpus: Mapped[list["GPU"]] = relationship(
         back_populates="server", cascade="all, delete-orphan", order_by="GPU.index"
@@ -184,6 +186,8 @@ class MigrationTask(Base):
     started_at: Mapped[datetime | None] = mapped_column(DateTime)
     finished_at: Mapped[datetime | None] = mapped_column(DateTime)
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=now, onupdate=now)
+    # 第几次执行：每次“重试”加一。Agent 按 (id, attempt) 记已执行过的任务，结果上报后很快就重试也不会被当成做过
+    attempt: Mapped[int] = mapped_column(Integer, default=0)
 
     user: Mapped[User] = relationship()
     server: Mapped[Server] = relationship()

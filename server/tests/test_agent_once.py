@@ -11,13 +11,14 @@ lab_agent = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(lab_agent)
 
 
-def make_agent(listed):
+def make_agent(listed, attempts=None):
     a = lab_agent.Agent({"server_url": "http://x", "token": "t"})
-    a.sync = lambda: {"server": "s", "date": "d", "users": [], "migrations": [{"id": i} for i in listed[0]]}
+    a.sync = lambda: {"server": "s", "date": "d", "users": [], "migrations": [{"id": i} for i in listed[0]],
+                      "migration_attempts": dict(attempts or {})}
     a.reconcile = lambda users: setattr(a, "accounts", [])
     a._sent_accounts = []
     started = []
-    a.handle_migrations = lambda tasks: started.extend(t["id"] for t in tasks)
+    a.handle_migrations = lambda tasks: started.extend((t["id"], t["_attempt"]) for t in tasks)
     return a, started
 
 
@@ -25,16 +26,28 @@ def test_failed_migration_can_be_retried_without_restarting_agent():
     listed = [[7]]
     a, started = make_agent(listed)
     a.once()
-    assert started == [7]
-    a.finished.add(7)          # 迁移线程跑完（失败）后记下
+    assert started == [(7, 0)]
+    a.finished.add((7, 0))     # 迁移线程跑完（失败）后记下
     a.once()                   # 平台还没处理上报：仍列着它，不能重复执行
-    assert started == [7]
+    assert started == [(7, 0)]
     listed[0] = []             # 平台已记为 failed，不再列出
     a.once()
-    assert 7 not in a.finished
+    assert not a.finished
     listed[0] = [7]            # 成员点了“重试”：重新排队
     a.once()
-    assert started == [7, 7]
+    assert started == [(7, 0), (7, 0)]
+
+
+def test_quick_retry_is_not_mistaken_for_already_done():
+    """结果上报后很快就点了重试：Agent 从没看到它“不在列表里”，但次数变了，仍要重新执行。"""
+    listed, attempts = [[7]], {"7": 0}
+    a, started = make_agent(listed, attempts)
+    a.sync = lambda: {"server": "s", "date": "d", "users": [], "migrations": [{"id": 7}], "migration_attempts": dict(attempts)}
+    a.once()
+    a.finished.add((7, 0))
+    attempts["7"] = 1
+    a.once()
+    assert started == [(7, 0), (7, 1)]
 
 
 def test_remove_moved_env(tmp_path):
@@ -253,6 +266,79 @@ def test_final_migration_result_is_retried_until_platform_receives_it(monkeypatc
 
     a.post = rejected
     assert not m.report_final("failed", phase="失败")
+
+
+def _pw(name, uid, gecos, home="/nonexistent"):
+    return lab_agent.pwd.struct_passwd((name, "x", uid, uid, gecos, home, "/bin/bash"))
+
+
+def test_find_local_prefers_platform_id_over_uid(monkeypatch):
+    """系统分配的 uid 可能正好等于另一个成员的平台 uid：GECOS 里记了别人 id 的账号，uid 对上也不能认。"""
+    users = {
+        "alice": _pw("alice", 10015, "lab-agent #3"),        # 建号时平台 uid 被占，系统分配到 10015
+        "bob": _pw("bob", 1002, "lab-agent #15,Room 1,,"),   # 平台 uid 10015 的成员（chfn 加过房间号）
+        "old": _pw("old", 10020, "Old User,,,"),             # 早期没记 id 的账号：只能按 uid 认
+    }
+    monkeypatch.setattr(lab_agent.pwd, "getpwnam", lambda n: users[n])
+    a = lab_agent.Agent({"server_url": "http://x", "token": "t"})
+    managed = set(users)
+    assert a.find_local({"id": 15, "uid": 10015}, managed).pw_name == "bob"
+    assert a.find_local({"id": 3, "uid": 10003}, managed).pw_name == "alice"
+    assert a.find_local({"id": 15, "uid": 10015}, {"alice"}) is None  # 只有 uid 对上、id 是别人的
+    assert a.find_local({"id": 20, "uid": 10020}, managed).pw_name == "old"
+    m = lab_agent.Migration(a, {"id": 1, "uid": 10015, "user_id": 15})
+    assert m.owns(users["bob"]) and not m.owns(users["alice"])
+
+
+def test_reconcile_does_not_adopt_another_members_account(monkeypatch):
+    """A 改名（sct→tian）还没生效时，B 在平台上用了 sct 这个名字：不能把 A 的账号当成已有账号接管给 B。"""
+    users = {"sct": _pw("sct", 10001, "lab-agent #1")}
+
+    def getpwnam(n):
+        return users[n]
+
+    monkeypatch.setattr(lab_agent.pwd, "getpwnam", getpwnam)
+    monkeypatch.setattr(lab_agent, "group_members", lambda g: {"sct"} if g == lab_agent.GROUP_MANAGED else set())
+    monkeypatch.setattr(lab_agent, "read_shadow", lambda: {"sct": ("*", "")})
+    monkeypatch.setattr(lab_agent, "has_processes", lambda uid: True)  # A 还有进程：改名暂缓
+    a = lab_agent.Agent({"server_url": "http://x", "token": "t"}, dry_run=True)
+    ran = []
+    monkeypatch.setattr(a, "run", lambda *cmd, **kw: (ran.append(cmd), (True, ""))[1])
+    monkeypatch.setattr(a, "apply_gpu_acl", lambda allowed: None)
+    a.reconcile([{"id": 1, "uid": 10001, "username": "tian"}, {"id": 2, "uid": 10002, "username": "sct"}])
+    st = {s["id"]: s for s in a.accounts}
+    assert st[1]["state"] == "pending" and st[1]["username"] == "sct"
+    assert st[2]["state"] == "pending"
+    assert not any(c[0] in ("usermod", "useradd") for c in ran)
+
+
+def test_cancelled_task_is_not_executed(monkeypatch):
+    """成员在 Agent 取到任务之后、开始之前取消了：认领时平台回复已取消，什么都不做。"""
+    a = lab_agent.Agent({"server_url": "http://x", "token": "t"})
+    m = lab_agent.Migration(a, {"id": 5, "uid": 10001, "user_id": 1, "_attempt": 2})
+    m.execute_dir = lambda: pytest.fail("不应开始迁移")
+    a.post = lambda path, payload, timeout=20: {"ok": False, "status": "cancelled"}
+    m.run()
+    assert a.finished == {(5, 2)}
+    # 连不上平台：不开始，也不记为执行过（下次同步再试）
+    a.finished.clear()
+
+    def down(path, payload, timeout=20):
+        raise OSError("Connection refused")
+
+    a.post = down
+    lab_agent.Migration(a, {"id": 5, "uid": 10001, "user_id": 1}).run()
+    assert a.finished == set()
+
+
+def test_report_payload_fits_platform_limits():
+    a = lab_agent.Agent({"server_url": "http://x", "token": "t"})
+    sent = []
+    a.post = lambda path, payload, timeout=20: sent.append(payload) or {"ok": True}
+    m = lab_agent.Migration(a, {"id": 1, "uid": 10001})
+    m.report_final("done", phase="复制 " + "x" * 100, message="m" * 5000, dest_path="/home/u（" + "环境、" * 300 + "）")
+    p = sent[-1]
+    assert len(p["phase"]) <= 64 and len(p["message"]) <= 2000 and len(p["dest_path"]) <= 512
 
 
 def test_gpu_acl_denies_group_and_allows_reserved_users(monkeypatch):
