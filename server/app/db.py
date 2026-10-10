@@ -53,7 +53,7 @@ _EXTRA_COLUMNS = {
     "servers": {"token": "VARCHAR(64)", "sysinfo_json": "TEXT DEFAULT '{}'",
                 "browse_roots_json": "TEXT DEFAULT '[]'", "link": "VARCHAR(16)", "current_migration": "INTEGER",
                 "ssh_host": "VARCHAR(128) DEFAULT ''"},
-    "migrations": {"attempt": "INTEGER DEFAULT 0"},
+    "migrations": {"attempt": "INTEGER DEFAULT 0", "dest_root": "VARCHAR(256) DEFAULT ''"},
 }
 
 

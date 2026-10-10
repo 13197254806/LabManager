@@ -360,8 +360,9 @@ def pending_migrations(db: Session, server: Server) -> tuple[list[dict], dict[st
         .order_by(MigrationTask.id)
     )
     tasks = [t for t in tasks if t.user.enabled and t.user.linux_username]
-    return [
-        {
+    out = []
+    for t in tasks:
+        d = {
             "id": t.id,
             "kind": t.kind,
             "user_id": t.user_id,
@@ -372,8 +373,10 @@ def pending_migrations(db: Session, server: Server) -> tuple[list[dict], dict[st
             "options": t.options,
             "created_at": t.created_at.isoformat(),
         }
-        for t in tasks
-    ], {str(t.id): t.attempt or 0 for t in tasks}
+        if t.dest_root:  # 只在选了数据盘时才带：不改变其他任务的指纹
+            d["dest_root"] = t.dest_root
+        out.append(d)
+    return out, {str(t.id): t.attempt or 0 for t in tasks}
 
 
 # ---------------- 可配置项 ----------------

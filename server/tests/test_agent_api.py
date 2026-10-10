@@ -412,3 +412,37 @@ def test_ssh_login_address_is_separate_from_tunnel_address(admin, alice, server)
     mine = alice.get("/api/me/servers").json()[0]
     assert mine["host"] == "10.86.20.7" and mine["ssh_host"] == "218.197.141.221"
     assert alice.get("/api/calendar").json()["servers"][0]["ssh_host"] == "218.197.141.221"
+
+
+def test_migrate_to_data_disk(admin, alice, server):
+    """有外挂数据盘时，迁移可以放到 <挂载点>/<用户名>/；Agent 太旧（会忽略目标盘、照旧放进家目录）时不允许。"""
+    _, token = server
+    agent = TestClient(app)
+    sid = admin.get("/api/admin/servers").json()[0]["id"]
+    cands = [{"path": p, "size": 10, "mtime": "2026-01-01", "owner": "root", "same_fs": True, "in_home": False, "is_dir": True}
+             for p in ("/data/proj", "/data/other")]
+    disks = [{"mount": "/", "total": 1000, "used": 900, "home": True},
+             {"mount": "/media/zdd", "total": 3000, "used": 300, "home": False, "usage": [{"path": "alice", "user": "alice", "size": 5}]}]
+
+    def sync(version):
+        body = {"gpus": [], "agent_version": version, "candidates": cands, "system": {"cpu": 1, "disks": disks}}
+        return agent.post("/api/agent/sync", json=body, headers=agent_headers(token)).json()
+
+    sync("0.9.4")
+    me = alice.get("/api/me/servers").json()[0]
+    assert me["data_disks"] == [] and me["data_disks_need_agent"] == ["/media/zdd"]
+    body = {"server_id": sid, "source": "/data/proj", "mode": "move", "dest_name": "proj", "dest_root": "/media/zdd"}
+    assert alice.post("/api/migrations", json=body).status_code == 400          # Agent 太旧
+    sync("0.9.5")
+    me = alice.get("/api/me/servers").json()[0]
+    assert me["data_disks"] == [{"mount": "/media/zdd", "free": 2700 * 1024 * 1024}] and me["data_disks_need_agent"] == []
+    assert alice.post("/api/migrations", json={**body, "dest_root": "/etc"}).status_code == 400   # 不是上报过的数据盘
+    assert alice.post("/api/migrations", json={**body, "mode": "link"}).status_code == 400        # 原地保留不搬数据
+    r = alice.post("/api/migrations", json=body)
+    assert r.status_code == 200 and r.json()["dest_hint"] == "/media/zdd/alice/proj"
+    assert alice.post("/api/migrations", json={**body, "source": "/data/other", "dest_root": ""}).status_code == 200
+    tasks = {t["source"]: t for t in sync("0.9.5")["migrations"]}
+    assert tasks["/data/proj"]["dest_root"] == "/media/zdd"
+    assert "dest_root" not in tasks["/data/other"]   # 放家目录的任务不带这个字段：指纹和旧版一致
+    disk = alice.get("/api/calendar").json()["servers"][0]["system"]["disks"][1]
+    assert disk["usage"] == [{"path": "alice", "user": "alice", "size": 5}]
