@@ -644,6 +644,16 @@ def admin_test_welcome(me: User = Depends(admin_user), db: Session = Depends(get
 # ---------------- 文件迁移 ----------------
 
 
+# 进行中的迁移超过这么久没有收到进度：可能是完成时正好连不上平台、结果丢了，或 Agent 停了。
+# conda 自检、删除原环境等步骤中间不上报进度，所以留得宽一些
+MIGRATION_STALL = timedelta(minutes=30)
+STALLED_PHASE = "失去联系"
+
+
+def _stalled(t: MigrationTask) -> bool:
+    return t.status == "running" and t.updated_at is not None and now() - t.updated_at > MIGRATION_STALL
+
+
 def task_out(t: MigrationTask) -> dict:
     return {
         "id": t.id,
@@ -667,6 +677,7 @@ def task_out(t: MigrationTask) -> dict:
         "message": t.message,
         "created_at": t.created_at.isoformat(),
         "finished_at": t.finished_at.isoformat() if t.finished_at else None,
+        "stalled": _stalled(t),
     }
 
 
@@ -817,6 +828,18 @@ def retry_migration(tid: int, user: User = Depends(current_user), db: Session = 
     if t.status != "failed":
         raise HTTPException(400, "只有失败的迁移可以重试")
     t.status, t.phase, t.message = "queued", "排队中", ""
+    db.commit()
+    return task_out(t)
+
+
+@router.post("/migrations/{tid}/abandon")
+def abandon_migration(tid: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """长时间没有进度的迁移标记为失败，之后可以重试。Agent 晚些送到的真实结果仍会被接受（见 agent_migration_progress）。"""
+    t = _own_task(db, tid, user)
+    if not _stalled(t):
+        raise HTTPException(400, "迁移仍在正常进行，不能标记为失败")
+    t.status, t.phase, t.finished_at = "failed", STALLED_PHASE, now()
+    t.message = "长时间没有收到服务器的进度，已标记为失败，可以点“重试”。如果迁移其实已在服务器上完成，重试会直接确认完成，不会重复复制"
     db.commit()
     return task_out(t)
 
@@ -1099,12 +1122,15 @@ def agent_migration_progress(
     t = db.get(MigrationTask, tid)
     if not t or t.server_id != server.id:
         raise HTTPException(404)
-    if t.status not in ("queued", "running"):
+    # 因“失去联系”被标记为失败的，Agent 晚些送到的最终结果照样接受
+    late = t.status == "failed" and t.phase == STALLED_PHASE and body.status in ("done", "failed")
+    if t.status not in ("queued", "running") and not late:
         return {"ok": False, "status": t.status}
     t.status = body.status
     t.phase, t.message, t.dest_path = body.phase[:32], body.message, body.dest_path or t.dest_path
     t.bytes_done, t.bytes_total = body.bytes_done, body.bytes_total
     t.files_done, t.files_total = body.files_done, body.files_total
+    t.updated_at = now()  # 进度没变也算一次心跳（值都没变时 onupdate 不会触发）
     if body.status == "running" and not t.started_at:
         t.started_at = now()
     if body.status in ("done", "failed"):

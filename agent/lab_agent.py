@@ -52,7 +52,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.9.1"
+VERSION = "0.9.2"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -821,7 +821,7 @@ class Agent(object):
             return "error", "本机已存在名为 %s 的账号，无法改名，请联系管理员" % new
         if has_processes(pw.pw_uid):
             return "pending", "旧账号 %s 还有进程在运行，进程全部结束后会自动改名（在此之前请继续用 %s 登录）" % (old, old)
-        if self.migration and self.migration.is_alive() and int(self.migration.t.get("uid", -1)) == pw.pw_uid:
+        if self.migration and self.migration.is_alive() and self.migration.owns(pw):
             return "pending", "文件迁移进行中，结束后会自动改名（在此之前请继续用 %s 登录）" % old
         ok, out = self.run("usermod", "-l", new, old)
         if not ok:
@@ -1531,15 +1531,37 @@ class Migration(threading.Thread):
         if not force and time.time() - self._last < 2:
             return
         self._last = time.time()
-        payload = dict(self.p, status=status)
-        payload["phase"] = payload["phase"][:60]  # 平台限制 64 字符，过长会被拒绝，进度就不再更新
-        payload.setdefault("message", "")
         try:
-            self.agent.post("/api/agent/migrations/%d" % self.id, payload, timeout=10)
+            self._post(status)
             return True
         except Exception as e:  # noqa: BLE001
             log.warning("上报迁移进度失败: %s", e)
             return False
+
+    def _post(self, status):
+        payload = dict(self.p, status=status)
+        payload["phase"] = payload["phase"][:60]  # 平台限制 64 字符，过长会被拒绝，进度就不再更新
+        payload.setdefault("message", "")
+        self.agent.post("/api/agent/migrations/%d" % self.id, payload, timeout=10)
+
+    def report_final(self, status, **kw):
+        """上报完成 / 失败。这一次丢了，平台上就一直显示“进行中”（之后平台仍列着它，但本机已记为做过、不会再报），
+        所以连不上平台（隧道断开等）时一直重试；平台明确拒绝（任务已取消等）才放弃。"""
+        self.p.update(kw)
+        delay = 5
+        while True:
+            try:
+                self._post(status)
+                return True
+            except urllib.error.HTTPError as e:
+                log.warning("平台拒绝了迁移 #%d 的结果: %s", self.id, e)
+                return False
+            except Exception as e:  # noqa: BLE001
+                log.warning("上报迁移 #%d 的结果失败，%d 秒后重试: %s", self.id, delay, e)
+                self.retry_wait(delay)
+                delay = min(delay * 2, 60)
+
+    retry_wait = staticmethod(time.sleep)
 
     def run(self):
         log.info("开始迁移 #%d (%s): %s", self.id, self.kind, self.t.get("source"))
@@ -1552,15 +1574,15 @@ class Migration(threading.Thread):
             if self.reloc_failed:
                 self.notes.append("%d 个二进制文件中的路径无法自动修正（新路径比原路径长太多）：%s" % (
                     len(self.reloc_failed), "、".join(self.reloc_failed[:5])))
-            if self.report("done", force=True, phase="完成", message="；".join(self.notes), dest_path=dest):
-                self._clear_marker()
             log.info("迁移 #%d 完成: %s", self.id, dest)
+            if self.report_final("done", phase="完成", message="；".join(self.notes), dest_path=dest):
+                self._clear_marker()
         except MigrationError as e:
             log.warning("迁移 #%d 失败: %s", self.id, e)
-            self.report("failed", force=True, phase="失败", message=str(e))
+            self.report_final("failed", phase="失败", message=str(e))
         except Exception as e:  # noqa: BLE001
             log.exception("迁移 #%d 出错", self.id)
-            self.report("failed", force=True, phase="失败", message="内部错误：%s" % e)
+            self.report_final("failed", phase="失败", message="内部错误：%s" % e)
         finally:
             self.agent.finished.add(self.id)
             try:
@@ -1594,13 +1616,15 @@ class Migration(threading.Thread):
         except OSError:
             pass
 
+    def owns(self, pw):
+        """pw 是否就是这个任务的成员的本机账号（和同步账号时一样按 uid，其次按 GECOS 里的平台 id）。"""
+        return pw.pw_uid == int(self.t["uid"]) or pw.pw_gecos == GECOS_PREFIX + str(self.t.get("user_id"))
+
     def _user(self):
-        try:
-            pw = pwd.getpwuid(int(self.t["uid"]))
-        except KeyError:
+        # 不能只按平台 uid 找：接管的已有账号（adopt_users）或建号时 uid 被占用的账号，本机 uid 与平台不同
+        pw = self.agent.find_local({"uid": self.t["uid"], "id": self.t.get("user_id")}, group_members(GROUP_MANAGED))
+        if pw is None:
             raise MigrationError("本机还没有你的账号，请稍后重试")
-        if pw.pw_name not in group_members(GROUP_MANAGED):
-            raise MigrationError("账号 %s 不是平台管理的账号" % pw.pw_name)
         st = os.lstat(pw.pw_dir)
         if not stat.S_ISDIR(st.st_mode) or st.st_uid != pw.pw_uid:
             raise MigrationError("家目录 %s 异常" % pw.pw_dir)

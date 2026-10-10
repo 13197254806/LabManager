@@ -1,6 +1,7 @@
 """Agent 的同步循环：不碰真实系统（sync / reconcile 都打桩），只验证迁移任务的调度。"""
 import importlib.util
 import os
+import urllib.error
 from pathlib import Path
 
 import pytest
@@ -194,9 +195,64 @@ def test_rename_moves_home_leaves_link_and_schedules_path_fix(tmp_path, monkeypa
     monkeypatch.setattr(lab_agent, "has_processes", lambda uid: True)
     assert a.rename_user(pw, "tian2")[0] == "pending"
     monkeypatch.setattr(lab_agent, "has_processes", lambda uid: False)
-    a.migration = type("M", (), {"is_alive": lambda self: True, "t": {"uid": 4242}})()
+    a.migration = lab_agent.Migration(a, {"id": 1, "uid": 4242, "user_id": 5})
+    a.migration.is_alive = lambda: True
     assert a.rename_user(pw, "tian2")[0] == "pending"
+    # 接管的已有账号：本机 uid 与平台不同，按 GECOS 里的平台 id 认出是同一个人
+    a.migration = lab_agent.Migration(a, {"id": 1, "uid": 10005, "user_id": 5})
+    a.migration.is_alive = lambda: True
+    pw_adopted = lab_agent.pwd.struct_passwd(("sct", "x", 1001, 1001, "lab-agent #5", str(base / "sct"), "/bin/bash"))
+    assert a.rename_user(pw_adopted, "tian2")[0] == "pending"
     assert relocated == []
+
+
+def test_migration_finds_adopted_account_whose_uid_differs_from_platform(tmp_path, monkeypatch):
+    """接管的已有账号（如 wsm，本机 uid 1001，平台 uid 10013）：迁移要按 GECOS 里的平台 id 找到它，
+    而不是按平台 uid 找不到就报“本机还没有你的账号”。"""
+    home = tmp_path / "wsm"
+    home.mkdir()
+    me = os.getuid()
+    users = {
+        "wsm": lab_agent.pwd.struct_passwd(("wsm", "x", me, me, "lab-agent #13", str(home), "/bin/bash")),
+        "other": lab_agent.pwd.struct_passwd(("other", "x", 10013, 10013, "lab-agent #99", "/nonexistent", "/bin/bash")),
+    }
+
+    def getpwnam(n):
+        return users[n]
+
+    monkeypatch.setattr(lab_agent.pwd, "getpwnam", getpwnam)
+    monkeypatch.setattr(lab_agent, "group_members", lambda g: {"wsm"})
+    a = lab_agent.Agent({"server_url": "http://x", "token": "t"})
+    assert lab_agent.Migration(a, {"id": 1, "uid": 10013, "user_id": 13})._user().pw_name == "wsm"
+    # 平台 uid 在本机属于别的（非托管）账号、平台 id 也对不上：仍然找不到，不会错把文件交给别人
+    with pytest.raises(lab_agent.MigrationError, match="还没有你的账号"):
+        lab_agent.Migration(a, {"id": 2, "uid": 10013, "user_id": 14})._user()
+
+
+def test_final_migration_result_is_retried_until_platform_receives_it(monkeypatch):
+    """完成时隧道正好断了：结果要一直重试，不能丢（否则平台上永远显示“进行中”）；平台明确拒绝才放弃。"""
+    a = lab_agent.Agent({"server_url": "http://x", "token": "t"})
+    sent, failures = [], [OSError("Connection refused"), OSError("timed out")]
+
+    def post(path, payload, timeout=20):
+        if failures:
+            raise failures.pop(0)
+        sent.append((path, payload["status"], payload["dest_path"]))
+        return {"ok": True}
+
+    a.post = post
+    m = lab_agent.Migration(a, {"id": 9, "uid": 10014})
+    waits = []
+    m.retry_wait = waits.append
+    assert m.report_final("done", phase="完成", dest_path="/home/lgq")
+    assert sent == [("/api/agent/migrations/9", "done", "/home/lgq")]
+    assert waits == [5, 10]
+
+    def rejected(path, payload, timeout=20):
+        raise urllib.error.HTTPError(path, 404, "Not Found", {}, None)
+
+    a.post = rejected
+    assert not m.report_final("failed", phase="失败")
 
 
 def test_gpu_acl_denies_group_and_allows_reserved_users(monkeypatch):
