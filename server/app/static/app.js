@@ -336,6 +336,12 @@ function diskTable(users) {
   return `<table class="proc-table"><tr><th>Linux 用户名</th><th>占用空间</th></tr>${rows}</table>`;
 }
 
+// 数据盘上每个一级目录 / 文件的占用，从大到小（成员自己的目录是 <挂载点>/<用户名>）
+function dataDiskTable(rows) {
+  const body = rows.map((r) => `<tr><td>${esc(r.path)}</td><td>${esc(r.user)}</td><td>${gb(r.size)} GB</td></tr>`).join("");
+  return `<table class="proc-table"><tr><th>目录</th><th>属主</th><th>占用空间</th></tr>${body}</table>`;
+}
+
 // 服务器行：整机 CPU 利用率、内存和磁盘占用（GB）。进度条按占用率变色，数字保持黑色。
 // 服务器离线时给出提示；在线但 Agent 还没上报则不显示
 function serverStats(s) {
@@ -353,7 +359,9 @@ function serverStats(s) {
     // 有多块硬盘（0.9.1 起的 Agent 上报）：每块一项，用挂载位置区分，家目录所在的排第一
     for (const d of y.disks) {
       const tip = `挂载在 ${d.mount} 的硬盘已用 ${gb(d.used)} GB，共 ${gb(d.total)} GB（${Math.round(pct(d.used, d.total))}%）${d.home ? "，家目录在这块盘上" : ""}`;
-      parts.push(item(`磁盘 ${esc(d.mount)}`, pct(d.used, d.total), `${gb(d.used)}/${gb(d.total)} GB`, tip, d.home ? usage : ""));
+      // 数据盘的占用情况按一级目录列（0.9.5 起的 Agent 上报）
+      const dataUsage = !d.home && d.usage?.length ? `<span class="bubble-link" data-pin data-tip-html="${esc(dataDiskTable(d.usage))}">占用情况</span>` : "";
+      parts.push(item(`磁盘 ${esc(d.mount)}`, pct(d.used, d.total), `${gb(d.used)}/${gb(d.total)} GB`, tip, d.home ? usage : dataUsage));
     }
   } else if (y.disk_total) {
     parts.push(item("磁盘", pct(y.disk_used, y.disk_total), `${gb(y.disk_used)}/${gb(y.disk_total)} GB`, `家目录所在磁盘已用 ${gb(y.disk_used)} GB，共 ${gb(y.disk_total)} GB（${Math.round(pct(y.disk_used, y.disk_total))}%）`, usage));
@@ -1160,7 +1168,7 @@ function taskHtml(t, admin = false) {
   const who = admin ? `<span class="mig-who">${avatarHtml(t.user_name, t.user_avatar, t.user_id)}${esc(t.user_name)}</span>` : "";
   const title = `${who}<b>${esc(t.server_name)}</b>${t.kind === "profile"
     ? esc(t.summary)
-    : `<span class="path">${esc(t.source)} → ${esc(t.dest_path || `~/${t.dest_name}`)}</span> <span class="muted small">${MODE_NAMES[t.mode] || t.mode}</span>`}`;
+    : `<span class="path">${esc(t.source)} → ${esc(t.dest_path || t.dest_hint || `~/${t.dest_name}`)}</span> <span class="muted small">${MODE_NAMES[t.mode] || t.mode}</span>`}`;
   const badge = `<span class="badge ${t.status} has-dot">${TASK_STATE[t.status] || t.status}</span>`;
   const progress = ["running", "done"].includes(t.status)
     ? `<div class="progress ${t.status === "done" ? "done" : ""} ${pct == null ? "indeterminate" : ""}"><i style="width:${pct ?? 30}%"></i></div>` : "";
@@ -1366,8 +1374,12 @@ async function renderPicker(container, onSubmitted, onClose) {
         <div>1. apt 安装的软件（git、vim、tmux、gcc、CUDA 等）是全系统共享的，新账号直接可用，不需要迁移。</div>
         <div>2. Conda 环境迁移是直接「移动」，其它配置项迁移时是「复制」。</div></div></div>`;
     }
+    const me = esc(state.me.linux_username);
     html += `<div class="pk-section"><h3>② 迁移我的文件和目录</h3>
-      <p class="muted small">选择需要迁移到 <code>/home/${esc(state.me.linux_username)}</code> 的文件或目录</p>
+      <p class="muted small">${s.data_disks.length
+        ? `选择要迁移的文件或目录，每一项可以放到家目录 <code>/home/${me}</code>，或数据盘上你自己的目录（${s.data_disks.map((d) => `<code>${esc(d.mount)}/${me}</code>`).join("、")}，没有会自动创建）`
+        : `选择需要迁移到 <code>/home/${me}</code> 的文件或目录`}</p>
+      ${s.data_disks_need_agent.length ? `<p class="muted small">这台服务器还有数据盘 ${s.data_disks_need_agent.map((m) => `<code>${esc(m)}</code>`).join("、")}，管理员把它的 Agent 更新到 0.9.5 以上后，就可以选择迁移到数据盘。</p>` : ""}
       <div class="cand-list pk-list pk-picked"></div>
       <div style="margin-top:8px"><button type="button" class="btn small" data-add-file>添加文件或目录</button></div></div>`;
     $(".pk-body", container).innerHTML = html;
@@ -1379,13 +1391,17 @@ async function renderPicker(container, onSubmitted, onClose) {
   const renderPicked = () => {
     const box = $(".pk-picked", container);
     box.classList.toggle("hidden", !picked.length);
+    const disks = cur().data_disks, me = state.me.linux_username;
     box.innerHTML = picked.map((p, i) => {
       const modes = p.in_home ? ["move", "copy"] : ["move", "copy", "link"];
+      // 原地保留不移动数据，只在家目录建快捷方式：不用选盘
+      const roots = disks.length && p.mode !== "link"
+        ? `<select data-proot="${i}" title="放到哪里"><option value="">~/</option>${disks.map((d) => `<option value="${esc(d.mount)}" ${p.root === d.mount ? "selected" : ""}>${esc(d.mount)}/${esc(me)}/</option>`).join("")}</select>` : "";
       return `<div class="cand picked">
         <span class="path">${esc(p.path)}${p.is_dir ? "/" : ""}</span>
         <span class="cand-ctl">
           <select data-pmode="${i}">${modes.map((m) => `<option value="${m}" ${p.mode === m ? "selected" : ""}>${MODE_NAMES[m]}</option>`).join("")}</select>
-          <input class="dest" data-pdest="${i}" value="${esc(p.dest)}" title="放到家目录下的名字">
+          ${roots}<input class="dest" data-pdest="${i}" value="${esc(p.dest)}" title="放到目标目录下的名字">
         </span>
         <button type="button" class="link-btn" data-pdel="${i}">移除</button>
         <span class="meta">${p.size === undefined ? "大小统计中…" : p.size == null ? "大小未知" : fmtBytes(p.size)} · 修改于 ${esc(p.mtime)} · 属主 ${esc(p.owner)}${p.same_fs ? "" : " · 与家目录不在同一磁盘"}</span>
@@ -1395,7 +1411,7 @@ async function renderPicker(container, onSubmitted, onClose) {
   };
   const addPicked = async (s, e) => {
     if (picked.some((p) => p.path === e.path)) return;
-    const p = { ...e, mode: "move", dest: e.name, size: e.is_dir ? undefined : e.size };
+    const p = { ...e, mode: "move", root: "", dest: e.name, size: e.is_dir ? undefined : e.size };
     picked.push(p);
     renderPicked();
     if (e.is_dir) {  // 目录大小要在服务器上统计，慢一点，先显示“统计中”
@@ -1421,7 +1437,8 @@ async function renderPicker(container, onSubmitted, onClose) {
       });
       return { legacy_user: lg.user, configs, conda, bytes };
     }).filter((p) => p.configs.length || p.conda.length);
-    const dirs = picked.map((p) => ({ cand: { path: p.path, size: p.size, same_fs: p.same_fs }, mode: p.mode, dest: p.dest.trim() }));
+    const dirs = picked.map((p) => ({ cand: { path: p.path, size: p.size, same_fs: p.same_fs }, mode: p.mode, dest: p.dest.trim(),
+      root: p.mode === "link" ? "" : p.root }));
     return { s, profiles, dirs };
   };
 
@@ -1429,13 +1446,21 @@ async function renderPicker(container, onSubmitted, onClose) {
     const { s, profiles, dirs } = collect();
     // 需要占用家目录空间的：复制的内容 + 跨盘移动的内容
     const copyBytes = profiles.reduce((a, p) => a + p.bytes, 0)
-      + dirs.filter((d) => d.mode === "copy" || (d.mode === "move" && !d.cand.same_fs)).reduce((a, d) => a + (d.cand.size || 0), 0);
+      + dirs.filter((d) => !d.root && (d.mode === "copy" || (d.mode === "move" && !d.cand.same_fs))).reduce((a, d) => a + (d.cand.size || 0), 0);
+    // 放到数据盘的：要迁移的内容都在别的盘上，移动也是复制过去再删除源
+    const toDisk = s.data_disks.map((dk) => ({ ...dk, bytes: dirs.filter((d) => d.root === dk.mount).reduce((a, d) => a + (d.cand.size || 0), 0) }))
+      .filter((dk) => dk.bytes);
     const n = profiles.length + dirs.length;
     $(".pk-total", container).textContent = n
-      ? `将复制约 ${fmtBytes(copyBytes)} 到家目录${s.home_free != null ? `（家目录所在磁盘剩余 ${fmtBytes(s.home_free)}）` : ""}。同盘移动不占额外空间。`
+      ? [`将复制约 ${fmtBytes(copyBytes)} 到家目录${s.home_free != null ? `（家目录所在磁盘剩余 ${fmtBytes(s.home_free)}）` : ""}`,
+        ...toDisk.map((dk) => `约 ${fmtBytes(dk.bytes)} 到 ${dk.mount}（剩余 ${fmtBytes(dk.free)}）`)].join("，") + "。同盘移动不占额外空间。"
       : "";
     let warn = "";
-    if (s.home_free != null && copyBytes > s.home_free * 0.9) warn = "家目录空间不够：请少选几个 conda 环境，或对大目录改用「移动」/「原地保留」。";
+    if (s.home_free != null && copyBytes > s.home_free * 0.9) {
+      warn = `家目录空间不够：请少选几个 conda 环境，或对大目录改用「移动」/「原地保留」${s.data_disks.length ? "，或放到数据盘" : ""}。`;
+    }
+    const full = toDisk.find((dk) => dk.bytes > dk.free * 0.9);
+    if (full) warn += `${full.mount} 剩余空间不够。`;
     $(".pk-warn", container).textContent = warn;
     $(".pk-submit", container).textContent = n ? `开始迁移（${n} 项任务）` : "开始迁移";
   };
@@ -1443,7 +1468,11 @@ async function renderPicker(container, onSubmitted, onClose) {
   sel.onchange = () => { picked = []; render(); };
   container.onchange = (e) => {
     const t = e.target;
-    if (t.dataset.pmode !== undefined) picked[Number(t.dataset.pmode)].mode = t.value;
+    if (t.dataset.pmode !== undefined) {
+      picked[Number(t.dataset.pmode)].mode = t.value;
+      return renderPicked();  // 原地保留时不显示选盘
+    }
+    if (t.dataset.proot !== undefined) picked[Number(t.dataset.proot)].root = t.value;
     update();
   };
   container.oninput = (e) => {
@@ -1482,7 +1511,7 @@ async function renderPicker(container, onSubmitted, onClose) {
     }
     for (const d of dirs) {
       try {
-        await api("/api/migrations", { method: "POST", body: { server_id: s.id, source: d.cand.path, mode: d.mode, dest_name: d.dest } });
+        await api("/api/migrations", { method: "POST", body: { server_id: s.id, source: d.cand.path, mode: d.mode, dest_name: d.dest, dest_root: d.root || "" } });
         ok++;
       } catch (e) {
         errors.push(`${d.cand.path}：${e.message}`);

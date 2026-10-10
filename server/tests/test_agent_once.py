@@ -496,3 +496,41 @@ def test_clock_left_alone_when_close_ntp_synced_slow_or_old_platform(monkeypatch
     a, t, stepped = _clock_agent(monkeypatch, synced=True)
     a.fix_clock(10000.5 - 960, 10000.0, 10001.0)  # 本机 NTP 正常：交给系统
     assert stepped == []
+
+
+def test_data_disk_dir_is_created_for_member_and_rejects_others(tmp_path):
+    mount = tmp_path / "zdd"
+    mount.mkdir()
+    a = lab_agent.Agent({"server_url": "http://x", "token": "t"})
+    a.data_disks = lambda: [str(mount)]
+    me, gid = os.getuid(), os.getgid()
+    pw = lambda name, uid=me: lab_agent.pwd.struct_passwd((name, "x", uid, gid, "lab-agent #1", str(tmp_path / "home"), "/bin/bash"))
+    m = lab_agent.Migration(a, {"id": 1, "uid": me, "dest_root": str(mount)})
+    assert m.dest_dir(pw("alice"), "move") == (str(mount / "alice"),) * 2
+    assert (mount / "alice").is_dir()
+    assert m.dest_dir(pw("alice"), "copy")[0] == str(mount / "alice")   # 已有的自己的目录：直接用
+    assert m.dest_dir(pw("alice"), "link") == (str(tmp_path / "home"), "~")  # 原地保留：快捷方式总在家目录
+    (mount / "bob").mkdir()
+    with pytest.raises(lab_agent.MigrationError, match="不属于你"):
+        m.data_dir(str(mount), pw("bob", uid=me + 1))
+    (mount / "eve").symlink_to(tmp_path)                  # 被抢先放了一个指向别处的链接
+    with pytest.raises(lab_agent.MigrationError, match="不是目录"):
+        m.data_dir(str(mount), pw("eve"))
+    with pytest.raises(lab_agent.MigrationError, match="不是这台服务器上的数据盘"):
+        m.data_dir("/etc", pw("alice"))
+    assert lab_agent.Migration(a, {"id": 2, "uid": me}).dest_dir(pw("alice"), "move") == (str(tmp_path / "home"), "~")
+
+
+def test_data_disk_usage_lists_top_level_entries(tmp_path, monkeypatch):
+    mount = tmp_path / "zdd"
+    (mount / "alice").mkdir(parents=True)
+    (mount / ".lab-migrate").mkdir()
+    (mount / "big.tar").write_bytes(b"x" * 10)
+    a = lab_agent.Agent({"server_url": "http://x", "token": "t"})
+    a.data_disks = lambda: [str(mount)]
+    monkeypatch.setattr(lab_agent.subprocess, "run",
+                        lambda cmd, **kw: type("P", (), {"stdout": "%d\t%s\n" % (3 * 1024 * 1024, cmd[-1])})())
+    a.scan_data_usage()
+    rows = a.data_usage[str(mount)]
+    assert [r["path"] for r in rows] == ["alice", "big.tar"]   # 迁移暂存目录不列出
+    assert rows[0]["size"] == 3 and rows[0]["user"] == lab_agent.pwd.getpwuid(os.getuid()).pw_name

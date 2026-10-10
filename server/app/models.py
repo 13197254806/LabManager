@@ -109,6 +109,21 @@ class Server(Base):
     def sysinfo(self) -> dict:
         return _loads(self.sysinfo_json, {})
 
+    # 0.9.5 起的 Agent 才能把迁移内容放到数据盘：旧版会忽略目标盘、照旧放进家目录（家目录所在的盘可能已经快满了）
+    DATA_DISK_AGENT = (0, 9, 5)
+
+    @property
+    def data_disks(self) -> list[dict]:
+        """数据盘（家目录所在盘以外的硬盘，Agent 上报）：[{mount, total, used}]，单位 MiB。"""
+        return [d for d in self.sysinfo.get("disks") or [] if not d.get("home") and d.get("mount")]
+
+    @property
+    def supports_data_disk(self) -> bool:
+        try:
+            return tuple(int(x) for x in (self.agent_version or "").split(".")[:3]) >= self.DATA_DISK_AGENT
+        except ValueError:
+            return False
+
 
 def _loads(text, default):
     try:
@@ -175,6 +190,8 @@ class MigrationTask(Base):
     # profile 的选择：{"legacy_user", "configs": [...], "conda": [{"name", "base", "envs"}]}
     options_json: Mapped[str] = mapped_column(Text, default="{}")
     dest_name: Mapped[str] = mapped_column(String(128))
+    # 放到哪块盘：空 = 家目录；数据盘挂载点（如 /media/zdd）= 放到 <挂载点>/<用户名>/ 下
+    dest_root: Mapped[str | None] = mapped_column(String(256), default="")
     # pending_approval / queued / running / done / failed / cancelled / rejected
     status: Mapped[str] = mapped_column(String(20), default="queued")
     phase: Mapped[str] = mapped_column(String(32), default="")

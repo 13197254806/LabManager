@@ -230,6 +230,10 @@ def my_servers(user: User = Depends(current_user), db: Session = Depends(get_db)
                 "ssh_host": s.ssh_host or "",
                 "online": s.online,
                 "home_free": s.home_free,
+                # 迁移可以放到的数据盘（剩余空间，字节）；Agent 太旧时为空，并提示更新
+                "data_disks": [{"mount": d["mount"], "free": max(0, d["total"] - d["used"]) * 1024 * 1024}
+                               for d in s.data_disks] if s.supports_data_disk else [],
+                "data_disks_need_agent": [d["mount"] for d in s.data_disks] if not s.supports_data_disk else [],
                 "account": acct,
                 "candidates": cands,
                 "legacy": s.legacy,
@@ -688,6 +692,9 @@ def task_out(t: MigrationTask) -> dict:
         "source": t.source,
         "mode": t.mode,
         "dest_name": t.dest_name,
+        "dest_root": t.dest_root or "",
+        # 完成前显示的目标位置（完成后看 dest_path：重名时实际位置会加后缀）
+        "dest_hint": f"{t.dest_root.rstrip('/')}/{t.user.linux_username}/{t.dest_name}" if t.dest_root else f"~/{t.dest_name}",
         "dest_path": t.dest_path,
         "status": t.status,
         "phase": t.phase,
@@ -764,6 +771,7 @@ class MigrationIn(BaseModel):
     source: str = Field(max_length=512)
     mode: str = Field(pattern="^(move|copy|link)$")
     dest_name: str = Field(max_length=128)
+    dest_root: str = Field(default="", max_length=256)  # 空 = 家目录；数据盘挂载点 = 放到 <挂载点>/<用户名>/
 
 
 @router.post("/migrations")
@@ -787,12 +795,20 @@ def create_migration(body: MigrationIn, bg: BackgroundTasks, user: User = Depend
     dest = body.dest_name.strip()
     if not DEST_NAME_RE.match(dest) or dest in (".", ".."):
         raise HTTPException(400, "目标文件夹名只能包含字母、数字、中文和 . _ - 等字符")
+    dest_root = body.dest_root.strip()
+    if dest_root:
+        if body.mode == "link":
+            raise HTTPException(400, "“原地保留”不移动数据，不能选择放到数据盘")
+        if dest_root not in [d["mount"] for d in server.data_disks]:
+            raise HTTPException(400, f"{dest_root} 不是这台服务器上的数据盘")
+        if not server.supports_data_disk:
+            raise HTTPException(400, "这台服务器的 Agent 版本太旧，更新到 0.9.5 以上才能迁移到数据盘，请联系管理员")
     _check_dir_claim(db, server.id, source)
     need_approval = (
         body.mode != "copy" and services.get_setting(db, "migration_requires_approval") == "1" and not user.is_admin
     )
     t = MigrationTask(
-        user_id=user.id, server_id=server.id, kind="dir", source=source, mode=body.mode, dest_name=dest,
+        user_id=user.id, server_id=server.id, kind="dir", source=source, mode=body.mode, dest_name=dest, dest_root=dest_root,
         status="pending_approval" if need_approval else "queued",
         phase="等待管理员确认" if need_approval else "排队中",
     )
@@ -1011,6 +1027,14 @@ def agent_bootstrap_config(authorization: str = Header(default=""), db: Session 
     }
 
 
+def _disk_usage(rows: list) -> list[dict]:
+    """数据盘上各一级目录的占用（MiB），Agent 0.9.5 起上报。"""
+    return [
+        {"path": str(r.get("path", ""))[:128], "user": str(r.get("user", ""))[:64], "size": int(r["size"])}
+        for r in rows[:100] if isinstance(r, dict) and isinstance(r.get("size"), (int, float))
+    ]
+
+
 @router.post("/agent/sync")
 def agent_sync(
     body: AgentReport, bg: BackgroundTasks, authorization: str = Header(default=""), db: Session = Depends(get_db)
@@ -1060,7 +1084,8 @@ def agent_sync(
         disks = body.system.get("disks")
         if isinstance(disks, list):  # 每块硬盘（MiB），家目录所在的排第一
             info["disks"] = [
-                {"mount": str(d.get("mount", ""))[:128], "total": int(d["total"]), "used": int(d["used"]), "home": bool(d.get("home"))}
+                {"mount": str(d.get("mount", ""))[:128], "total": int(d["total"]), "used": int(d["used"]), "home": bool(d.get("home")),
+                 **({"usage": _disk_usage(d["usage"])} if isinstance(d.get("usage"), list) else {})}
                 for d in disks[:20]
                 if isinstance(d, dict) and isinstance(d.get("total"), (int, float)) and isinstance(d.get("used"), (int, float))
             ]

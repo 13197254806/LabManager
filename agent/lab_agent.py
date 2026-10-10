@@ -15,7 +15,7 @@
      - 被停用的成员：锁定账号，保留家目录
   3. 另有两个后台线程：浏览请求长轮询（成员在网页上选文件时，列目录 / 统计大小）、各用户家目录占用统计
   4. 在后台线程执行成员发起的文件迁移，每隔几秒上报进度：
-     - 旧共享账号（如 ubuntu）家目录里的项目目录：移动或复制给成员
+     - 旧共享账号（如 ubuntu）家目录里的项目目录：移动或复制给成员（放进家目录，或数据盘上成员自己的目录）
      - 旧共享账号的配置文件、用户级软件、选中的 conda 环境：复制给成员，并把路径改成新家目录
   5. 校园网内网往往连不上任何 NTP 服务器，本机时钟会越走越偏：本机没在 NTP 同步时，按平台的时间校准
 
@@ -53,7 +53,7 @@ import time
 import urllib.error
 import urllib.request
 
-VERSION = "0.9.4"
+VERSION = "0.9.5"
 CONFIG_PATH = "/etc/lab-agent/config.json"
 STATE_DIR = "/var/lib/lab-agent"
 GROUP_MANAGED = "lab-users"   # 所有由 Agent 管理的账号
@@ -213,6 +213,7 @@ class Agent(object):
         self.adopt = set(cfg.get("adopt_users") or [])
         self.home_base = cfg.get("home_base", "/home")
         self.home_usage = None  # [{"user": 名字, "size": MiB}]，由 usage_loop 在后台更新
+        self.data_usage = {}    # 数据盘挂载点 → [{"path": 一级目录名, "user": 属主, "size": MiB}]，同上
         self.roots = [os.path.realpath(r) for r in (cfg.get("migration_roots") or DEFAULT_ROOTS)]
         self.accounts = None       # 上一轮对齐的结果，下次同步时上报
         self.candidates = None     # 后台扫描的可迁移文件 / 目录
@@ -655,12 +656,54 @@ class Agent(object):
         out.sort(key=lambda x: -x["size"])
         self.home_usage = out[:100]
 
+    def data_disks(self):
+        """数据盘：家目录所在盘以外的硬盘（挂载点），如外挂的 /media/zdd。"""
+        try:
+            return [d["mount"] for d in self.collect_disks() if not d["home"]]
+        except (IOError, OSError, ValueError):
+            return []
+
+    def scan_data_usage(self):
+        """各数据盘上每个一级目录 / 文件占用的空间（MiB）和属主，按从大到小排。成员自己的目录就是 <挂载点>/<用户名>。"""
+        out = {}
+        for mount in self.data_disks():
+            rows = []
+            try:
+                names = sorted(os.listdir(mount))
+            except OSError:
+                continue
+            for name in names:
+                if name.startswith(".lab-") or name == "lost+found":
+                    continue
+                path = os.path.join(mount, name)
+                try:
+                    st = os.lstat(path)
+                    if not (stat.S_ISDIR(st.st_mode) or stat.S_ISREG(st.st_mode)):
+                        continue
+                    try:
+                        owner = pwd.getpwuid(st.st_uid).pw_name
+                    except KeyError:
+                        owner = str(st.st_uid)
+                    if stat.S_ISDIR(st.st_mode):
+                        res = subprocess.run(["nice", "-n", "19", "du", "-sb", path], stdout=subprocess.PIPE,
+                                             stderr=subprocess.DEVNULL, universal_newlines=True, timeout=3600)
+                        size = int(res.stdout.split()[0])
+                    else:
+                        size = st.st_size
+                    rows.append({"path": name, "user": owner, "size": size // (1024 * 1024)})
+                except Exception:  # noqa: BLE001  某个目录读不了不影响其他
+                    continue
+            rows.sort(key=lambda x: -x["size"])
+            out[mount] = rows[:100]
+        self.data_usage = out
+
     def usage_loop(self):
         while True:
-            try:
-                self.scan_home_usage()
-            except Exception:  # noqa: BLE001
-                log.exception("统计家目录占用失败")
+            for scan, what in ((self.scan_home_usage, "家目录"), (self.scan_data_usage, "数据盘")):
+                try:
+                    scan()
+                except Exception:  # noqa: BLE001
+                    log.exception("统计%s占用失败", what)
             time.sleep(int(self.cfg.get("usage_scan_interval", 1800)))
 
     # ---------------- 与云端同步 ----------------
@@ -710,6 +753,9 @@ class Agent(object):
             pass
         try:
             out["disks"] = self.collect_disks()
+            for d in out["disks"]:
+                if not d["home"] and d["mount"] in self.data_usage:
+                    d["usage"] = self.data_usage[d["mount"]]
         except (IOError, OSError, ValueError):
             pass
         if self.home_usage is not None:
@@ -918,6 +964,18 @@ class Agent(object):
                 if not os.path.lexists(pw.pw_dir):
                     os.symlink(new_home, pw.pw_dir)
                 self.start_relocate(pw.pw_uid, pw.pw_dir.rstrip("/"), new_home)
+        for mount in self.data_disks():  # 数据盘上的个人目录 <挂载点>/<旧名> 一起改名，原位置留兼容链接
+            src, dst = os.path.join(mount, old), os.path.join(mount, new)
+            try:
+                st = os.lstat(src)
+                if stat.S_ISDIR(st.st_mode) and st.st_uid == pw.pw_uid and not os.path.lexists(dst):
+                    log.info("$ mv %s %s", src, dst)
+                    if not self.dry_run:
+                        os.rename(src, dst)
+                        os.symlink(dst, src)
+            except OSError as e:
+                if e.errno != errno.ENOENT:
+                    log.warning("移动 %s 失败: %s", src, e)
         log.info("已将 %s 改名为 %s", old, new)
         return "ok", "已从 %s 改名" % old
 
@@ -1245,7 +1303,8 @@ class Agent(object):
     def handle_migrations(self, tasks):
         if self.dry_run:
             for t in tasks:
-                log.info("[dry-run] 待执行迁移 #%s %s %s → ~/%s (%s)", t["id"], t.get("kind"), t["source"], t["dest_name"], t["mode"])
+                log.info("[dry-run] 待执行迁移 #%s %s %s → %s/%s (%s)", t["id"], t.get("kind"), t["source"],
+                         t.get("dest_root") or "~", t["dest_name"], t["mode"])
             return
         if self.migration and self.migration.is_alive():
             return
@@ -1779,20 +1838,64 @@ class Migration(threading.Thread):
         for i in range(1, 100):
             yield os.path.join(home, "%s_%d" % (dest_name, i))
 
-    def move_into_home(self, path, home, dest_name):
-        self.report(force=True, phase="放入家目录")
+    def move_into_home(self, path, home, dest_name, shown="~"):
+        """把暂存好的内容放进 home（家目录，或数据盘上成员自己的目录；shown 是提示里显示的名字）。"""
+        self.report(force=True, phase="放入家目录" if shown == "~" else "放入数据盘")
         for target in self._candidates(home, dest_name):
             if os.path.lexists(target):
                 continue
             try:
                 os.rename(path, target)
                 if os.path.basename(target) != dest_name:
-                    self.notes.append("~/%s 已存在，改放在 ~/%s" % (dest_name, os.path.basename(target)))
+                    self.notes.append("%s/%s 已存在，改放在 %s/%s" % (shown, dest_name, shown, os.path.basename(target)))
                 return target
             except OSError as e:
                 if e.errno not in (errno.EEXIST, errno.ENOTEMPTY, errno.ENOTDIR, errno.EISDIR):
                     raise
-        raise MigrationError("家目录里同名文件夹太多")
+        raise MigrationError("%s 里同名文件夹太多" % ("家目录" if shown == "~" else shown))
+
+    def data_dir(self, mount, pw):
+        """数据盘上成员自己的目录 <挂载点>/<用户名>，没有就建（属于成员，权限 750）。挂载点必须是本机现有的数据盘。
+        建目录、检查属主都用目录 fd 且不跟随符号链接：挂载点可能允许旧共享账号写入，不能被抢先放一个指向别处的链接。"""
+        if mount not in self.agent.data_disks():
+            raise MigrationError("%s 不是这台服务器上的数据盘（可能已卸载），请重新选择" % mount)
+        path = os.path.join(mount, pw.pw_name)
+        mfd = os.open(mount, os.O_RDONLY | O_DIRECTORY)
+        try:
+            created = False
+            try:
+                os.mkdir(pw.pw_name, 0o700, dir_fd=mfd)
+                created = True
+            except OSError as e:
+                if e.errno != errno.EEXIST:
+                    raise
+            try:
+                fd = os.open(pw.pw_name, os.O_RDONLY | O_DIRECTORY | os.O_NOFOLLOW, dir_fd=mfd)
+            except OSError:
+                raise MigrationError("%s 不是目录，请联系管理员" % path)
+            try:
+                st = os.fstat(fd)
+                if created and st.st_uid == 0:
+                    os.fchown(fd, pw.pw_uid, pw.pw_gid)
+                    os.fchmod(fd, 0o750)
+                elif st.st_uid != pw.pw_uid:
+                    raise MigrationError("%s 已存在且不属于你，请联系管理员" % path)
+            finally:
+                os.close(fd)
+            if not os.fstat(mfd).st_mode & stat.S_IXOTH:  # 挂载点普通用户进不去（有的自动挂载就是这样），目录建好了也用不了
+                self.notes.append("%s 目前普通用户进不去，请管理员执行 sudo chmod o+x %s，之后才能访问 %s" % (mount, mount, path))
+        finally:
+            os.close(mfd)
+        return path
+
+    def dest_dir(self, pw, mode):
+        """放到哪里：(目录, 提示里显示的名字)。选了数据盘就是 <挂载点>/<用户名>，否则是家目录。
+        原地保留（link）的数据不动，快捷方式总是建在家目录。"""
+        root = self.t.get("dest_root") or ""
+        if root and mode != "link":
+            d = self.data_dir(root, pw)
+            return d, d
+        return pw.pw_dir, "~"
 
     def place_link(self, src, home, dest_name, uid, gid):
         for target in self._candidates(home, dest_name):
@@ -2055,8 +2158,9 @@ class Migration(threading.Thread):
         done = self._done_before()
         if done:
             return done
+        dest, shown = self.dest_dir(pw, mode)
         if mode == "copy":
-            return self._copy_dir(src, parent, base, dest_name, uid, gid, home)
+            return self._copy_dir(src, parent, base, dest_name, uid, gid, dest, shown)
 
         stage_parent = self._staging(parent, None)
         stage = os.path.join(stage_parent, str(self.id))
@@ -2080,18 +2184,18 @@ class Migration(threading.Thread):
             os.rename(stage, src)
             final = self.place_link(src, home, dest_name, uid, gid)
             self.notes.append("数据仍在 %s，已归你所有" % src)
-        elif os.lstat(stage).st_dev == os.stat(home).st_dev:
+        elif os.lstat(stage).st_dev == os.stat(dest).st_dev:
             self.fix_tree(stage, uid, gid, links)
-            final = self.move_into_home(stage, home, dest_name)
+            final = self.move_into_home(stage, dest, dest_name, shown)
         else:
-            self._check_space(home, self.p["bytes_total"], restore=(stage, src))
-            home_stage_parent = self._staging(os.path.dirname(home.rstrip("/")), os.stat(home).st_dev)
+            self._check_space(dest, self.p["bytes_total"], restore=(stage, src), shown=shown)
+            home_stage_parent = self._staging(os.path.dirname(dest.rstrip("/")), os.stat(dest).st_dev)
             dst = os.path.join(home_stage_parent, str(self.id))
             self.report(force=True, phase="复制文件", files_done=0, bytes_done=0)
             self.copy_tree(stage_parent, str(self.id), dst, uid, gid,
                            allow_file=lambda fst: not self._root_private(fst)
                            and not (self._external_link(fst, links) and not fst.st_mode & 0o004))
-            final = self.move_into_home(dst, home, dest_name)
+            final = self.move_into_home(dst, dest, dest_name, shown)
             self.report(force=True, phase="清理源目录")
             if os.path.isdir(stage):
                 shutil.rmtree(stage)
@@ -2105,16 +2209,17 @@ class Migration(threading.Thread):
             self.notes.append("代码里写死的 %s 路径需要改成 %s" % (src, final))
         return final
 
-    def _check_space(self, home, need_bytes, restore=None):
+    def _check_space(self, home, need_bytes, restore=None, shown="~"):
         st = os.statvfs(home)
         free = st.f_bavail * st.f_frsize
         need = need_bytes + 1024 ** 3
         if free < need:
             if restore:
                 os.rename(*restore)  # 还原
-            raise MigrationError("家目录所在磁盘空间不足（需要约 %s，剩余 %s）" % (human(need), human(free)))
+            raise MigrationError("%s所在磁盘空间不足（需要约 %s，剩余 %s）" % (
+                "家目录" if shown == "~" else shown, human(need), human(free)))
 
-    def _copy_dir(self, src, parent, base, dest_name, uid, gid, home):
+    def _copy_dir(self, src, parent, base, dest_name, uid, gid, home, shown="~"):
         """复制模式：原文件保持不动，只复制原属主自己的文件和公开可读的文件。"""
         try:
             owner = os.lstat(src).st_uid
@@ -2122,7 +2227,7 @@ class Migration(threading.Thread):
             raise MigrationError("源路径 %s 不存在" % src)
         self.report(force=True, phase="统计文件")
         self.scan(src)
-        self._check_space(home, self.p["bytes_total"])
+        self._check_space(home, self.p["bytes_total"], shown=shown)
         stage_parent = self._staging(os.path.dirname(home.rstrip("/")), os.stat(home).st_dev)
         dst = os.path.join(stage_parent, str(self.id))
         if os.path.lexists(dst):
@@ -2131,7 +2236,7 @@ class Migration(threading.Thread):
         self.copy_tree(parent, base, dst, uid, gid,
                        allow_file=lambda fst: fst.st_uid == owner or fst.st_mode & 0o004,
                        allow_dir=lambda dst_: dst_.st_uid == owner or dst_.st_mode & 0o005 == 0o005)
-        final = self.move_into_home(dst, home, dest_name)
+        final = self.move_into_home(dst, home, dest_name, shown)
         self._save_marker(final)
         self._rmdir_quiet(stage_parent)
         return final
