@@ -9,7 +9,8 @@ GPU 服务器在校园内网，不能被公网访问。本程序登录学校 Web
 
 连接路径：本程序(chisel client) → [家宽代理] → https://webvpn.whut.edu.cn/ws-<端口>/<主机编码>/ → GPU(chisel server)。
 学校 WebVPN 封了云服务器 IP，所以经家宽代理(mihomo，proxy 服务)出口访问，让 WebVPN 看到的是家宽 IP。
-WebVPN 会话 Cookie 过期（被挤或超时）时自动重新登录（含滑块验证码识别），再重连 chisel。
+WebVPN 会话 Cookie 过期（被挤或超时）时自动重新登录（含滑块验证码识别），再重连 chisel；
+隧道握手被 302 到登录页（chisel 带的 Cookie 失效，门户检查却说已登录）也会发现。
 容器 / 服务器重启后先沿用上次保存的会话（还有效就不用重新登录）；巡检出错不会让进程退出；
 隧道显示已连接、但 Agent 长时间没通过它上报时，会自动重启这一条隧道。
 
@@ -226,7 +227,9 @@ class Tunnels:
         self.client = webvpn.WebVPNClient(WEBVPN_PORTAL)
         self.procs = {}       # name -> Popen(chisel client)
         self.probes = {}      # name -> (时间戳, 探测结果)：握手失败后的诊断，每 10 分钟最多探测一次
-        self.cookie = ""
+        self.cookie = ""        # chisel 用的 Cookie 请求头：启动时定下，之后不会跟着会话更新
+        self.ticket = None      # self.cookie 里的 wengine_vpn_ticket
+        self.rejected = False   # 有隧道握手被 WebVPN 302 到登录页（它带的会话 Cookie 已经不被认了），主循环尽快处理
         self.stopping = False
         self.connected_at = {}  # name -> chisel 报告“已连接”的时间戳
         self.last_kick = {}     # name -> 上次因“Agent 长时间没上报”而重启的时间戳
@@ -272,7 +275,7 @@ class Tunnels:
                 self.client = webvpn.WebVPNClient(WEBVPN_PORTAL, proxy=WEBVPN_PROXY)
                 self.client.login(WEBVPN_USER, WEBVPN_PASSWORD)
                 name, _ = self.client.ticket_cookie()
-                self.cookie = self.client.cookie_header()
+                self._adopt_cookie()
                 log.info("WebVPN 登录成功（%s）", name)
                 set_login_status("logged_in")
                 self.save_session()
@@ -293,6 +296,11 @@ class Tunnels:
                 self._sleep(backoff)
                 backoff = min(backoff * 2, 600)
         return False
+
+    def _adopt_cookie(self):
+        """之后启动的 chisel 都用当前会话的 Cookie。"""
+        self.cookie = self.client.cookie_header()
+        self.ticket = self.client.ticket_cookie()[1]
 
     def save_session(self):
         try:
@@ -326,7 +334,7 @@ class Tunnels:
             log.info("上次保存的 WebVPN 会话已失效，重新登录")
             return False
         self.client = client
-        self.cookie = client.cookie_header()
+        self._adopt_cookie()
         log.info("沿用上次的 WebVPN 会话（%s）", "仍然有效" if state else "暂时无法确认，先沿用")
         set_login_status("logged_in")
         return True
@@ -340,7 +348,7 @@ class Tunnels:
     # --- chisel client ---
     def chisel_cmd(self, host, port):
         # 无限重试：短暂网络抖动、GPU 重启由 chisel 自愈，不触发重新登录；
-        # 会话真正过期（Cookie 失效）由主循环的 logged_in() 轮询发现后重登并换新 Cookie 重连。
+        # 会话真正过期（Cookie 失效）由主循环的 logged_in() 轮询、或握手被 302 到登录页时发现，重登并换新 Cookie 重连。
         # 重试间隔最长 10 秒：对端恢复后很快连上（每次只是一个 WebSocket 请求，不是登录）
         cmd = [CHISEL_BIN, "client",
                "--auth", f"{CHISEL_USER}:{CHISEL_SECRET}",
@@ -383,9 +391,15 @@ class Tunnels:
                     if time.time() - ts > 600:
                         host, port = TARGETS.get(name, (None, None))
                         if host:
-                            result = probe_handshake(host, port, self.cookie)
+                            cookie = self.cookie
+                            result = probe_handshake(host, port, cookie)
                             self.probes[name] = (time.time(), result)
                             log.warning("[%s] 握手失败，手动探测 WebVPN：%s", name, result)
+                            # 被 302 到登录页：这条隧道带的会话 Cookie 已失效。chisel 只会拿着它无限重试，
+                            # 交给主循环换新票或重新登录（探测期间已经换过 Cookie、或这条已被替换的不算）
+                            if (result.startswith("HTTP 302") and "/login" in result
+                                    and self.procs.get(name) is p and cookie == self.cookie):
+                                self.rejected = True
                     if result:
                         err += " ｜ 探测：" + result
                 set_status(name, "error", error=err)
@@ -456,10 +470,20 @@ class Tunnels:
     # --- 一轮巡检：校验会话，掉线 / 过期就重登并重连，补起缺失的隧道 ---
     def tick(self):
         refresh_targets()  # 平台里新增/删除服务器后自动生效
-        if time.time() - self.checked_at >= CHECK_INTERVAL:
+        rejected, self.rejected = self.rejected, False
+        if rejected or time.time() - self.checked_at >= CHECK_INTERVAL:
             self.checked_at = time.time()
-            if self.client.logged_in() is False:
-                # WebVPN 会话失效（被挤或超时）：重新登录，换新 Cookie 重连全部
+            state = self.client.logged_in()
+            if state and rejected and self.client.ticket_cookie()[1] != self.ticket:
+                # 会话检查用的 Cookie 里已经换了新票（WebVPN 自动续登等），门户认为已登录；
+                # chisel 却还带着启动时的旧票，握手一直被 302 到登录页。换上新票重连，不用重新登录
+                log.info("隧道带的 WebVPN 会话票已失效，当前会话已换新票，用新 Cookie 重连")
+                self._adopt_cookie()
+                self.save_session()
+                self.restart_all()
+                return
+            if state is False or (state and rejected):
+                # WebVPN 会话失效（被挤或超时），或门户说已登录、隧道握手却被拒：重新登录，换新 Cookie 重连全部
                 log.info("WebVPN 会话失效，重新登录")
                 self.stop_all()
                 if self.login():
