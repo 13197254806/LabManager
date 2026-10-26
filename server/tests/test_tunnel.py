@@ -204,3 +204,80 @@ def test_tick_reconnects_when_host_changes(tun, monkeypatch):
     monkeypatch.setattr(tunnel, "TARGETS", {"gpu1": ("10.86.20.7", 9000)})
     tun.tick()
     assert started == [("gpu1", "10.86.20.7")]
+
+
+def _rejected_setup(tun, monkeypatch, *, ticket_in_use, logged_in=True):
+    """有隧道握手被 302 到登录页；会话检查用的 Cookie 里是 abc 这张票。"""
+    tun.client = _client_with_ticket()
+    tun.ticket = ticket_in_use
+    tun.cookie = f"wengine_vpn_ticketwebvpn_example_edu_cn={ticket_in_use}"
+    tun.rejected = True
+    monkeypatch.setattr(tun.client, "logged_in", lambda: logged_in)
+    monkeypatch.setattr(tun, "watchdog", lambda: None)
+    calls = []
+    monkeypatch.setattr(tun, "restart_all", lambda: calls.append("restart"))
+    monkeypatch.setattr(tun, "stop_all", lambda: calls.append("stop"))
+    monkeypatch.setattr(tun, "start_all", lambda: calls.append("start"))
+    monkeypatch.setattr(tun, "login", lambda: calls.append("login") or True)
+    return calls
+
+
+def test_rejected_tunnel_switches_to_the_renewed_ticket_without_login(tun, monkeypatch):
+    """门户检查用的 Cookie 换了新票（会话仍有效），chisel 还带着旧票被 302：换上新票重连，不占登录名额。"""
+    calls = _rejected_setup(tun, monkeypatch, ticket_in_use="old")
+    tun.tick()
+    assert calls == ["restart"]
+    assert "abc" in tun.cookie and tun.ticket == "abc"
+    assert "abc" in open(tunnel.SESSION_FILE).read()
+    assert tun.rejected is False
+
+
+def test_rejected_tunnel_with_current_ticket_logs_in_again(tun, monkeypatch):
+    """门户说已登录，但 WebVPN 不认隧道用的同一张票：只能重新登录。"""
+    calls = _rejected_setup(tun, monkeypatch, ticket_in_use="abc")
+    tun.tick()
+    assert calls == ["stop", "login", "start"]
+
+
+def test_rejected_tunnel_waits_when_session_state_is_unknown(tun, monkeypatch):
+    calls = _rejected_setup(tun, monkeypatch, ticket_in_use="old", logged_in=None)
+    monkeypatch.setattr(tunnel, "TARGETS", {})
+    tun.tick()
+    assert calls == []
+
+
+def test_rejection_is_checked_right_away(tun, monkeypatch):
+    """握手被拒不用等下一次定时校验（默认 60 秒）。"""
+    import time
+
+    monkeypatch.setattr(tunnel, "CHECK_INTERVAL", 60)
+    calls = _rejected_setup(tun, monkeypatch, ticket_in_use="old")
+    tun.checked_at = time.time()
+    tun.tick()
+    assert calls == ["restart"]
+
+
+def _bad_handshake(tun, monkeypatch, probe_result, *, current=True):
+    import io
+
+    monkeypatch.setattr(tunnel, "TARGETS", {"gpu1": ("10.0.0.1", 9000)})
+    monkeypatch.setattr(tunnel, "probe_handshake", lambda host, port, cookie: probe_result)
+    line = "2026/10/26 05:28:22 client: Connection error: websocket: bad handshake (Attempt: 1/unlimited)\n"
+    p = type("P", (), {"stdout": io.StringIO(line), "wait": lambda self: 0})()
+    if current:
+        tun.procs["gpu1"] = p
+    tun._watch("gpu1", p)
+
+
+def test_handshake_redirected_to_login_flags_the_session(tun, monkeypatch):
+    _bad_handshake(tun, monkeypatch, "HTTP 302 Found，Location=/ws-9000/7772/webvpn.example.edu.cn/login，Server=-，内容：(空)")
+    assert tun.rejected is True
+
+
+def test_other_handshake_failures_do_not_flag_the_session(tun, monkeypatch):
+    _bad_handshake(tun, monkeypatch, "HTTP 502 Bad Gateway，Server=-，内容：(空)")
+    assert tun.rejected is False
+    # 已经被替换掉的旧进程（比如刚重登重连过）探测到的 302 不算
+    tun.probes.clear()
+    _bad_handshake(tun, monkeypatch, "HTTP 302 Found，Location=/login，Server=-，内容：(空)", current=False)
+    assert tun.rejected is False
