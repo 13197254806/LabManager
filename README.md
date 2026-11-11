@@ -93,3 +93,5 @@ DEV_LOGIN=1 .venv/bin/uvicorn app.main:app --reload    # 免飞书登录，输�
 ```
 
 部署和运维见 [docs/管理员手册.md](docs/管理员手册.md)，成员使用说明见 [docs/用户指南.md](docs/用户指南.md)。
+
+**2026-10-23 运维记录：** 三台校园内网 GPU 服务器的原共享账号 `ubuntu` / `ubuntu602` 已禁用新登录，账号、密码、公钥及文件保留，统一通过独立的 `lab-maint` 管理。服务器清单、登录方法、验证结果和恢复命令见[管理员手册第 8.1 节](docs/管理员手册.md#legacy-account-retirement)；已有会话和业务进程未被强制终止。
