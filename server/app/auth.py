@@ -41,6 +41,7 @@ def _login(request: Request, db: Session, info: dict) -> User:
     user.union_id = info.get("union_id") or user.union_id
     user.avatar_url = info.get("avatar_url") or user.avatar_url
     user.tenant_key = info.get("tenant_key") or user.tenant_key
+    user.logged_in = True  # 从飞书群加进组会名单的成员第一次登录，沿用那条记录
     db.commit()
     if not user.enabled:
         raise HTTPException(403, "你的账号已被管理员停用")

@@ -25,6 +25,8 @@ class User(Base):
     onboarded: Mapped[bool] = mapped_column(Boolean, default=False)
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    # 从飞书群加进组会汇报名单、还没登录过平台的成员为 False（第一次登录时改为 True，沿用同一条记录）
+    logged_in: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=now)
 
     ssh_keys: Mapped[list["SSHKey"]] = relationship(

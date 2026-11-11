@@ -559,6 +559,68 @@ def save_roster(db: Session, user_ids: list[int]):
         db.commit()
 
 
+def candidates(db: Session) -> dict:
+    """「添加汇报人」可以选的人：设置了飞书群就列群成员（包括还没登录过平台的），否则列平台上的成员。
+    已在名单里、已停用的不列。"""
+    cfg = load(db)
+    in_roster = set(cfg.roster)
+    users = list(db.scalars(select(User).order_by(User.id)))
+    by_oid = {u.open_id: u for u in users}
+
+    def person(u: User | None, open_id: str, name: str, avatar: str = "") -> dict:
+        return {"open_id": open_id, "user_id": u.id if u else None, "name": (u.name if u else name) or "未命名",
+                "avatar_url": (u.avatar_url if u else None) or avatar or None,
+                "linux_username": u.linux_username if u else None, "logged_in": bool(u and u.logged_in)}
+
+    platform = [person(u, u.open_id, u.name) for u in users if u.enabled and u.id not in in_roster]
+    if not cfg.chats:
+        return {"source": "users", "members": platform, "chats": [], "errors": []}
+    if not settings.feishu_enabled:
+        return {"source": "users", "members": platform, "chats": [], "errors": ["服务端未配置飞书应用，只能从平台成员里选"]}
+    members: dict[str, str] = {}
+    errors = []
+    for c in cfg.chats:
+        try:
+            for m in feishu.list_chat_members(c["id"]):
+                members.setdefault(m["open_id"], m["name"])
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"读取「{c.get('name') or c['id']}」的成员失败：{e}")
+    if not members:  # 一个群都读不到：退回平台成员，并说明原因
+        return {"source": "users", "members": platform, "chats": [], "errors": errors}
+    new = [oid for oid in members if oid not in by_oid]
+    avatars = {}
+    if new:
+        try:
+            avatars = feishu.user_avatars(new)
+        except Exception as e:  # noqa: BLE001  拿不到头像就显示姓名首字
+            log.info("读取成员头像失败：%s", e)
+    out = []
+    for oid, name in members.items():
+        u = by_oid.get(oid)
+        if u and (u.id in in_roster or not u.enabled):
+            continue
+        out.append(person(u, oid, name, avatars.get(oid, "")))
+    return {"source": "chats", "members": out, "chats": [c.get("name") or c["id"] for c in cfg.chats], "errors": errors}
+
+
+def add_members(db: Session, members: list[dict]) -> list[int]:
+    """把飞书群成员加到名单末尾。还没登录过平台的，按 open_id 建一条成员记录（不建服务器账号；以后本人登录就沿用这条）。"""
+    ids = []
+    for m in members:
+        u = db.scalar(select(User).where(User.open_id == m["open_id"]))
+        if not u:
+            u = User(open_id=m["open_id"], name=m["name"] or "未命名", avatar_url=m.get("avatar_url") or None,
+                     logged_in=False, enabled=True, is_admin=False, onboarded=False)
+            db.add(u)
+            db.flush()
+        elif not u.enabled:
+            continue
+        ids.append(u.id)
+    db.commit()
+    save_roster(db, load(db).roster + ids)
+    return ids
+
+
 def set_next(db: Session, uid: int):
     """从 uid 开始按名单顺序轮换，清掉临时调整。"""
     with lock:

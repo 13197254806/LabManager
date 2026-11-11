@@ -134,6 +134,43 @@ def get_chat(chat_id: str) -> dict:
     return {"name": data.get("name") or "", "avatar": data.get("avatar") or ""}
 
 
+def list_chat_members(chat_id: str) -> list[dict]:
+    """群成员（不含机器人）：[{open_id, name}]。需要「获取群组信息」权限，机器人要在群里。"""
+    members, page = [], ""
+    for _ in range(50):
+        resp = httpx.get(
+            f"{settings.feishu_open_base}/open-apis/im/v1/chats/{chat_id}/members",
+            params={"member_id_type": "open_id", "page_size": 100, **({"page_token": page} if page else {})},
+            headers={"Authorization": f"Bearer {tenant_access_token()}"},
+            timeout=10,
+        )
+        data = _check(resp).get("data") or {}
+        members += [{"open_id": m["member_id"], "name": m.get("name") or ""}
+                    for m in data.get("items") or [] if m.get("member_id")]
+        page = data.get("page_token") or ""
+        if not data.get("has_more") or not page:
+            break
+    return members
+
+
+def user_avatars(open_ids: list[str]) -> dict[str, str]:
+    """成员头像 {open_id: 地址}。需要通讯录权限且成员在应用的通讯录范围内；拿不到的不返回。"""
+    out: dict[str, str] = {}
+    for i in range(0, len(open_ids), 50):
+        resp = httpx.get(
+            f"{settings.feishu_open_base}/open-apis/contact/v3/users/batch",
+            params=[("user_id_type", "open_id")] + [("user_ids", x) for x in open_ids[i:i + 50]],
+            headers={"Authorization": f"Bearer {tenant_access_token()}"},
+            timeout=10,
+        )
+        for u in (_check(resp).get("data") or {}).get("items") or []:
+            av = u.get("avatar") or {}
+            url = av.get("avatar_240") or av.get("avatar_72") or ""
+            if u.get("open_id") and url.startswith("https://"):
+                out[u["open_id"]] = url
+    return out
+
+
 def build_card(title: str, markdown: str, buttons: list[tuple[str, str]] | None = None, template: str = "blue") -> dict:
     """生成一张简单的消息卡片：标题 + markdown 正文 + 若干链接按钮。"""
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": markdown}}]

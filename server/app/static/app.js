@@ -1985,7 +1985,7 @@ function renderAdminUsers(users) {
   $("#admin-users").innerHTML = `<div class="tbl-row head mem-grid"><span>姓名</span><span>Linux 用户名</span><span class="c-center">UID</span><span class="c-center">密码</span><span class="c-center">公钥</span><span class="c-center">管理员</span><span class="c-center">启用</span></div>
     ${users.map((u) => `<div class="tbl-row mem-grid" data-member="${esc(`${u.name} ${u.linux_username || ""}`.toLowerCase())}">
       <div class="who">${avatarHtml(u.name, u.avatar_url, u.id)}${esc(u.name)}</div>
-      <div>${u.linux_username ? `<code class="inline-code">${esc(u.linux_username)}</code>` : `<span class="badge">未设置</span>`}
+      <div>${u.linux_username ? `<code class="inline-code">${esc(u.linux_username)}</code>` : u.logged_in === false ? `<span class="badge pending" title="从飞书群加进组会汇报名单的成员，本人登录平台后才会设置用户名">还没登录过</span>` : `<span class="badge">未设置</span>`}
         <button class="btn ghost icon small" data-rename="${u.id}" title="修改用户名">${icon("edit")}</button></div>
       <span class="c-center mono muted">${u.uid}</span>
       <span class="c-center">${u.has_password ? `<span style="color:var(--ok)">${icon("check")}</span>` : `<span class="muted">-</span>`}</span>
@@ -2474,6 +2474,7 @@ gmRosterBox.addEventListener("click", (e) => {
 const gmPickDialog = $("#gm-pick-dialog");
 let gmPickDone = null;
 function openGmPick({ title, sub, ico, items, emptyText, onOk }) {
+  $("#gm-pick-search").value = "";
   $("#gm-pick-title").textContent = title;
   $("#gm-pick-sub").textContent = sub;
   $("#gm-pick-ico").innerHTML = icon(ico);
@@ -2484,12 +2485,22 @@ function openGmPick({ title, sub, ico, items, emptyText, onOk }) {
 }
 function renderGmPickItems(items, emptyText = "") {
   $("#gm-pick-list").innerHTML = items === null ? `<p class="muted small">正在读取…</p>`
-    : items.length ? items.map((x) => `<label${x.title ? ` title="${esc(x.title)}"` : ""}><input type="checkbox" value="${esc(x.value)}" ${x.checked ? "checked" : ""}><span class="ck">${icon("check")}</span>${x.avatar || ""}<span class="lbl"><b>${esc(x.label)}</b>${x.sub ? `<small>${esc(x.sub)}</small>` : ""}</span></label>`).join("")
+    : items.length ? items.map((x) => `<label data-q="${esc(`${x.label} ${x.sub || ""}`.toLowerCase())}"${x.title ? ` title="${esc(x.title)}"` : ""}><input type="checkbox" value="${esc(x.value)}" ${x.checked ? "checked" : ""}><span class="ck">${icon("check")}</span>${x.avatar || ""}<span class="lbl"><b>${esc(x.label)}</b>${x.sub ? `<small class="${x.subClass || ""}">${esc(x.sub)}</small>` : ""}</span></label>`).join("")
     : `<p class="muted small">${esc(emptyText)}</p>`;
   $("#gm-pick-all").classList.toggle("hidden", !items?.length);
+  // 人多的时候显示搜索框
+  $(".gm-pick-search").classList.toggle("hidden", !(items?.length > 12));
+  gmPickFilter();
 }
+function gmPickFilter() {
+  const q = $("#gm-pick-search").value.trim().toLowerCase();
+  $$("#gm-pick-list label").forEach((l) => l.classList.toggle("hidden", !!q && !l.dataset.q.includes(q)));
+}
+$("#gm-pick-search").addEventListener("input", gmPickFilter);
+// 在搜索框里按回车不提交弹窗
+$("#gm-pick-search").addEventListener("keydown", (e) => { if (e.key === "Enter") e.preventDefault(); });
 $("#gm-pick-all").onclick = () => {
-  const boxes = $$("#gm-pick-list input");
+  const boxes = $$("#gm-pick-list label:not(.hidden) input");  // 搜索时只全选看得到的
   const all = boxes.every((b) => b.checked);
   boxes.forEach((b) => (b.checked = !all));
 };
@@ -2500,19 +2511,38 @@ $("#gm-pick-form").addEventListener("submit", async (e) => {
   if (gmPickDone && (await gmPickDone(picked)) !== false) gmPickDialog.close();
 });
 
-$("#gm-add").onclick = () => {
-  const inRoster = new Set(gmRosterIds());
-  const users = (state.users || []).filter((u) => u.enabled && !inRoster.has(u.id));
+// 添加汇报人：设置了飞书群就从群成员里选（还没登录过平台的也可以），否则从平台成员里选
+$("#gm-add").onclick = async () => {
+  let cand = null;
   openGmPick({
-    title: "添加汇报人", sub: "选中的成员按列表顺序排到名单末尾，之后可以调整顺序", ico: "users",
-    items: users.map((u) => ({ value: u.id, label: u.name, sub: u.linux_username || "", avatar: avatarHtml(u.name, u.avatar_url, u.id) })),
-    emptyText: "所有成员都已经在名单里了。成员要先登录过平台才能添加。",
-    onOk: async (ids) => {
-      if (!ids.length) return true;
-      const r = await gmCall("/api/admin/meetings/roster", { user_ids: [...gmRosterIds(), ...ids.map(Number)] }, { method: "PUT", msg: `已添加 ${ids.length} 人` });
+    title: "添加汇报人", sub: "选中的人按列表顺序排到名单末尾，之后可以拖动调整", ico: "users", items: null,
+    onOk: async (picked) => {
+      if (!picked.length || !cand) return true;
+      const chosen = cand.members.filter((m) => picked.includes(m.open_id));
+      const r = cand.source === "chats"
+        ? await gmCall("/api/admin/meetings/roster/add", { members: chosen.map((m) => ({ open_id: m.open_id, name: m.name, avatar_url: m.avatar_url || null })) }, { msg: `已添加 ${chosen.length} 人` })
+        : await gmCall("/api/admin/meetings/roster", { user_ids: [...gmRosterIds(), ...chosen.map((m) => m.user_id)] }, { method: "PUT", msg: `已添加 ${chosen.length} 人` });
       return !!r;
     },
   });
+  try {
+    cand = await api("/api/admin/meetings/candidates");
+  } catch (err) {
+    renderGmPickItems([], "");
+    $("#gm-pick-error").textContent = err.message;
+    return;
+  }
+  $("#gm-pick-sub").textContent = cand.source === "chats"
+    ? `「${cand.chats.join("」「")}」的群成员，还没登录过平台的也能加；选中的人排到名单末尾，之后可以拖动调整`
+    : gm.data.config.chats.length ? "暂时读不到群成员（原因见下方），先从平台上的成员里选"
+    : "平台上的成员；在下方「飞书群提醒」里设置群后，可以直接从群成员里选（包括还没登录过平台的人）";
+  $("#gm-pick-error").textContent = cand.errors.join("\n");
+  renderGmPickItems(cand.members.map((m) => ({
+    value: m.open_id, label: m.name, title: m.name,
+    sub: m.logged_in ? (m.linux_username || "已登录过平台") : "还没登录过平台", subClass: m.logged_in ? "" : "new",
+    // 还没在平台上的人没有 id，按 open_id 算一个数，头像颜色才不会都一样
+    avatar: avatarHtml(m.name, m.avatar_url, m.user_id ?? [...m.open_id].reduce((h, c) => (h * 31 + c.charCodeAt(0)) % 9973, 7)),
+  })), cand.source === "chats" ? "群里的成员都已经在名单里了。" : "所有成员都已经在名单里了。");
 };
 
 // ---- 设置表单 ----
