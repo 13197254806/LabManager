@@ -40,6 +40,7 @@
     <symbol id="i-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></symbol>
     <symbol id="i-skip" viewBox="0 0 24 24"><path d="m5 4 10 8-10 8z"/><path d="M19 5v14"/></symbol>
     <symbol id="i-grip" viewBox="0 0 24 24"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></symbol>
+    <symbol id="i-doc" viewBox="0 0 24 24"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/><path d="M8 13h8"/><path d="M8 17h5"/></symbol>
     <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></symbol>
   </svg>
   <div id="login" class="login hidden">
@@ -251,6 +252,21 @@
                     <div class="inline-num">提前 <input type="number" name="notify_days" min="1" max="6" required> 天</div></div>
                   <div class="set-row col"><div><div class="t">卡片附加说明<span class="field-hint" style="margin-left:6px">可选</span></div><div class="d">显示在卡片最后，比如「汇报人请提前一天把 PPT 发到群里」、线上会议链接。支持飞书 <code>lark_md</code> 语法。</div></div>
                     <textarea name="card_extra" rows="2" maxlength="1000"></textarea></div>
+                </div>
+              </div>
+              <div class="set-group"><h3>周报</h3>
+                <div class="card">
+                  <div class="set-row"><div><div class="t">发通知前自动创建周报</div><div class="d">每次发组会通知卡片前，在飞书知识库的「周报」下复制模板，建好这周的周报（标题如「周报 - 2026/11/13」，按组会日期；这周已经有了就直接用），卡片上附链接，提醒大家在组会开始前填写。</div></div>
+                    <label class="switch"><input type="checkbox" name="report_enabled"><i></i></label></div>
+                  <div class="set-row col"><div><div class="t">知识库页面</div><div class="d">在飞书里打开页面，复制地址栏的链接。机器人要能编辑这些页面：在「周报」页面右上角「…」→「更多」→「添加文档应用」里添加本应用并给「可编辑」权限（下面的子页面会一起授权）；应用还要在飞书开放平台开通 <code>wiki:wiki</code> 权限。</div></div>
+                    <div class="gm-report-grid">
+                      <label for="gm-r-template">周报模板</label><input id="gm-r-template" name="report_template" class="mono" placeholder="https://xxx.feishu.cn/wiki/…" maxlength="300" autocomplete="off">
+                      <label for="gm-r-parent">周报目录</label><input id="gm-r-parent" name="report_parent" class="mono" placeholder="新周报建在这个页面下面" maxlength="300" autocomplete="off">
+                      <label for="gm-r-archive">历史周报</label><input id="gm-r-archive" name="report_archive" class="mono" placeholder="可选：更早的周报移到这个页面下面" maxlength="300" autocomplete="off">
+                    </div>
+                    <div class="gm-report-check"><button class="btn small" type="button" id="gm-r-check"><svg class="i"><use href="#i-search"/></svg>检查能否访问</button><div id="gm-r-result"></div></div></div>
+                  <div class="set-row"><div><div class="t">保留最近几周</div><div class="d">每次发完卡片整理一次「周报」：更早的周报移到「历史周报」；模板排在最前，周报按日期从新到旧，其他页面排在最后。</div></div>
+                    <div class="inline-num">最近 <input type="number" name="report_keep" min="1" max="52" required> 周</div></div>
                 </div>
               </div>
               <div class="savebar clean" id="gm-bar"><span class="grow" id="gm-msg">所有更改已保存</span><button class="btn primary" id="gm-save" disabled>保存设置</button></div>

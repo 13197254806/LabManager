@@ -2156,7 +2156,8 @@ function renderGmHero() {
     main = `<div class="k">下次组会${rel ? ` · ${rel}` : ""}</div>
       <div class="v">${gmDay(m.start_at)} ${gmParts(m.start_at).time}</div>
       <div class="meta"><span>${icon("pin")}${esc(m.location || "地点待定")}</span>
-        <span>${icon("present")}汇报：${m.presenters.length ? m.presenters.map((p) => `${avatarHtml(p.name, p.avatar_url, p.id)}${esc(p.name)}`).join("、") : "待定"}</span></div>`;
+        <span>${icon("present")}汇报：${m.presenters.length ? m.presenters.map((p) => `${avatarHtml(p.name, p.avatar_url, p.id)}${esc(p.name)}`).join("、") : "待定"}</span>${m.report_url ? `
+        <span>${icon("doc")}<a class="gm-rep" href="${esc(m.report_url)}" target="_blank" rel="noopener">${esc(m.report_title || "周报")}</a></span>` : ""}</div>`;
   }
   let st;
   if (!c.enabled) st = `<div class="st warn">${icon("info")}组会已暂停：不轮换汇报人，也不发飞书提醒。配置好后打开右侧开关。</div>`;
@@ -2168,6 +2169,9 @@ function renderGmHero() {
       scheduled: `将在 ${gmStamp(first.notify_at)} 把${first.cancelled ? "「组会暂停」" : "通知"}卡片发到 ${c.chats.length} 个群并 @所有人`,
       due: "提醒时间已到，正在发送…", missed: `${gmDay(first.start_at)}已过自动提醒时间，需要的话可以手动发送` }[first.notify_state];
     st = when ? `<div class="st">${icon("bell")}${esc(when)}</div>` : "";
+  }
+  if (c.report_enabled && first?.report_error) {
+    st = (st || "") + `<div class="st warn">${icon("doc")}${esc(`${gmDay(first.start_at)}的周报：${first.report_error.replace(/\n/g, "；")}`)}</div>`;
   }
   if (!d.roster.length) st = `<div class="st warn">${icon("info")}还没有汇报名单：在「汇报名单」里添加成员后自动排汇报人。</div>` + (st || "");
   $("#gm-hero").innerHTML = `<span class="icon-box">${icon("present")}</span><div class="grow">${main}${st || ""}</div>
@@ -2221,15 +2225,20 @@ function renderGmUpcoming() {
       }).join("")
       : `<span class="muted">待定</span>`;
     const [cls, label, sub] = (GM_NOTIFY[m.notify_state] || (() => ["", "", ""]))(m);
+    const repOn = gm.data.config.report_enabled && !m.cancelled;
+    const rep = !repOn ? ""
+      : m.report_url ? `<a class="gm-rep" href="${esc(m.report_url)}" target="_blank" rel="noopener" title="${esc(m.report_title)}">${icon("doc")}周报</a>`
+      : m.report_error ? `<span class="gm-rep err" title="${esc(m.report_error)}">${icon("doc")}周报没建好</span>` : "";
     return `<div class="tbl-row gm-row${m.cancelled ? " off" : ""}${rel === "今天" ? " today" : ""}">
       <div class="c-date"><div class="cell-main">${gmDay(m.start_at)}</div><div class="cell-sub">${p.time}${m.custom_time ? " · 已改时间" : ""}${rel ? ` · ${rel}` : ""}</div></div>
       <div class="c-loc">${m.cancelled ? `<span class="muted">-</span>` : gmLocSelect(m)}</div>
       <div class="c-who">${chips}</div>
-      <div class="c-st">${label ? `<span class="badge ${cls}" ${m.notify_error ? `title="${esc(m.notify_error)}"` : ""}>${label}</span><div class="cell-sub">${sub}</div>` : ""}</div>
+      <div class="c-st">${label ? `<span class="badge ${cls}" ${m.notify_error ? `title="${esc(m.notify_error)}"` : ""}>${label}</span><div class="cell-sub">${sub}</div>` : ""}${rep}</div>
       <div class="c-act row-actions"><button type="button" class="btn small" data-gm-edit="${m.week}">${icon("edit")}编辑</button>
         <div class="menu-wrap"><button type="button" class="btn ghost icon small" data-menu title="更多">${icon("more")}</button>
           <div class="menu hidden">
-            <button type="button" data-gm-cancel="${m.week}">${icon(m.cancelled ? "renew" : "x")}${m.cancelled ? "恢复这周组会" : "这周不开…"}</button>
+            <button type="button" data-gm-cancel="${m.week}">${icon(m.cancelled ? "renew" : "x")}${m.cancelled ? "恢复这周组会" : "这周不开…"}</button>${repOn ? `
+            <button type="button" ${m.report_url ? `data-gm-report-open="${esc(m.report_url)}">${icon("doc")}打开周报` : `data-gm-report="${m.week}">${icon("doc")}创建周报<small class="muted">（不发卡片）</small>`}</button>` : ""}
             <div class="menu-sep"></div>
             <button type="button" data-gm-send="${m.week}">${icon("bell")}立即发到群里</button>
             <button type="button" data-gm-send-me="${m.week}">${icon("send")}发给我预览</button>
@@ -2259,6 +2268,10 @@ $("#gm-upcoming").addEventListener("click", async (e) => {
     if (!m.cancelled) return openGmEdit(m.week, true);
     const r = await gmCall(`/api/admin/meetings/${m.week}`, { cancelled: false }, { method: "PATCH", msg: "已恢复这周组会" });
     if (r && m.notified_at) toast("已恢复。这周已经发过「组会暂停」卡片，需要的话点「立即发到群里」重新通知");
+  } else if (d.gmReport) {
+    gmCreateReport(d.gmReport);
+  } else if (d.gmReportOpen) {
+    window.open(d.gmReportOpen, "_blank", "noopener");
   } else if (d.gmSend) {
     gmSend(d.gmSend, "chat");
   } else if (d.gmSendMe) {
@@ -2276,8 +2289,20 @@ async function gmSend(week, to) {
   }
   const r = await gmCall(`/api/admin/meetings/${week}/send`, { to }, { msg: "" });
   if (!r) return;
+  const repErr = to === "chat" && !m.cancelled ? r.upcoming.find((x) => x.week === week)?.report_error : "";
   if (r.errors?.length) toast(`部分群没发出去：\n${r.errors.join("\n")}`);
+  else if (repErr) toast(`已发到群里，但周报没建好（卡片上链接的是周报目录）：${repErr}`);
   else toast(to === "me" ? "已发给你，请在飞书里查看" : "已发到群里");
+}
+
+// 手动创建某次组会的周报（不发卡片），顺便整理周报目录
+async function gmCreateReport(week) {
+  const m = gm.data.upcoming.find((x) => x.week === week);
+  if (!confirm(`在飞书知识库的「周报」下创建 ${gmDay(m.start_at)} 这次组会的周报（这周已经有了就直接用），并整理周报目录？不会发卡片。`)) return;
+  toast("正在创建周报…");
+  const r = await gmCall(`/api/admin/meetings/${week}/report`, {}, { msg: "" });
+  const x = r?.upcoming.find((y) => y.week === week);
+  if (x?.report_url) toast(`周报已建好：${x.report_title}`);
 }
 
 // ---- 编辑某一周 ----
@@ -2561,6 +2586,11 @@ function fillGmForm() {
   f.per_meeting.value = c.per_meeting;
   f.notify_days.value = c.notify_days;
   f.card_extra.value = c.card_extra;
+  f.report_enabled.checked = c.report_enabled;
+  f.report_template.value = c.report_template;
+  f.report_parent.value = c.report_parent;
+  f.report_archive.value = c.report_archive;
+  f.report_keep.value = c.report_keep;
   gm.locations = [...c.locations];
   gm.chats = c.chats.map((x) => ({ ...x }));
   renderGmLocs();
@@ -2639,18 +2669,37 @@ $("#gm-pick-chats").onclick = async () => {
 };
 $("#gm-form").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const f = e.target;
+  const f = e.target, old = gm.data.config;
+  const rep = { report_enabled: f.report_enabled.checked, report_template: f.report_template.value.trim(),
+    report_parent: f.report_parent.value.trim(), report_archive: f.report_archive.value.trim(), report_keep: Number(f.report_keep.value) };
   try {
     const d = await api("/api/admin/meetings/config", { method: "PUT", body: {
       weekday: Number(f.weekday.value), time: f.time.value, per_meeting: Number(f.per_meeting.value),
-      notify_days: Number(f.notify_days.value), locations: gm.locations, chats: gm.chats, card_extra: f.card_extra.value,
+      notify_days: Number(f.notify_days.value), locations: gm.locations, chats: gm.chats, card_extra: f.card_extra.value, ...rep,
     } });
     applyMeetings(d, true);
     toast("已保存");
+    // 刚打开周报或者改了页面链接：检查一下机器人能不能访问
+    const c = d.config;
+    if (c.report_enabled && (!old.report_enabled || ["template", "parent", "archive"].some((k) => c[`report_${k}`] !== old[`report_${k}`]))) gmReportCheck();
   } catch (err) {
     toast(err.message);
   }
 });
+
+// 周报：检查机器人能不能读到这几个页面（只读，不改动）
+async function gmReportCheck() {
+  const box = $("#gm-r-result");
+  box.innerHTML = `<span class="muted">正在检查…</span>`;
+  try {
+    const r = await api("/api/admin/meetings/report-check", { method: "POST", body: {} });
+    box.innerHTML = r.items.map((i) => `<div class="gm-chk ${i.ok ? "ok" : "bad"}">${icon(i.ok ? "check" : "x")}<span><b>${esc(i.label)}</b>${i.title ? `：${esc(i.title)}` : ""}${i.detail ? `<span class="muted"> · ${esc(i.detail)}</span>` : ""}${i.error ? `<span class="err">${esc(i.error)}</span>` : ""}</span></div>`).join("")
+      + (r.ok ? `<p class="muted">都能读到。新建、移动页面还要「可编辑」权限，可以在「近期安排」里点某次组会的「…」→「创建周报」试一下。</p>` : "");
+  } catch (err) {
+    box.innerHTML = `<div class="gm-chk bad">${icon("x")}<span>${esc(err.message)}</span></div>`;
+  }
+}
+$("#gm-r-check").onclick = () => (gm.dirty ? toast("有未保存的更改：先保存设置，再检查") : gmReportCheck());
 
 // ---- 卡片预览（按后端生成的卡片画，和真正发出去的一致）----
 const FC_HEAD = { blue: "#3370ff", grey: "#8f959e", green: "#34c724", orange: "#ff8800", red: "#f54a45", turquoise: "#14c0ff" };
@@ -2659,6 +2708,7 @@ function larkMd(text, names) {
     .replace(/&lt;at id=all&gt;&lt;\/at&gt;/g, `<span class="at">@所有人</span>`)
     .replace(/&lt;at id=([\w-]+)&gt;&lt;\/at&gt;/g, (_, id) => `<span class="at">@${esc(names[id] || id)}</span>`)
     .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/\[([^\]\n]+)\]\((https:\/\/[^\s)]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`)
     .replace(/\n/g, "<br>");
 }
 function renderGmPreview() {
@@ -2670,6 +2720,7 @@ function renderGmPreview() {
   const h = p.card.header;
   el.innerHTML = `<div class="fcard-h" style="background:${FC_HEAD[h.template] || FC_HEAD.blue}">${esc(h.title.content)}</div>
     <div class="fcard-b">${els.map((x) => x.tag === "hr" ? "<hr>"
+      : x.tag === "action" ? `<div class="fc-btns">${x.actions.map((b) => `<a href="${esc(b.url)}" target="_blank" rel="noopener">${esc(b.text.content)}</a>`).join("")}</div>`
       : x.fields ? `<div class="fc-fields">${x.fields.map((f) => `<div>${larkMd(f.text.content, p.names)}</div>`).join("")}</div>`
       : `<div class="fc-div">${larkMd(x.text.content, p.names)}</div>`).join("")}</div>`;
   if (!gm.dirty) $("#gm-preview-for").textContent = gmDay(gm.data.upcoming[0].start_at);
@@ -2682,7 +2733,7 @@ function renderGmHistory() {
   const h = gm.data.history;
   $("#gm-history").innerHTML = h.length
     ? `<div class="gm-hist">${h.map((r) => `<div class="tbl-row gm-hrow">
-        <div><div class="cell-main">${gmDay(r.start_at)}</div><div class="cell-sub">${r.cancelled ? "" : gmParts(r.start_at).time}</div></div>
+        <div><div class="cell-main">${gmDay(r.start_at)}</div><div class="cell-sub">${r.cancelled ? "" : gmParts(r.start_at).time}${r.report_url ? ` · <a class="gm-rep" href="${esc(r.report_url)}" target="_blank" rel="noopener" title="${esc(r.report_title)}">周报</a>` : ""}</div></div>
         <div class="${r.cancelled ? "muted" : ""}">${r.cancelled ? "-" : esc(r.location || "-")}</div>
         <div class="who-list">${r.cancelled ? `<span class="badge">没开</span>${r.note ? `<span class="cell-sub">${esc(r.note)}</span>` : ""}` : r.presenters.length ? gmPeople(r.presenters) : `<span class="muted">无汇报人</span>`}</div>
       </div>`).join("")}</div>`

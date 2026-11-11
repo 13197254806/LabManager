@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from . import browse, feishu, meetings, services
+from . import browse, feishu, meetings, reports, services
 from .auth import admin_user, current_user
 from .config import now, settings, today
 from .db import SessionLocal, get_db
@@ -695,6 +695,27 @@ class MeetingConfigIn(BaseModel):
     locations: list[str] = Field(default_factory=list, max_length=30)
     chats: list[ChatIn] = Field(default_factory=list, max_length=10)
     card_extra: str = Field(default="", max_length=1000)
+    # 周报（不传 = 不改，兼容还开着旧页面的管理员）
+    report_enabled: bool | None = None
+    report_template: str = Field(default="", max_length=300)
+    report_parent: str = Field(default="", max_length=300)
+    report_archive: str = Field(default="", max_length=300)
+    report_keep: int = Field(default=8, ge=1, le=52)
+
+
+def _report_urls(body: MeetingConfigIn) -> dict:
+    urls = {}
+    for key, label in reports.PAGES:
+        v = getattr(body, f"report_{key}").strip()
+        try:
+            urls[key] = reports.normalize_url(v) if v else ""
+        except ValueError as e:
+            raise HTTPException(400, f"{label}：{e}")
+    if body.report_enabled and not (urls["template"] and urls["parent"]):
+        raise HTTPException(400, "打开「自动创建周报」前，先填好周报模板和周报目录的链接")
+    if urls["parent"] and urls["parent"] in (urls["template"], urls["archive"]):
+        raise HTTPException(400, "周报目录要和周报模板、历史周报是不同的页面")
+    return urls
 
 
 @router.put("/admin/meetings/config")
@@ -703,8 +724,12 @@ def admin_meetings_config(body: MeetingConfigIn, _: User = Depends(admin_user), 
     if any(len(x) > 60 for x in locations):
         raise HTTPException(400, "地点名称最长 60 个字")
     chats = list({c.id: {"id": c.id, "name": c.name.strip(), "avatar": c.avatar} for c in body.chats}.values())
+    urls = _report_urls(body) if body.report_enabled is not None else None
     meetings.save_config(db, weekday=body.weekday, tm=meetings.parse_hm(body.time), per_meeting=body.per_meeting,
                          notify_days=body.notify_days, locations=locations, chats=chats, card_extra=body.card_extra)
+    if urls is not None:
+        meetings.save_report_config(db, enabled=body.report_enabled, template=urls["template"], parent=urls["parent"],
+                                    archive=urls["archive"], keep=body.report_keep)
     meetings.fill_chat_info(db)  # 手动填的 chat_id：查群名和头像（查不到就照原样，不影响发送）
     return _meetings_view(db)
 
@@ -813,6 +838,23 @@ def admin_meetings_send(week: date, body: MeetingSendIn, me: User = Depends(admi
     except feishu.FeishuError as e:
         raise HTTPException(400, f"飞书返回错误：{e}")
     return {"errors": errors, **_meetings_view(db)}
+
+
+@router.post("/admin/meetings/{week}/report")
+def admin_meetings_report(week: date, _: User = Depends(admin_user), db: Session = Depends(get_db)):
+    """手动创建某一周的周报（不发卡片）。"""
+    meetings.settle(db)
+    try:
+        meetings.create_report(db, week)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    return _meetings_view(db)
+
+
+@router.post("/admin/meetings/report-check")
+def admin_meetings_report_check(_: User = Depends(admin_user), db: Session = Depends(get_db)):
+    """检查机器人能不能读到周报模板、周报目录和历史周报（不改动任何页面）。"""
+    return reports.check(meetings.load(db))
 
 
 @router.get("/admin/feishu/chats")
