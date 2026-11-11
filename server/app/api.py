@@ -676,12 +676,14 @@ def _meetings_view(db: Session) -> dict:
 
 @router.get("/admin/meetings")
 def admin_meetings(_: User = Depends(admin_user), db: Session = Depends(get_db)):
+    meetings.fill_chat_info(db)
     return _meetings_view(db)
 
 
 class ChatIn(BaseModel):
     id: str = Field(pattern=r"^oc_[A-Za-z0-9_-]{1,80}$")
     name: str = Field(default="", max_length=100)
+    avatar: str = Field(default="", max_length=1000, pattern=r"^(https://\S+)?$")  # 群头像，只接受 https 地址
 
 
 class MeetingConfigIn(BaseModel):
@@ -699,9 +701,10 @@ def admin_meetings_config(body: MeetingConfigIn, _: User = Depends(admin_user), 
     locations = list(dict.fromkeys(x.strip() for x in body.locations if x.strip()))
     if any(len(x) > 60 for x in locations):
         raise HTTPException(400, "地点名称最长 60 个字")
-    chats = list({c.id: {"id": c.id, "name": c.name.strip()} for c in body.chats}.values())
+    chats = list({c.id: {"id": c.id, "name": c.name.strip(), "avatar": c.avatar} for c in body.chats}.values())
     meetings.save_config(db, weekday=body.weekday, tm=meetings.parse_hm(body.time), per_meeting=body.per_meeting,
                          notify_days=body.notify_days, locations=locations, chats=chats, card_extra=body.card_extra)
+    meetings.fill_chat_info(db)  # 手动填的 chat_id：查群名和头像（查不到就照原样，不影响发送）
     return _meetings_view(db)
 
 

@@ -102,7 +102,7 @@ def send_chat_card(chat_id: str, card: dict) -> bool:
 
 
 def list_bot_chats() -> list[dict]:
-    """机器人所在的群：[{chat_id, name}]。需要应用开通「获取群组信息」权限。"""
+    """机器人所在的群：[{chat_id, name, avatar}]。需要应用开通「获取群组信息」权限。"""
     if not settings.feishu_enabled:
         raise FeishuError("服务端未配置飞书应用")
     hints = {99991672: "应用缺少读取群列表的权限：到飞书开放平台 → 权限管理，开通 im:chat:readonly（获取群组信息）后发布新版本；也可以直接填写群的 chat_id"}
@@ -115,11 +115,23 @@ def list_bot_chats() -> list[dict]:
             timeout=10,
         )
         data = _check(resp, hints).get("data") or {}
-        chats += [{"chat_id": c["chat_id"], "name": c.get("name") or ""} for c in data.get("items") or [] if c.get("chat_id")]
+        chats += [{"chat_id": c["chat_id"], "name": c.get("name") or "", "avatar": c.get("avatar") or ""}
+                  for c in data.get("items") or [] if c.get("chat_id")]
         page = data.get("page_token") or ""
         if not data.get("has_more") or not page:
             break
     return chats
+
+
+def get_chat(chat_id: str) -> dict:
+    """某个群的名称和头像（机器人要在群里）：{name, avatar}。"""
+    resp = httpx.get(
+        f"{settings.feishu_open_base}/open-apis/im/v1/chats/{chat_id}",
+        headers={"Authorization": f"Bearer {tenant_access_token()}"},
+        timeout=10,
+    )
+    data = _check(resp).get("data") or {}
+    return {"name": data.get("name") or "", "avatar": data.get("avatar") or ""}
 
 
 def build_card(title: str, markdown: str, buttons: list[tuple[str, str]] | None = None, template: str = "blue") -> dict:

@@ -146,6 +146,7 @@ def test_notify_due_sends_once_at_the_right_time(db, people, monkeypatch):
     text = json.dumps(card, ensure_ascii=False)
     assert chat == "oc_x" and "<at id=all></at>" in text and "实验楼 302" in text
     assert "<at id=ou_甲></at>" in text and "下周汇报" in text and "<at id=ou_乙></at>" in text
+    assert "本周组会安排如下，请汇报的同学做好准备。" in text and "📊 本周汇报" in text
     assert db.query(GroupMeeting).filter_by(week=mon).one().notified_at
 
 
@@ -278,5 +279,31 @@ def test_api_enable_and_validation(admin):
     assert admin.put("/api/admin/meetings/config", json=bad).status_code == 422
     bad = {"weekday": 1, "time": "14:00", "per_meeting": 1, "notify_days": 2, "locations": [], "chats": [{"id": "not-a-chat"}]}
     assert admin.put("/api/admin/meetings/config", json=bad).status_code == 422
+    bad["chats"] = [{"id": "oc_ok", "avatar": "javascript:alert(1)"}]  # 群头像只接受 https 地址
+    assert admin.put("/api/admin/meetings/config", json=bad).status_code == 422
+    bad["chats"] = [{"id": "oc_ok", "name": "大群", "avatar": "https://example.com/a.png"}]
+    r = admin.put("/api/admin/meetings/config", json=bad)
+    assert r.json()["config"]["chats"] == [{"id": "oc_ok", "name": "大群", "avatar": "https://example.com/a.png"}]
     assert admin.put("/api/admin/meetings/roster", json={"user_ids": [999]}).status_code == 400
     assert admin.get("/api/admin/feishu/chats").status_code == 400  # 测试环境没有配置飞书应用
+
+
+def test_fill_chat_info_once(admin, db, monkeypatch):
+    """缺头像的群向飞书查一次补上；查不到的这次启动不再反复查。"""
+    calls = []
+
+    def fake(chat_id):
+        calls.append(chat_id)
+        if chat_id == "oc_bad":
+            raise feishu.FeishuError("230002: bot not in chat")
+        return {"name": "实验室大群", "avatar": "https://example.com/g.png"}
+    monkeypatch.setattr(feishu, "get_chat", fake)
+    monkeypatch.setattr(meetings.settings, "feishu_app_id", "x")
+    monkeypatch.setattr(meetings.settings, "feishu_app_secret", "y")
+    meetings._chat_info_tried.clear()
+    meetings.set_setting(db, "gm_chats", json.dumps([{"id": "oc_good", "name": ""}, {"id": "oc_bad", "name": "旧群"}]))
+    db.commit()
+    chats = admin.get("/api/admin/meetings").json()["config"]["chats"]
+    assert chats == [{"id": "oc_good", "name": "实验室大群", "avatar": "https://example.com/g.png"}, {"id": "oc_bad", "name": "旧群"}]
+    admin.get("/api/admin/meetings")
+    assert calls == ["oc_good", "oc_bad"]
