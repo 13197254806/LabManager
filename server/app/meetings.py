@@ -21,7 +21,7 @@ from datetime import date, datetime, time, timedelta
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
-from . import feishu
+from . import feishu, reports
 from .config import now, settings
 from .models import GroupMeeting, Setting, User
 from .services import set_setting
@@ -49,6 +49,12 @@ DEFAULTS = {
     "gm_head": "[]",
     "gm_next": "",
     "gm_settled_week": "",  # 已经处理到哪一周（周一的日期）
+    # 周报（飞书知识库）：发通知卡片前复制模板建好这周的周报，卡片上附链接
+    "gm_report_enabled": "0",
+    "gm_report_template": "",  # 周报模板页面的链接
+    "gm_report_parent": "",  # 「周报」页面：新周报建在它下面
+    "gm_report_archive": "",  # 「历史周报」页面：更早的周报移到这里（空 = 不移）
+    "gm_report_keep": "8",  # 「周报」下保留最近几周（含本周）的周报
 }
 
 
@@ -86,10 +92,19 @@ class Cfg:
     roster: list[int]  # 存的名单（含已停用的成员）
     head: list[int]
     next_uid: int | None
+    report_enabled: bool = False
+    report_template: str = ""
+    report_parent: str = ""
+    report_archive: str = ""
+    report_keep: int = 8
 
     @property
     def default_location(self) -> str:
         return self.locations[0] if self.locations else ""
+
+    @property
+    def report_on(self) -> bool:
+        return self.report_enabled and bool(self.report_template and self.report_parent)
 
 
 def parse_hm(text: str) -> time:
@@ -117,6 +132,11 @@ def load(db: Session) -> Cfg:
         roster=[int(x) for x in _json(db, "gm_roster", [])],
         head=[int(x) for x in _json(db, "gm_head", [])],
         next_uid=int(nxt) if nxt.isdigit() else None,
+        report_enabled=_get(db, "gm_report_enabled") == "1",
+        report_template=_get(db, "gm_report_template"),
+        report_parent=_get(db, "gm_report_parent"),
+        report_archive=_get(db, "gm_report_archive"),
+        report_keep=_int(db, "gm_report_keep", 1, 52),
     )
 
 
@@ -270,6 +290,9 @@ class Meeting:
     cancelled: bool
     note: str
     presenters: list[tuple[int, int]] = field(default_factory=list)  # [(在汇报顺序里的位置, user_id)]
+    report_url: str = ""  # 这周的周报
+    report_title: str = ""
+    report_error: str = ""  # 创建 / 整理周报失败的原因
 
     @property
     def uids(self) -> list[int]:
@@ -290,6 +313,8 @@ def upcoming(db: Session, cfg: Cfg, at: datetime, weeks: int = HORIZON) -> list[
             week=w, row=row, start=start_of(cfg, w, row),
             location=(row.location if row and row.location else cfg.default_location),
             cancelled=bool(row and row.cancelled), note=(row.note if row else "") or "",
+            report_url=(row.report_url if row else "") or "", report_title=(row.report_title if row else "") or "",
+            report_error=(row.report_error if row else "") or "",
         ))
     picks = rotation(db, cfg).schedule([0 if m.cancelled else cfg.per_meeting for m in items])
     for m, p in zip(items, picks):
@@ -357,6 +382,22 @@ def _fields(pairs: list[tuple[str, str]]) -> dict:
         {"is_short": True, "text": {"tag": "lark_md", "content": f"**{k}**\n{v}"}} for k, v in pairs]}
 
 
+def _button(text: str, url: str) -> dict:
+    return {"tag": "action", "actions": [
+        {"tag": "button", "text": {"tag": "plain_text", "content": text}, "type": "primary", "url": url}]}
+
+
+def _report_block(cfg: Cfg, m: Meeting) -> list[dict]:
+    """卡片上的周报：建好了附链接；还没建（预览）说明发到群里时会建；建失败了就链接到周报目录。"""
+    tip = "请大家在组会开始前完成周报填写。"
+    if m.report_url:
+        return [{"tag": "hr"}, _md(f"📝 **本周周报**：[{m.report_title}]({m.report_url})\n{tip}"), _button("填写周报", m.report_url)]
+    if m.report_error:
+        return [{"tag": "hr"}, _md(f"📝 **本周周报**：在 [周报目录]({cfg.report_parent}) 里填写本周周报。\n{tip}"),
+                _button("打开周报目录", cfg.report_parent)]
+    return [{"tag": "hr"}, _md(f"📝 **本周周报**：发到群里时自动创建「{reports.title_for(m.start.date())}」\n{tip}")]
+
+
 def build_card(cfg: Cfg, items: list[Meeting], i: int, users: dict[int, User], at_all: bool = True) -> tuple[dict, int]:
     """items[i] 这次组会的通知卡片。返回 (卡片, 附加说明从第几个元素开始)。"""
     m = items[i]
@@ -388,7 +429,9 @@ def build_card(cfg: Cfg, items: list[Meeting], i: int, users: dict[int, User], a
             _fields([("📊 本周汇报", _who(users, m.uids)), (f"⏭ {nxt_label}", nxt_text)]),
         ]
         if m.note:
-            elements.append(_md(f"📝 {m.note}"))
+            elements.append(_md(f"📌 {m.note}"))
+        if cfg.report_on:
+            elements += _report_block(cfg, m)
     extra_at = len(elements)
     if cfg.card_extra.strip():
         elements += [{"tag": "hr"}, _md(cfg.card_extra.strip())]
@@ -421,21 +464,62 @@ def _send_to_chats(db: Session, cfg: Cfg, items: list[Meeting], i: int) -> list[
     return errors
 
 
-def _tell_admins(db: Session, m: Meeting, errors: list[str]):
-    text = f"{_day(m.start)} 的组会通知卡片没有发出去：\n" + "\n".join(errors) + "\n可以在平台「管理 → 组会」里修正后点「立即发到群里」。"
+def _tell_admins(db: Session, text: str):
     for u in db.scalars(select(User).where(User.is_admin, User.enabled)):
         feishu.send_text(u.open_id, text)
+
+
+def _make_report(db: Session, cfg: Cfg, m: Meeting):
+    """建好（或找到）这次组会的周报，记到这周的记录上。失败只记下原因，不抛出：卡片照常发，改为链接到周报目录。"""
+    row = m.row or _row(db, m.week)
+    m.row = row
+    try:
+        rep = reports.ensure(cfg, m.start.date())
+        row.report_url, row.report_title, row.report_error = rep.url, rep.title, ""
+        if rep.created:
+            log.info("已创建周报：%s %s", rep.title, rep.url)
+    except Exception as e:  # noqa: BLE001
+        log.warning("创建周报失败：%s", e)
+        row.report_error = f"创建周报失败：{e}"
+    m.report_url, m.report_title, m.report_error = row.report_url or "", row.report_title or "", row.report_error
+
+
+def _deliver(db: Session, cfg: Cfg, items: list[Meeting], i: int) -> list[str]:
+    """发到所有设置的群：开了周报的话先建好这周的周报。返回发送失败的群和原因。"""
+    if cfg.report_on and not items[i].cancelled:
+        _make_report(db, cfg, items[i])
+    return _send_to_chats(db, cfg, items, i)
+
+
+def tidy_reports(db: Session, week: date, day: date) -> str:
+    """整理「周报」目录（移走旧周报、排序）。失败时记到这周的记录上并返回原因。不占用组会的锁（要调好几次飞书接口）。"""
+    cfg = load(db)
+    if not cfg.report_on:
+        return ""
+    try:
+        r = reports.tidy(cfg, day)
+        if r["archived"] or r["moved"]:
+            log.info("整理周报目录：移到历史周报 %s，调整顺序挪了 %s 个页面", r["archived"], r["moved"])
+        return ""
+    except Exception as e:  # noqa: BLE001
+        err = f"整理周报目录失败：{e}"
+        log.warning(err)
+        with lock:
+            row = _row(db, week)
+            row.report_error = "\n".join(x for x in [row.report_error, err] if x)
+            db.commit()
+        return err
 
 
 def notify_due(db: Session, at: datetime | None = None) -> int:
     """到了提醒时间（组会开始前 N 天的同一时刻）还没发过的，发到群里。返回发了几次。"""
     at = at or now()
+    done = []
     with lock:
         cfg = load(db)
         if not cfg.enabled or not cfg.chats:
             return 0
         items = upcoming(db, cfg, at, weeks=2)
-        sent = 0
         for i, m in enumerate(items[:2]):
             if m.row and m.row.notified_at:
                 continue
@@ -443,15 +527,28 @@ def notify_due(db: Session, at: datetime | None = None) -> int:
             # 打开组会之前就该发的不补发（免得刚开始配置就发到群里）；组会已经开始了也不再发
             if not notify_at <= at < m.start or (cfg.since and notify_at < cfg.since):
                 continue
-            errors = _send_to_chats(db, cfg, items, i)
+            errors = _deliver(db, cfg, items, i)
             row = m.row or _row(db, m.week)
             row.notified_at, row.notify_error = now(), "\n".join(errors)
             db.commit()
-            sent += 1
+            done.append(m)
+            problems = []
             if errors:
                 log.warning("组会通知发送失败：%s", errors)
-                _tell_admins(db, m, errors)
-        return sent
+                problems.append(f"{_day(m.start)} 的组会通知卡片没有发出去：\n" + "\n".join(errors)
+                                + "\n可以在平台「管理 → 组会」里修正后点「立即发到群里」。")
+            if m.report_error:
+                problems.append(f"{_day(m.start)} 的周报没有建好（卡片照常发出，链接的是周报目录）：\n{m.report_error}"
+                                + "\n修正后可以在平台「管理 → 组会 → 近期安排」里点「…」→「创建周报」补建。")
+            if problems:
+                _tell_admins(db, "\n\n".join(problems))
+    # 发完再整理周报目录（周报没建成说明飞书那边有问题，就不整理了）
+    for m in done:
+        if not m.report_error:
+            err = tidy_reports(db, m.week, m.start.date())
+            if err:
+                _tell_admins(db, f"{_day(m.start)} 的组会通知已发出，但{err}")
+    return len(done)
 
 
 def send_now(db: Session, week: date, me: User | None = None) -> list[str]:
@@ -470,13 +567,38 @@ def send_now(db: Session, week: date, me: User | None = None) -> list[str]:
             return []
         if not cfg.chats:
             raise ValueError("还没有设置要通知的飞书群")
-        errors = _send_to_chats(db, cfg, items, i)
+        m = items[i]
+        errors = _deliver(db, cfg, items, i)
         if len(errors) == len(cfg.chats):
+            db.commit()  # 周报已经建好的话记下来
             raise ValueError("发送失败：\n" + "\n".join(errors))
-        row = items[i].row or _row(db, week)
+        row = m.row or _row(db, week)
         row.notified_at, row.notify_error = now(), "\n".join(errors)
         db.commit()
-        return errors
+    if not m.report_error:
+        tidy_reports(db, m.week, m.start.date())
+    return errors
+
+
+def create_report(db: Session, week: date):
+    """管理页手动「创建周报」：建好（或找到）这周的周报并整理目录，不发卡片。失败时抛出 ValueError。"""
+    with lock:
+        cfg = load(db)
+        if not cfg.report_on:
+            raise ValueError("还没有打开「自动创建周报」，或者没有填好周报模板和周报目录")
+        items = upcoming(db, cfg, now())
+        m = next((x for x in items[:HORIZON] if x.week == week), None)
+        if m is None:
+            raise ValueError("只能给近期还没开的组会创建周报")
+        if m.cancelled:
+            raise ValueError("这周不开组会")
+        _make_report(db, cfg, m)
+        db.commit()
+    if m.report_error:
+        raise ValueError(m.report_error)
+    err = tidy_reports(db, m.week, m.start.date())
+    if err:
+        raise ValueError(f"周报已建好，但{err}")
 
 
 # ---------------- 管理页的修改 ----------------
@@ -527,6 +649,16 @@ def save_config(db: Session, *, weekday: int, tm: time, per_meeting: int, notify
         set_setting(db, "gm_locations", json.dumps(locations, ensure_ascii=False))
         set_setting(db, "gm_chats", json.dumps(chats, ensure_ascii=False))
         set_setting(db, "gm_card_extra", card_extra)
+        db.commit()
+
+
+def save_report_config(db: Session, *, enabled: bool, template: str, parent: str, archive: str, keep: int):
+    with lock:
+        set_setting(db, "gm_report_enabled", "1" if enabled else "0")
+        set_setting(db, "gm_report_template", template)
+        set_setting(db, "gm_report_parent", parent)
+        set_setting(db, "gm_report_archive", archive)
+        set_setting(db, "gm_report_keep", str(keep))
         db.commit()
 
 
@@ -725,6 +857,9 @@ def overview(db: Session, at: datetime | None = None) -> dict:
             "notified_at": m.row.notified_at.isoformat() if m.row and m.row.notified_at else None,
             "notify_error": (m.row.notify_error if m.row else "") or "",
             "notify_state": _notify_state(cfg, m, at),
+            "report_url": m.report_url,
+            "report_title": m.report_title,
+            "report_error": m.report_error,
         }
 
     preview = None
@@ -737,6 +872,8 @@ def overview(db: Session, at: datetime | None = None) -> dict:
             "enabled": cfg.enabled, "weekday": cfg.weekday, "time": cfg.time.strftime("%H:%M"),
             "per_meeting": cfg.per_meeting, "notify_days": cfg.notify_days, "locations": cfg.locations,
             "chats": cfg.chats, "card_extra": cfg.card_extra,
+            "report_enabled": cfg.report_enabled, "report_template": cfg.report_template,
+            "report_parent": cfg.report_parent, "report_archive": cfg.report_archive, "report_keep": cfg.report_keep,
         },
         "roster": [{**person(uid), "enabled": bool(users.get(uid) and users[uid].enabled)} for uid in cfg.roster],
         "next_uid": rot.next_uid,
@@ -749,6 +886,8 @@ def overview(db: Session, at: datetime | None = None) -> dict:
             "cancelled": r.cancelled,
             "note": r.note or "",
             "presenters": [person(u) for u in r.presenters],
+            "report_url": r.report_url or "",
+            "report_title": r.report_title or "",
         } for r in history],
         "preview": preview,
     }

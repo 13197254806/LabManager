@@ -54,6 +54,7 @@ _EXTRA_COLUMNS = {
                 "browse_roots_json": "TEXT DEFAULT '[]'", "link": "VARCHAR(16)", "current_migration": "INTEGER",
                 "ssh_host": "VARCHAR(128) DEFAULT ''"},
     "migrations": {"attempt": "INTEGER DEFAULT 0", "dest_root": "VARCHAR(256) DEFAULT ''"},
+    "group_meetings": {"report_url": "VARCHAR(255)", "report_title": "VARCHAR(128)", "report_error": "TEXT DEFAULT ''"},
 }
 
 

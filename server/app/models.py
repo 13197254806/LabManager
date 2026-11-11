@@ -282,6 +282,9 @@ class GroupMeeting(Base):
     presenters_json: Mapped[str | None] = mapped_column(Text)
     notified_at: Mapped[datetime | None] = mapped_column(DateTime)  # 通知卡片发到群里的时间
     notify_error: Mapped[str] = mapped_column(Text, default="")  # 发送失败的群和原因
+    report_url: Mapped[str | None] = mapped_column(String(255))  # 这周的周报（飞书知识库页面）
+    report_title: Mapped[str | None] = mapped_column(String(128))
+    report_error: Mapped[str] = mapped_column(Text, default="")  # 创建 / 整理周报失败的原因
 
     @property
     def presenters(self) -> list[int]:

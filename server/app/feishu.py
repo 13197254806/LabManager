@@ -171,6 +171,60 @@ def user_avatars(open_ids: list[str]) -> dict[str, str]:
     return out
 
 
+# ---------------- 知识库（组会周报） ----------------
+# 文档 https://open.feishu.cn/document/server-docs/docs/wiki-v2/wiki-overview
+# 应用要开通 wiki:wiki 权限，还要有页面本身的权限（把应用添加为页面的协作者，子页面一起授权）。
+
+WIKI_HINTS = {
+    99991672: "应用缺少知识库权限：到飞书开放平台 → 该应用 → 权限管理，开通「查看、编辑和管理知识库」(wiki:wiki) 后发布新版本",
+    131006: "机器人没有这个页面的权限：在飞书打开「周报」页面，右上角「…」→「更多」→「添加文档应用」，添加本应用并给「可编辑」权限（下面的子页面会一起授权）",
+    131005: "页面不存在，检查链接是否正确",
+}
+
+
+def _wiki(method: str, path: str, **kw) -> dict:
+    if not settings.feishu_enabled:
+        raise FeishuError("服务端未配置飞书应用")
+    resp = httpx.request(
+        method,
+        f"{settings.feishu_open_base}/open-apis/wiki/v2/{path}",
+        headers={"Authorization": f"Bearer {tenant_access_token()}"},
+        timeout=15,
+        **kw,
+    )
+    return _check(resp, WIKI_HINTS).get("data") or {}
+
+
+def wiki_node(token: str) -> dict:
+    """知识库节点信息：space_id、node_token、title、parent_node_token 等。"""
+    return _wiki("GET", "spaces/get_node", params={"token": token})["node"]
+
+
+def wiki_children(space_id: str, parent: str) -> list[dict]:
+    """某个页面下的子页面，按目录里的顺序。"""
+    items, page = [], ""
+    for _ in range(40):
+        data = _wiki("GET", f"spaces/{space_id}/nodes",
+                     params={"parent_node_token": parent, "page_size": 50, **({"page_token": page} if page else {})})
+        items += data.get("items") or []
+        page = data.get("page_token") or ""
+        if not data.get("has_more") or not page:
+            break
+    return items
+
+
+def wiki_copy(space_id: str, node_token: str, to_space: str, to_parent: str, title: str) -> dict:
+    """复制一个页面（只复制它本身，不含子页面）到 to_parent 下面，返回新节点。"""
+    return _wiki("POST", f"spaces/{space_id}/nodes/{node_token}/copy",
+                 json={"target_space_id": to_space, "target_parent_token": to_parent, "title": title})["node"]
+
+
+def wiki_move(space_id: str, node_token: str, to_space: str, to_parent: str) -> dict:
+    """把页面（连同子页面）移到 to_parent 下面。"""
+    return _wiki("POST", f"spaces/{space_id}/nodes/{node_token}/move",
+                 json={"target_space_id": to_space, "target_parent_token": to_parent})["node"]
+
+
 def build_card(title: str, markdown: str, buttons: list[tuple[str, str]] | None = None, template: str = "blue") -> dict:
     """生成一张简单的消息卡片：标题 + markdown 正文 + 若干链接按钮。"""
     elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": markdown}}]
