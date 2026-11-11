@@ -307,3 +307,55 @@ def test_fill_chat_info_once(admin, db, monkeypatch):
     assert chats == [{"id": "oc_good", "name": "实验室大群", "avatar": "https://example.com/g.png"}, {"id": "oc_bad", "name": "旧群"}]
     admin.get("/api/admin/meetings")
     assert calls == ["oc_good", "oc_bad"]
+
+
+def test_add_presenters_from_chat_members(admin, alice, db, monkeypatch):
+    """汇报人可以从飞书群成员里选，包括还没登录过平台的；本人以后登录沿用同一条记录。"""
+    monkeypatch.setattr(meetings.settings, "feishu_app_id", "x")
+    monkeypatch.setattr(meetings.settings, "feishu_app_secret", "y")
+    monkeypatch.setattr(feishu, "get_chat", lambda cid: {"name": "实验室大群", "avatar": ""})
+    monkeypatch.setattr(feishu, "list_chat_members", lambda cid: [
+        {"open_id": "dev_alice", "name": "alice"}, {"open_id": "dev_newbie", "name": "新同学"}, {"open_id": "dev_off", "name": "停用的"}])
+    monkeypatch.setattr(feishu, "user_avatars", lambda ids: {"dev_newbie": "https://example.com/n.png"})
+    off = User(open_id="dev_off", name="停用的", enabled=False)
+    db.add(off)
+    db.commit()
+    alice_id = db.query(User).filter_by(open_id="dev_alice").one().id
+
+    # 没设置群：列平台成员
+    r = admin.get("/api/admin/meetings/candidates").json()
+    assert r["source"] == "users" and {m["name"] for m in r["members"]} == {"admin", "alice"}
+
+    meetings.set_setting(db, "gm_chats", json.dumps([{"id": "oc_lab", "name": "实验室大群", "avatar": "https://example.com/g.png"}]))
+    db.commit()
+    r = admin.get("/api/admin/meetings/candidates").json()
+    assert r["source"] == "chats" and r["chats"] == ["实验室大群"]
+    by = {m["open_id"]: m for m in r["members"]}
+    assert set(by) == {"dev_alice", "dev_newbie"}  # 停用的不列
+    assert by["dev_alice"]["user_id"] == alice_id and by["dev_alice"]["logged_in"]
+    assert by["dev_newbie"]["user_id"] is None and not by["dev_newbie"]["logged_in"]
+    assert by["dev_newbie"]["avatar_url"] == "https://example.com/n.png"
+
+    r = admin.post("/api/admin/meetings/roster/add", json={"members": [
+        {"open_id": "dev_alice", "name": "alice"}, {"open_id": "dev_newbie", "name": "新同学", "avatar_url": "https://example.com/n.png"}]})
+    assert r.status_code == 200, r.text
+    roster = r.json()["roster"]
+    assert [u["name"] for u in roster] == ["alice", "新同学"]
+    assert r.json()["upcoming"][1]["presenters"][0]["name"] == "新同学"
+    newbie = db.query(User).filter_by(open_id="dev_newbie").one()
+    db.refresh(newbie)
+    assert newbie.logged_in is False and newbie.linux_username is None
+    # 已在名单里的不再列出；还没登录的成员在管理页成员列表里标出来
+    assert admin.get("/api/admin/meetings/candidates").json()["members"] == []
+    users = {u["name"]: u for u in admin.get("/api/admin/users").json()}
+    assert users["新同学"]["logged_in"] is False and users["alice"]["logged_in"] is True
+    # 新同学自己登录：沿用这条记录，不是管理员
+    from conftest import make_client
+    me = make_client("newbie").get("/api/me").json()
+    assert me["id"] == newbie.id and not me["is_admin"]
+    db.refresh(newbie)
+    assert newbie.logged_in is True
+    # open_id 格式不对 / 空列表会被拒绝
+    assert admin.post("/api/admin/meetings/roster/add", json={"members": [{"open_id": "a b"}]}).status_code == 422
+    assert admin.post("/api/admin/meetings/roster/add", json={"members": []}).status_code == 422
+

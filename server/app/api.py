@@ -49,6 +49,7 @@ def user_out(u: User, with_keys: bool = False) -> dict:
         "key_count": len(u.ssh_keys),
         "has_password": bool(u.password_hash),
         "onboarded": u.onboarded,
+        "logged_in": u.logged_in is not False,
     }
     if with_keys:
         d["ssh_keys"] = [
@@ -728,6 +729,28 @@ def admin_meetings_roster(body: RosterIn, _: User = Depends(admin_user), db: Ses
     if ids and len(set(db.scalars(select(User.id).where(User.id.in_(ids))))) != len(ids):
         raise HTTPException(400, "名单里有不存在的成员")
     meetings.save_roster(db, ids)
+    return _meetings_view(db)
+
+
+@router.get("/admin/meetings/candidates")
+def admin_meetings_candidates(_: User = Depends(admin_user), db: Session = Depends(get_db)):
+    return meetings.candidates(db)
+
+
+class MemberIn(BaseModel):
+    open_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    name: str = Field(default="", max_length=64)
+    avatar_url: str | None = Field(default=None, max_length=1000, pattern=r"^https://\S+$")
+
+
+class MembersIn(BaseModel):
+    members: list[MemberIn] = Field(min_length=1, max_length=200)
+
+
+@router.post("/admin/meetings/roster/add")
+def admin_meetings_roster_add(body: MembersIn, _: User = Depends(admin_user), db: Session = Depends(get_db)):
+    """从飞书群成员里添加汇报人（还没登录过平台的也可以）。"""
+    meetings.add_members(db, [m.model_dump() for m in body.members])
     return _meetings_view(db)
 
 
