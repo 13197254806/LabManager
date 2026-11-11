@@ -263,6 +263,29 @@ class GpuViolation(Base):
     __table_args__ = (UniqueConstraint("server_id", "gpu_index", "username"),)
 
 
+class GroupMeeting(Base):
+    """某一周的组会（每周最多一次，按该周周一区分）。只有单独改过时间 / 地点 / 备注、这周不开、发过提醒，
+    或这周已经过去（记下当时的时间、地点、汇报人）才有记录；没有记录的周按管理页的默认设置。"""
+
+    __tablename__ = "group_meetings"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    week: Mapped[date] = mapped_column(Date, unique=True)  # 该周的周一
+    start_at: Mapped[datetime | None] = mapped_column(DateTime)  # 空 = 按每周默认的星期几和时间
+    location: Mapped[str | None] = mapped_column(String(128))  # 空 = 默认地点
+    cancelled: Mapped[bool] = mapped_column(Boolean, default=False)  # 这周不开
+    note: Mapped[str] = mapped_column(String(256), default="")  # 不开的原因 / 本次备注，会写进通知卡片
+    settled: Mapped[bool] = mapped_column(Boolean, default=False)  # 这周已经过去
+    # 开过的组会的汇报人 [user_id]；这周没开（不开、组会暂停）= 空
+    presenters_json: Mapped[str | None] = mapped_column(Text)
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime)  # 通知卡片发到群里的时间
+    notify_error: Mapped[str] = mapped_column(Text, default="")  # 发送失败的群和原因
+
+    @property
+    def presenters(self) -> list[int]:
+        return _loads(self.presenters_json, [])
+
+
 class Notice(Base):
     """已发送通知的去重记录。"""
 
