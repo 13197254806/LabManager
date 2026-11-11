@@ -1773,6 +1773,7 @@ document.addEventListener("click", (e) => {
 
 let adminSig = "";
 async function refreshAdmin() {
+  refreshMeetings();
   try {
     const t = await fetchAdminTables();
     const sig = JSON.stringify(t);
@@ -1809,6 +1810,7 @@ function renderWelcomePreview() {
 $("#welcome-form").addEventListener("input", () => { welcomeDirty = true; renderWelcomePreview(); });
 
 async function loadAdmin() {
+  loadMeetings();
   try {
     const [tables, settings] = await Promise.all([fetchAdminTables(), api("/api/admin/settings")]);
     adminSig = JSON.stringify(tables);
@@ -2073,6 +2075,486 @@ $("#welcome-form").addEventListener("submit", async (e) => {
 $("#welcome-test").onclick = async () => {
   try { await api("/api/admin/welcome/test", { method: "POST" }); toast("已发送，请查看飞书"); } catch (err) { toast(err.message); }
 };
+
+// ---------------- 组会 ----------------
+
+// 后端的星期：0 = 周一
+const GM_WEEK = ["一", "二", "三", "四", "五", "六", "日"];
+const gm = { data: null, sig: "", dirty: false, locations: [], chats: [] };
+
+// "2026-11-12T14:00:00" 是平台时区的“墙上时间”，按字面拆开显示，不经过浏览器时区换算
+function gmParts(iso) {
+  const [d, t = "00:00"] = iso.split("T");
+  const dt = parseDate(d);
+  return { date: d, time: t.slice(0, 5), m: dt.getMonth() + 1, day: dt.getDate(), wd: WEEK[dt.getDay()] };
+}
+const gmDay = (iso) => { const p = gmParts(iso); return `${p.m}月${p.day}日 周${p.wd}`; };
+const gmStamp = (iso) => { const p = gmParts(iso); return `${p.m}-${pad2(p.day)} ${p.time}`; };
+const gmMonday = (iso) => { const dt = parseDate(iso.slice(0, 10)); dt.setDate(dt.getDate() - ((dt.getDay() + 6) % 7)); return fmtDate(dt); };
+// 相对今天：今天 / 明天 / 本周 / 下周
+function gmRel(iso) {
+  const t = state.config.today, d = iso.slice(0, 10);
+  const n = diffDays(t, d);
+  if (n === 0) return "今天";
+  if (n === 1) return "明天";
+  const w = diffDays(gmMonday(t), gmMonday(d)) / 7;
+  return w === 0 ? "本周" : w === 1 ? "下周" : "";
+}
+const gmPeople = (list) => list.map((p) => `<span class="who">${avatarHtml(p.name, p.avatar_url, p.id)}${esc(p.name)}</span>`).join("");
+
+async function loadMeetings(fillForm = false) {
+  try {
+    applyMeetings(await api("/api/admin/meetings"), fillForm);
+  } catch (err) {
+    toast(err.message);
+  }
+}
+// 自动刷新：只在组会这一页打开时取，没变化不重画
+async function refreshMeetings() {
+  if ($("#sub-meetings").classList.contains("hidden")) return;
+  try { applyMeetings(await api("/api/admin/meetings")); } catch { /* 下次再试 */ }
+}
+function applyMeetings(d, fillForm = false) {
+  const { errors, ...data } = d;
+  gm.data = data;
+  const sig = JSON.stringify(data);
+  if (sig !== gm.sig) {
+    gm.sig = sig;
+    renderGmHero();
+    renderGmUpcoming();
+    renderGmRoster();
+    renderGmHistory();
+  }
+  if (fillForm || !gm.dirty) fillGmForm();
+  renderGmPreview();
+}
+
+// 改动后统一走这里：成功就用返回的最新数据重画；安排已变（409）时自动重新加载
+async function gmCall(path, body, { method = "POST", msg = "已保存" } = {}) {
+  try {
+    const d = await api(path, { method, body });
+    applyMeetings(d);
+    if (msg) toast(msg);
+    return d;
+  } catch (err) {
+    toast(err.message);
+    if (err.message.includes("刷新")) loadMeetings();
+    return null;
+  }
+}
+
+// ---- 顶部：下次组会 + 总开关 ----
+function renderGmHero() {
+  const d = gm.data, c = d.config;
+  const m = d.upcoming.find((x) => !x.cancelled);
+  const first = d.upcoming[0];
+  let main;
+  if (!m) {
+    main = `<div class="k">下次组会</div><div class="v">近期没有组会</div>`;
+  } else {
+    const rel = gmRel(m.start_at);
+    main = `<div class="k">下次组会${rel ? ` · ${rel}` : ""}</div>
+      <div class="v">${gmDay(m.start_at)} ${gmParts(m.start_at).time}</div>
+      <div class="meta"><span>${icon("pin")}${esc(m.location || "地点待定")}</span>
+        <span>${icon("present")}汇报：${m.presenters.length ? m.presenters.map((p) => `${avatarHtml(p.name, p.avatar_url, p.id)}${esc(p.name)}`).join("、") : "待定"}</span></div>`;
+  }
+  let st;
+  if (!c.enabled) st = `<div class="st warn">${icon("info")}组会已暂停：不轮换汇报人，也不发飞书提醒。配置好后打开右侧开关。</div>`;
+  else if (!c.chats.length) st = `<div class="st warn">${icon("info")}还没有设置飞书群，不会发提醒（在下方「飞书群提醒」里添加）。</div>`;
+  else if (first?.notify_error) {
+    st = `<div class="st warn">${icon("info")}${esc(`${gmDay(first.start_at)}的通知卡片有群没发出去：${first.notify_error.replace(/\n/g, "；")}。修正后可以在「近期安排」里点「立即发到群里」重发。`)}</div>`;
+  } else if (first) {
+    const when = { sent: `${gmDay(first.start_at)}的通知已于 ${gmStamp(first.notified_at || first.notify_at)} 发出`,
+      scheduled: `将在 ${gmStamp(first.notify_at)} 把${first.cancelled ? "「组会暂停」" : "通知"}卡片发到 ${c.chats.length} 个群并 @所有人`,
+      due: "提醒时间已到，正在发送…", missed: `${gmDay(first.start_at)}已过自动提醒时间，需要的话可以手动发送` }[first.notify_state];
+    st = when ? `<div class="st">${icon("bell")}${esc(when)}</div>` : "";
+  }
+  if (!d.roster.length) st = `<div class="st warn">${icon("info")}还没有汇报名单：在「汇报名单」里添加成员后自动排汇报人。</div>` + (st || "");
+  $("#gm-hero").innerHTML = `<span class="icon-box">${icon("present")}</span><div class="grow">${main}${st || ""}</div>
+    <label class="gm-toggle"><span>${c.enabled ? "组会进行中" : "组会已暂停"}</span><span class="switch"><input type="checkbox" id="gm-enabled" ${c.enabled ? "checked" : ""}><i></i></span></label>`;
+  $("#gm-enabled").onchange = async (e) => {
+    const on = e.target.checked;
+    if (on && !c.chats.length && !confirm("还没有设置飞书群，打开后只排汇报人、不发提醒。继续？")) { e.target.checked = false; return; }
+    const r = await gmCall("/api/admin/meetings/enabled", { enabled: on }, { method: "PUT", msg: on ? "组会已开启" : "组会已暂停" });
+    if (!r) e.target.checked = !on;
+  };
+}
+
+// ---- 近期安排 ----
+const GM_NOTIFY = {
+  scheduled: (m) => ["", "自动提醒", gmStamp(m.notify_at)],
+  due: () => ["pending", "即将发送", ""],
+  sent: (m) => (m.notify_error ? ["error", "发送失败", "悬停查看原因"] : ["ok", "已提醒", gmStamp(m.notified_at)]),
+  missed: () => ["", "不自动提醒", "已过提醒时间"],
+  paused: () => ["", "组会已暂停", ""],
+  no_chat: () => ["", "未设置群", ""],
+};
+
+function gmLocSelect(m) {
+  const locs = gm.data.config.locations;
+  const opts = [...locs];
+  if (m.location && !opts.includes(m.location)) opts.push(m.location);
+  if (!opts.length) return `<span class="cell-sub">先在下方添加地点</span>`;
+  return `<select data-gm-loc="${m.week}" aria-label="地点">${opts.map((l) => `<option ${l === m.location ? "selected" : ""}>${esc(l)}</option>`).join("")}</select>`;
+}
+
+function renderGmUpcoming() {
+  const list = gm.data.upcoming;
+  const held = list.filter((m) => !m.cancelled && m.presenters.length);
+  $("#gm-upcoming").innerHTML = `<div class="tbl-row head gm-row"><span>时间</span><span>地点</span><span>汇报人</span><span>飞书提醒</span><span></span></div>` + list.map((m) => {
+    const p = gmParts(m.start_at), rel = gmRel(m.start_at);
+    // 汇报人：点开可以提前（和上一次的最后一位对调）、推后（和下一次的第一位对调）、这次跳过
+    const hi = held.indexOf(m);
+    const prev = hi > 0 ? held[hi - 1].presenters.at(-1) : null;
+    const next = hi >= 0 && hi < held.length - 1 ? held[hi + 1].presenters[0] : null;
+    const chips = m.cancelled
+      ? `<span class="badge">不开</span>${m.note ? `<span class="cell-sub">${esc(m.note)}</span>` : ""}`
+      : m.presenters.length ? m.presenters.map((x, k) => {
+        const a = k === 0 ? prev : m.presenters[k - 1], b = k === m.presenters.length - 1 ? next : m.presenters[k + 1];
+        return `<div class="menu-wrap"><button type="button" class="gm-chip" data-menu>${avatarHtml(x.name, x.avatar_url, x.id)}<span class="nm">${esc(x.name)}</span>${icon("chev")}</button>
+          <div class="menu left hidden">
+            <button type="button" ${k === 0 && a ? `data-gm-swap="${x.pos},${x.id},${a.pos},${a.id}"` : "disabled"}>${icon("up")}提前到上一次</button>
+            <button type="button" ${k === m.presenters.length - 1 && b ? `data-gm-swap="${x.pos},${x.id},${b.pos},${b.id}"` : "disabled"}>${icon("chev")}推后到下一次</button>
+            <div class="menu-sep"></div>
+            <button type="button" data-gm-skip="${x.pos},${x.id}">${icon("skip")}这次跳过<small class="muted">（下一轮照常）</small></button>
+          </div></div>`;
+      }).join("")
+      : `<span class="muted">待定</span>`;
+    const [cls, label, sub] = (GM_NOTIFY[m.notify_state] || (() => ["", "", ""]))(m);
+    return `<div class="tbl-row gm-row${m.cancelled ? " off" : ""}${rel === "今天" ? " today" : ""}">
+      <div class="c-date"><div class="cell-main">${gmDay(m.start_at)}</div><div class="cell-sub">${p.time}${m.custom_time ? " · 已改时间" : ""}${rel ? ` · ${rel}` : ""}</div></div>
+      <div class="c-loc">${m.cancelled ? `<span class="muted">-</span>` : gmLocSelect(m)}</div>
+      <div class="c-who">${chips}</div>
+      <div class="c-st">${label ? `<span class="badge ${cls}" ${m.notify_error ? `title="${esc(m.notify_error)}"` : ""}>${label}</span><div class="cell-sub">${sub}</div>` : ""}</div>
+      <div class="c-act row-actions"><button type="button" class="btn small" data-gm-edit="${m.week}">${icon("edit")}编辑</button>
+        <div class="menu-wrap"><button type="button" class="btn ghost icon small" data-menu title="更多">${icon("more")}</button>
+          <div class="menu hidden">
+            <button type="button" data-gm-cancel="${m.week}">${icon(m.cancelled ? "renew" : "x")}${m.cancelled ? "恢复这周组会" : "这周不开…"}</button>
+            <div class="menu-sep"></div>
+            <button type="button" data-gm-send="${m.week}">${icon("bell")}立即发到群里</button>
+            <button type="button" data-gm-send-me="${m.week}">${icon("send")}发给我预览</button>
+          </div></div></div>
+    </div>`;
+  }).join("");
+}
+
+$("#gm-upcoming").addEventListener("change", (e) => {
+  const sel = e.target.closest("[data-gm-loc]");
+  if (sel) gmCall(`/api/admin/meetings/${sel.dataset.gmLoc}`, { location: sel.value }, { method: "PATCH", msg: "地点已更新" });
+});
+$("#gm-upcoming").addEventListener("click", async (e) => {
+  const t = e.target.closest("button");
+  if (!t || t.disabled) return;
+  const d = t.dataset;
+  if (d.gmSwap) {
+    const [i, ui, j, uj] = d.gmSwap.split(",").map(Number);
+    gmCall("/api/admin/meetings/adjust", { op: "swap", i, ui, j, uj }, { msg: "已调整顺序" });
+  } else if (d.gmSkip) {
+    const [i, ui] = d.gmSkip.split(",").map(Number);
+    gmCall("/api/admin/meetings/adjust", { op: "skip", i, ui }, { msg: "已跳过，后面的人依次提前" });
+  } else if (d.gmEdit) {
+    openGmEdit(d.gmEdit);
+  } else if (d.gmCancel) {
+    const m = gm.data.upcoming.find((x) => x.week === d.gmCancel);
+    if (!m.cancelled) return openGmEdit(m.week, true);
+    const r = await gmCall(`/api/admin/meetings/${m.week}`, { cancelled: false }, { method: "PATCH", msg: "已恢复这周组会" });
+    if (r && m.notified_at) toast("已恢复。这周已经发过「组会暂停」卡片，需要的话点「立即发到群里」重新通知");
+  } else if (d.gmSend) {
+    gmSend(d.gmSend, "chat");
+  } else if (d.gmSendMe) {
+    gmSend(d.gmSendMe, "me");
+  }
+});
+
+async function gmSend(week, to) {
+  const m = gm.data.upcoming.find((x) => x.week === week);
+  const n = gm.data.config.chats.length;
+  if (to === "chat") {
+    if (!n) return toast("还没有设置飞书群：在下方「飞书群提醒」里添加");
+    const again = m.notified_at ? `（这次组会已经在 ${gmStamp(m.notified_at)} 发过）` : "";
+    if (!confirm(`把 ${gmDay(m.start_at)} 的${m.cancelled ? "「组会暂停」" : "组会通知"}卡片发到 ${n} 个群，并 @所有人？${again}`)) return;
+  }
+  const r = await gmCall(`/api/admin/meetings/${week}/send`, { to }, { msg: "" });
+  if (!r) return;
+  if (r.errors?.length) toast(`部分群没发出去：\n${r.errors.join("\n")}`);
+  else toast(to === "me" ? "已发给你，请在飞书里查看" : "已发到群里");
+}
+
+// ---- 编辑某一周 ----
+const gmEditDialog = $("#gm-edit-dialog");
+const gmEditForm = $("#gm-edit-form");
+let gmEditing = null;
+function syncGmEdit() {
+  const off = gmEditForm.cancelled.checked;
+  $$(".gm-when", gmEditForm).forEach((el) => el.classList.toggle("hidden", off));
+  gmEditForm.date.required = gmEditForm.time.required = !off;
+  $("#gm-note-label").textContent = off ? "不开的原因" : "备注";
+  gmEditForm.note.placeholder = off ? "可选，如：学院活动、放假（会写进「组会暂停」卡片）" : "可选，会写进通知卡片";
+}
+function openGmEdit(week, cancel = false) {
+  const m = gm.data.upcoming.find((x) => x.week === week);
+  gmEditing = m;
+  const f = gmEditForm, p = gmParts(m.start_at);
+  f.reset();
+  $("#gm-edit-error").textContent = "";
+  $("#gm-edit-sub").textContent = `${gmDay(m.start_at)} 那一周（每周最多开一次，日期只能选这一周之内）`;
+  f.cancelled.checked = cancel || m.cancelled;
+  f.date.value = p.date;
+  f.date.min = m.week;
+  f.date.max = addDays(m.week, 6);
+  f.time.value = p.time;
+  const locs = [...gm.data.config.locations];
+  if (m.location && !locs.includes(m.location)) locs.push(m.location);
+  f.location.innerHTML = locs.length ? locs.map((l) => `<option ${l === m.location ? "selected" : ""}>${esc(l)}</option>`).join("") : `<option value="">（还没有添加地点）</option>`;
+  f.note.value = m.note;
+  syncGmEdit();
+  gmEditDialog.showModal();
+  if (cancel) f.note.focus();
+}
+gmEditForm.cancelled.addEventListener("change", syncGmEdit);
+$("#gm-edit-reset").onclick = () => {
+  const p = gmParts(gmEditing.default_start);
+  gmEditForm.date.value = p.date;
+  gmEditForm.time.value = p.time;
+};
+gmEditForm.addEventListener("submit", async (e) => {
+  if (e.submitter?.value === "cancel") return;
+  e.preventDefault();
+  const f = gmEditForm, m = gmEditing;
+  const body = { cancelled: f.cancelled.checked, note: f.note.value.trim() };
+  if (!body.cancelled) Object.assign(body, { start_at: `${f.date.value}T${f.time.value}`, location: f.location.value });
+  try {
+    applyMeetings(await api(`/api/admin/meetings/${m.week}`, { method: "PATCH", body }));
+    gmEditDialog.close();
+    if (m.notified_at && body.cancelled !== m.cancelled) toast("已保存。这次组会已经发过提醒，需要通知大家的话点「立即发到群里」");
+    else toast("已保存");
+  } catch (err) {
+    $("#gm-edit-error").textContent = err.message;
+  }
+});
+
+// ---- 汇报名单 ----
+function renderGmRoster() {
+  const d = gm.data, list = d.roster;
+  if (!list.length) {
+    $("#gm-roster").innerHTML = `<div class="gm-empty">还没有汇报名单。点右上角「添加」选择成员，按汇报顺序排好，之后每次组会自动轮到下一位。</div>`;
+    return;
+  }
+  const nextName = list.find((u) => u.id === d.next_uid)?.name;
+  $("#gm-roster").innerHTML = list.map((u, i) => `<div class="gm-r${u.enabled ? "" : " off"}">
+      <span class="n">${i + 1}</span>
+      <div class="who">${avatarHtml(u.name, u.avatar_url, u.id)}<span class="nm">${esc(u.name)}</span>${u.id === d.next_uid ? `<span class="badge next" title="${d.adjusted ? "近期几次是临时调整过的顺序，之后从这里按名单继续" : "按名单顺序，下一次轮到 TA"}">${d.adjusted ? "名单从这里继续" : "下一位"}</span>` : ""}${u.enabled ? "" : `<span class="badge" title="成员已停用，暂不参与轮换">已停用</span>`}</div>
+      <div class="acts">
+        <button type="button" class="btn ghost icon small" data-r-move="${i},-1" title="上移" ${i ? "" : "disabled"}>${icon("up")}</button>
+        <button type="button" class="btn ghost icon small" data-r-move="${i},1" title="下移" ${i < list.length - 1 ? "" : "disabled"}>${icon("chev")}</button>
+        <button type="button" class="btn ghost icon small" data-r-next="${u.id}" title="下一次从 TA 开始" ${u.enabled ? "" : "disabled"}>${icon("skip")}</button>
+        <button type="button" class="btn ghost icon small danger-ghost" data-r-del="${i}" title="移出名单">${icon("x")}</button>
+      </div></div>`).join("")
+    + (d.adjusted ? `<div class="gm-note">近期有 ${d.adjusted} 个汇报位置是临时调整过的顺序，之后从「${esc(nextName || "")}」起按名单继续。点某人的 ${icon("skip")} 可以清除临时调整、从 TA 重新开始。</div>` : "");
+}
+const gmRosterIds = () => gm.data.roster.map((u) => u.id);
+$("#gm-roster").addEventListener("click", (e) => {
+  const t = e.target.closest("button");
+  if (!t || t.disabled) return;
+  const d = t.dataset;
+  if (d.rMove) {
+    const [i, dir] = d.rMove.split(",").map(Number);
+    const ids = gmRosterIds();
+    [ids[i], ids[i + dir]] = [ids[i + dir], ids[i]];
+    gmCall("/api/admin/meetings/roster", { user_ids: ids }, { method: "PUT", msg: "" });
+  } else if (d.rNext) {
+    const u = gm.data.roster.find((x) => x.id === Number(d.rNext));
+    const note = gm.data.adjusted ? "近期的临时调整会被清除。" : "";
+    if (confirm(`下一次组会从「${u.name}」开始，按名单顺序轮换？${note}`)) gmCall("/api/admin/meetings/next", { user_id: u.id }, { msg: `下一次从 ${u.name} 开始` });
+  } else if (d.rDel) {
+    const i = Number(d.rDel), u = gm.data.roster[i];
+    if (!confirm(`把「${u.name}」移出汇报名单？`)) return;
+    const ids = gmRosterIds();
+    ids.splice(i, 1);
+    gmCall("/api/admin/meetings/roster", { user_ids: ids }, { method: "PUT", msg: `已移出 ${u.name}` });
+  }
+});
+
+// ---- 多选弹窗：添加汇报人 / 选择飞书群 ----
+const gmPickDialog = $("#gm-pick-dialog");
+let gmPickDone = null;
+function openGmPick({ title, sub, ico, items, emptyText, onOk }) {
+  $("#gm-pick-title").textContent = title;
+  $("#gm-pick-sub").textContent = sub;
+  $("#gm-pick-ico").innerHTML = icon(ico);
+  $("#gm-pick-error").textContent = "";
+  gmPickDone = onOk;
+  renderGmPickItems(items, emptyText);
+  gmPickDialog.showModal();
+}
+function renderGmPickItems(items, emptyText = "") {
+  $("#gm-pick-list").innerHTML = items === null ? `<p class="muted small">正在读取…</p>`
+    : items.length ? items.map((x) => `<label><input type="checkbox" value="${esc(x.value)}" ${x.checked ? "checked" : ""}><span class="ck">${icon("check")}</span>${x.avatar || ""}<span class="lbl"><b>${esc(x.label)}</b>${x.sub ? `<small>${esc(x.sub)}</small>` : ""}</span></label>`).join("")
+    : `<p class="muted small">${esc(emptyText)}</p>`;
+  $("#gm-pick-all").classList.toggle("hidden", !items?.length);
+}
+$("#gm-pick-all").onclick = () => {
+  const boxes = $$("#gm-pick-list input");
+  const all = boxes.every((b) => b.checked);
+  boxes.forEach((b) => (b.checked = !all));
+};
+$("#gm-pick-form").addEventListener("submit", async (e) => {
+  if (e.submitter?.value === "cancel") return;
+  e.preventDefault();
+  const picked = $$("#gm-pick-list input:checked").map((b) => b.value);
+  if (gmPickDone && (await gmPickDone(picked)) !== false) gmPickDialog.close();
+});
+
+$("#gm-add").onclick = () => {
+  const inRoster = new Set(gmRosterIds());
+  const users = (state.users || []).filter((u) => u.enabled && !inRoster.has(u.id));
+  openGmPick({
+    title: "添加汇报人", sub: "选中的成员按列表顺序排到名单末尾，之后可以调整顺序", ico: "users",
+    items: users.map((u) => ({ value: u.id, label: u.name, sub: u.linux_username || "", avatar: avatarHtml(u.name, u.avatar_url, u.id) })),
+    emptyText: "所有成员都已经在名单里了。成员要先登录过平台才能添加。",
+    onOk: async (ids) => {
+      if (!ids.length) return true;
+      const r = await gmCall("/api/admin/meetings/roster", { user_ids: [...gmRosterIds(), ...ids.map(Number)] }, { method: "PUT", msg: `已添加 ${ids.length} 人` });
+      return !!r;
+    },
+  });
+};
+
+// ---- 设置表单 ----
+function setGmDirty(d) {
+  gm.dirty = d;
+  $("#gm-bar").classList.toggle("clean", !d);
+  $("#gm-save").disabled = !d;
+  $("#gm-msg").textContent = d ? "有未保存的更改" : "所有更改已保存";
+  $("#gm-preview-for").textContent = d ? "保存后按新设置更新" : gm.data?.preview ? gmDay(gm.data.upcoming[0].start_at) : "";
+}
+function fillGmForm() {
+  const c = gm.data.config, f = $("#gm-form");
+  if (!f.weekday.options.length) f.weekday.innerHTML = GM_WEEK.map((w, i) => `<option value="${i}">每周${w}</option>`).join("");
+  f.weekday.value = c.weekday;
+  f.time.value = c.time;
+  f.per_meeting.value = c.per_meeting;
+  f.notify_days.value = c.notify_days;
+  f.card_extra.value = c.card_extra;
+  gm.locations = [...c.locations];
+  gm.chats = c.chats.map((x) => ({ ...x }));
+  renderGmLocs();
+  renderGmChats();
+  setGmDirty(false);
+}
+function renderGmLocs() {
+  $("#gm-locs").innerHTML = gm.locations.map((l, i) => `<span class="gm-tag">${icon("pin")}<span class="t">${esc(l)}</span>${i === 0
+    ? `<span class="def">默认</span>` : `<button type="button" class="link-btn" data-loc-def="${i}">设为默认</button>`}<button type="button" class="btn ghost icon small danger-ghost" data-loc-del="${i}" title="删除">${icon("x")}</button></span>`).join("");
+}
+function renderGmChats() {
+  $("#gm-chats").innerHTML = gm.chats.map((c, i) => `<span class="gm-tag">${icon("users")}<span class="t">${esc(c.name || "未命名的群")}</span><span class="sub mono">${esc(c.id)}</span><button type="button" class="btn ghost icon small danger-ghost" data-chat-del="${i}" title="移除">${icon("x")}</button></span>`).join("");
+}
+function gmAddLoc() {
+  const inp = $("#gm-loc-input"), v = inp.value.trim();
+  if (!v) return;
+  if (gm.locations.includes(v)) return toast("这个地点已经有了");
+  gm.locations.push(v);
+  inp.value = "";
+  renderGmLocs();
+  setGmDirty(true);
+}
+function gmAddChat() {
+  const inp = $("#gm-chat-input"), v = inp.value.trim();
+  if (!v) return;
+  if (!/^oc_[A-Za-z0-9_-]+$/.test(v)) return toast("chat_id 以 oc_ 开头，可以在飞书开放平台的 API 调试台里查到；更方便的是点「从机器人所在的群里选」");
+  if (!gm.chats.some((c) => c.id === v)) gm.chats.push({ id: v, name: "" });
+  inp.value = "";
+  renderGmChats();
+  setGmDirty(true);
+}
+$("#gm-loc-add").onclick = gmAddLoc;
+$("#gm-chat-add").onclick = gmAddChat;
+$("#gm-loc-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); gmAddLoc(); } });
+$("#gm-chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); gmAddChat(); } });
+$("#gm-form").addEventListener("click", (e) => {
+  const t = e.target.closest("button");
+  if (!t) return;
+  const d = t.dataset;
+  if (d.locDef) { gm.locations.unshift(...gm.locations.splice(Number(d.locDef), 1)); renderGmLocs(); setGmDirty(true); }
+  else if (d.locDel) { gm.locations.splice(Number(d.locDel), 1); renderGmLocs(); setGmDirty(true); }
+  else if (d.chatDel) { gm.chats.splice(Number(d.chatDel), 1); renderGmChats(); setGmDirty(true); }
+});
+$("#gm-form").addEventListener("input", (e) => {
+  if (e.target.id === "gm-loc-input" || e.target.id === "gm-chat-input") return;  // 还没点「添加」不算改动
+  setGmDirty(true);
+  if (e.target.name === "card_extra") renderGmPreview();
+});
+$("#gm-pick-chats").onclick = async () => {
+  openGmPick({ title: "选择飞书群", sub: "机器人所在的群；选中的群会收到组会通知", ico: "users", items: null, onOk: (ids) => {
+    const known = new Map((gmPickDialog._chats || []).map((c) => [c.chat_id, c.name]));
+    // 机器人已经不在、列表里没有的群保留（可以在设置里手动移除）
+    gm.chats = [...gm.chats.filter((c) => !known.has(c.id)), ...ids.map((id) => ({ id, name: known.get(id) || "" }))];
+    renderGmChats();
+    setGmDirty(true);
+  } });
+  try {
+    const chats = await api("/api/admin/feishu/chats");
+    gmPickDialog._chats = chats;
+    const have = new Set(gm.chats.map((c) => c.id));
+    renderGmPickItems(chats.map((c) => ({ value: c.chat_id, label: c.name || "未命名的群", sub: c.chat_id, checked: have.has(c.chat_id) })),
+      "机器人还不在任何群里：先在飞书群设置 → 群机器人里把它加进去。");
+  } catch (err) {
+    gmPickDialog._chats = [];
+    renderGmPickItems([], "");
+    $("#gm-pick-error").textContent = `${err.message}`;
+  }
+};
+$("#gm-form").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const f = e.target;
+  try {
+    const d = await api("/api/admin/meetings/config", { method: "PUT", body: {
+      weekday: Number(f.weekday.value), time: f.time.value, per_meeting: Number(f.per_meeting.value),
+      notify_days: Number(f.notify_days.value), locations: gm.locations, chats: gm.chats, card_extra: f.card_extra.value,
+    } });
+    applyMeetings(d, true);
+    toast("已保存");
+  } catch (err) {
+    toast(err.message);
+  }
+});
+
+// ---- 卡片预览（按后端生成的卡片画，和真正发出去的一致）----
+const FC_HEAD = { blue: "#3370ff", grey: "#8f959e", green: "#34c724", orange: "#ff8800", red: "#f54a45", turquoise: "#14c0ff" };
+function larkMd(text, names) {
+  return esc(text)
+    .replace(/&lt;at id=all&gt;&lt;\/at&gt;/g, `<span class="at">@所有人</span>`)
+    .replace(/&lt;at id=([\w-]+)&gt;&lt;\/at&gt;/g, (_, id) => `<span class="at">@${esc(names[id] || id)}</span>`)
+    .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
+    .replace(/\n/g, "<br>");
+}
+function renderGmPreview() {
+  const p = gm.data?.preview, el = $("#gm-preview");
+  if (!p) { el.innerHTML = `<div class="fcard-b"><p class="muted">没有可以预览的组会。</p></div>`; return; }
+  const extra = $("#gm-form").card_extra.value.trim();
+  const els = p.card.elements.slice(0, p.extra_at);
+  if (extra) els.push({ tag: "hr" }, { tag: "div", text: { content: extra } });
+  const h = p.card.header;
+  el.innerHTML = `<div class="fcard-h" style="background:${FC_HEAD[h.template] || FC_HEAD.blue}">${esc(h.title.content)}</div>
+    <div class="fcard-b">${els.map((x) => x.tag === "hr" ? "<hr>"
+      : x.fields ? `<div class="fc-fields">${x.fields.map((f) => `<div>${larkMd(f.text.content, p.names)}</div>`).join("")}</div>`
+      : `<div class="fc-div">${larkMd(x.text.content, p.names)}</div>`).join("")}</div>`;
+  if (!gm.dirty) $("#gm-preview-for").textContent = gmDay(gm.data.upcoming[0].start_at);
+}
+$("#gm-send-me").onclick = () => gm.data?.preview && gmSend(gm.data.preview.week, "me");
+$("#gm-send-chat").onclick = () => gm.data?.preview && gmSend(gm.data.preview.week, "chat");
+
+// ---- 历史记录 ----
+function renderGmHistory() {
+  const h = gm.data.history;
+  $("#gm-history").innerHTML = h.length
+    ? `<div class="gm-hist">${h.map((r) => `<div class="tbl-row gm-hrow">
+        <div><div class="cell-main">${gmDay(r.start_at)}</div><div class="cell-sub">${r.cancelled ? "" : gmParts(r.start_at).time}</div></div>
+        <div class="${r.cancelled ? "muted" : ""}">${r.cancelled ? "-" : esc(r.location || "-")}</div>
+        <div class="who-list">${r.cancelled ? `<span class="badge">没开</span>${r.note ? `<span class="cell-sub">${esc(r.note)}</span>` : ""}` : r.presenters.length ? gmPeople(r.presenters) : `<span class="muted">无汇报人</span>`}</div>
+      </div>`).join("")}</div>`
+    : `<p class="gm-empty" style="padding:12px 20px 18px">还没有记录。每次组会当天结束后会记在这里。</p>`;
+}
 
 // ---------------- 启动 ----------------
 

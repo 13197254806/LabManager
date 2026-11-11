@@ -34,6 +34,12 @@
     <symbol id="i-x" viewBox="0 0 24 24"><path d="M18 6 6 18M6 6l12 12"/></symbol>
     <symbol id="i-renew" viewBox="0 0 24 24"><path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M8 16H3v5"/></symbol>
     <symbol id="i-zap" viewBox="0 0 24 24"><path d="M13 2 3 14h9l-1 8 10-12h-9l1-8z"/></symbol>
+    <symbol id="i-present" viewBox="0 0 24 24"><path d="M2 3h20"/><path d="M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3"/><path d="m7 21 5-5 5 5"/></symbol>
+    <symbol id="i-pin" viewBox="0 0 24 24"><path d="M20 10c0 4.99-5.54 10.19-7.4 11.8a1 1 0 0 1-1.2 0C9.54 20.19 4 14.99 4 10a8 8 0 0 1 16 0"/><circle cx="12" cy="10" r="3"/></symbol>
+    <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
+    <symbol id="i-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></symbol>
+    <symbol id="i-skip" viewBox="0 0 24 24"><path d="m5 4 10 8-10 8z"/><path d="M19 5v14"/></symbol>
+    <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></symbol>
   </svg>
   <div id="login" class="login hidden">
     <div class="login-card">
@@ -179,6 +185,7 @@
           <button data-sub="servers" class="active"><svg class="i"><use href="#i-server"/></svg>GPU 服务器 <span class="count" id="cnt-servers"></span></button>
           <button data-sub="members"><svg class="i"><use href="#i-users"/></svg>成员 <span class="count" id="cnt-members"></span></button>
           <button data-sub="migrations"><svg class="i"><use href="#i-swap"/></svg>迁移记录 <span class="count" id="cnt-migrations"></span></button>
+          <button data-sub="meetings"><svg class="i"><use href="#i-present"/></svg>组会</button>
           <button data-sub="rules"><svg class="i"><use href="#i-zap"/></svg>预约与迁移规则</button>
           <button data-sub="welcome"><svg class="i"><use href="#i-send"/></svg>新人欢迎卡片</button>
         </div>
@@ -202,6 +209,61 @@
           <div class="card">
             <div class="tools"><div class="seg" id="mig-filter"></div></div>
             <div class="card-b" style="padding-top:12px" id="admin-migrations"></div>
+          </div>
+        </div>
+
+        <div class="admin-sub hidden" id="sub-meetings">
+          <div class="card gm-hero" id="gm-hero"></div>
+
+          <div class="gm-grid">
+            <div class="card">
+              <div class="card-h"><span class="icon-box"><svg class="i"><use href="#i-cal"/></svg></span><h2>近期安排</h2><span class="sub-title">未来 8 周</span></div>
+              <div id="gm-upcoming" class="gm-upcoming"></div>
+              <div class="card-foot">点汇报人可以临时<b>提前、推后或跳过</b>，只影响这几次，之后仍按名单轮换；某周不开时汇报人自动顺延到下一次。组会当天结束后记为已开。</div>
+            </div>
+            <div class="card">
+              <div class="card-h"><span class="icon-box ok"><svg class="i"><use href="#i-users"/></svg></span><h2>汇报名单</h2><span class="sub-title">按此顺序轮换</span><span class="grow"></span><button class="btn small" type="button" id="gm-add"><svg class="i"><use href="#i-plus"/></svg>添加</button></div>
+              <div id="gm-roster" class="gm-roster"></div>
+            </div>
+          </div>
+
+          <div class="welcome">
+            <form id="gm-form">
+              <div class="set-group"><h3>时间与地点</h3>
+                <div class="card">
+                  <div class="set-row"><div><div class="t">每周组会时间</div><div class="d">每周最多开一次。某一周要改时间、换地点或者不开，在上面「近期安排」里单独改。</div></div>
+                    <div class="inline-num"><select name="weekday" class="gm-weekday"></select><input type="time" name="time" required class="gm-time"></div></div>
+                  <div class="set-row"><div><div class="t">每次汇报人数</div><div class="d">每次组会几位同学做 PPT 汇报，按「汇报名单」的顺序依次轮换。</div></div>
+                    <div class="inline-num"><input type="number" name="per_meeting" min="1" max="5" required> 人</div></div>
+                  <div class="set-row col"><div><div class="t">地点</div><div class="d">可以添加多个，每次组会在「近期安排」里选。排在第一个的是默认地点。</div></div>
+                    <div class="gm-chips" id="gm-locs"></div>
+                    <div class="gm-add-row"><input id="gm-loc-input" placeholder="如：实验楼 302、腾讯会议 123-456-789" maxlength="60"><button class="btn" type="button" id="gm-loc-add">添加地点</button></div></div>
+                </div>
+              </div>
+              <div class="set-group"><h3>飞书群提醒</h3>
+                <div class="card">
+                  <div class="set-row col"><div><div class="t">发到哪些群</div><div class="d">机器人要先被拉进群里。卡片会 @所有人；群里如果限制了谁能 @所有人，需要放开或把机器人设为群管理员。</div></div>
+                    <div class="gm-chips" id="gm-chats"></div>
+                    <div class="gm-add-row"><button class="btn" type="button" id="gm-pick-chats"><svg class="i"><use href="#i-search"/></svg>从机器人所在的群里选…</button><input id="gm-chat-input" class="mono" placeholder="或直接填 chat_id：oc_xxxxxxxx" maxlength="90"><button class="btn" type="button" id="gm-chat-add">添加</button></div></div>
+                  <div class="set-row"><div><div class="t">提醒时间</div><div class="d">在组会开始前几天的同一时刻自动发通知卡片，每次组会只自动发一次。某周不开也会发一张「组会暂停」卡片。</div></div>
+                    <div class="inline-num">提前 <input type="number" name="notify_days" min="1" max="6" required> 天</div></div>
+                  <div class="set-row col"><div><div class="t">卡片附加说明<span class="field-hint" style="margin-left:6px">可选</span></div><div class="d">显示在卡片最后，比如「汇报人请提前一天把 PPT 发到群里」、线上会议链接。支持飞书 <code>lark_md</code> 语法。</div></div>
+                    <textarea name="card_extra" rows="2" maxlength="1000"></textarea></div>
+                </div>
+              </div>
+              <div class="savebar clean" id="gm-bar"><span class="grow" id="gm-msg">所有更改已保存</span><button class="btn primary" id="gm-save" disabled>保存设置</button></div>
+            </form>
+            <div class="preview-wrap">
+              <div class="preview-label"><span>通知卡片预览</span><span id="gm-preview-for"></span></div>
+              <div class="fcard" id="gm-preview"></div>
+              <div class="btn-row gm-preview-btns"><button class="btn" type="button" id="gm-send-me"><svg class="i"><use href="#i-send"/></svg>发给我预览</button><button class="btn primary" type="button" id="gm-send-chat"><svg class="i"><use href="#i-bell"/></svg>立即发到群里</button></div>
+              <p class="card-note" style="margin-top:10px">预览的是最近一次组会；发给自己预览时不会 @所有人。</p>
+            </div>
+          </div>
+
+          <div class="card gm-history">
+            <div class="card-h"><span class="icon-box warn"><svg class="i"><use href="#i-clock"/></svg></span><h2>历史记录</h2><span class="sub-title">最近 20 次</span></div>
+            <div id="gm-history"></div>
           </div>
         </div>
 
@@ -415,6 +477,54 @@
         <button class="btn primary" id="onboard-next">下一步</button>
       </div>
     </div>
+  </dialog>
+
+  <!-- 组会：编辑某一周 -->
+  <dialog id="gm-edit-dialog" class="dlg">
+    <form id="gm-edit-form" method="dialog">
+      <div class="dlg-h">
+        <span class="dlg-ico"><svg class="i"><use href="#i-present"/></svg></span>
+        <div><h2>编辑这次组会</h2><p id="gm-edit-sub"></p></div>
+        <button class="btn ghost icon dlg-x" value="cancel" formnovalidate title="关闭"><svg class="i"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="dlg-b">
+        <label class="switch-row"><span>这周不开<small>汇报人顺延到下一次，到提醒时间发一张「组会暂停」卡片</small></span><span class="switch"><input type="checkbox" name="cancelled"><i></i></span></label>
+        <div class="two gm-when">
+          <label>日期<input type="date" name="date" required></label>
+          <label>时间<input type="time" name="time" required></label>
+        </div>
+        <label class="gm-when">地点<select name="location"></select></label>
+        <label><span id="gm-note-label">备注</span><input name="note" maxlength="200" placeholder="可选，会写进通知卡片"></label>
+        <p class="error" id="gm-edit-error"></p>
+      </div>
+      <div class="dlg-f">
+        <button class="btn gm-when" type="button" id="gm-edit-reset">恢复每周默认时间</button>
+        <span class="spacer"></span>
+        <button class="btn" value="cancel" formnovalidate>取消</button>
+        <button class="btn primary" value="ok">保存</button>
+      </div>
+    </form>
+  </dialog>
+
+  <!-- 组会：添加汇报人 / 选择飞书群（同一个多选弹窗） -->
+  <dialog id="gm-pick-dialog" class="dlg">
+    <form id="gm-pick-form" method="dialog">
+      <div class="dlg-h">
+        <span class="dlg-ico" id="gm-pick-ico"></span>
+        <div><h2 id="gm-pick-title"></h2><p id="gm-pick-sub"></p></div>
+        <button class="btn ghost icon dlg-x" value="cancel" formnovalidate title="关闭"><svg class="i"><use href="#i-x"/></svg></button>
+      </div>
+      <div class="dlg-b">
+        <div class="gpu-pick gm-pick" id="gm-pick-list"></div>
+        <p class="error" id="gm-pick-error"></p>
+      </div>
+      <div class="dlg-f">
+        <button class="btn" type="button" id="gm-pick-all">全选</button>
+        <span class="spacer"></span>
+        <button class="btn" value="cancel" formnovalidate>取消</button>
+        <button class="btn primary" value="ok" id="gm-pick-ok">确定</button>
+      </div>
+    </form>
   </dialog>
 
   <div id="toast" class="toast" popover="manual"></div>

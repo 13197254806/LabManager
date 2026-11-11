@@ -31,17 +31,18 @@ ERROR_HINTS = {
     230006: "应用没有开启机器人能力：到飞书开放平台 → 该应用 → 添加应用能力 → 机器人，开启后在「版本管理与发布」里创建新版本并发布，审核通过后才生效",
     230013: "该用户不在机器人的可用范围内：到飞书开放平台 → 该应用 → 版本管理与发布，把可用范围改成全部成员或包含此人",
     99991672: "应用缺少发消息权限：到飞书开放平台 → 权限管理，开通 im:message:send_as_bot 后发布新版本",
+    230002: "机器人不在这个群里：打开飞书群设置 → 群机器人 → 添加机器人，把本应用的机器人加进群",
 }
 
 
-def _check(resp: httpx.Response) -> dict:
+def _check(resp: httpx.Response, hints: dict | None = None) -> dict:
     try:
         data = resp.json()
     except ValueError:
         raise FeishuError(f"HTTP {resp.status_code}: {resp.text[:200]}")
     if data.get("code", 0) != 0:
         code = data.get("code")
-        hint = ERROR_HINTS.get(code)
+        hint = (hints or {}).get(code) or ERROR_HINTS.get(code)
         raise FeishuError(f"{code}: {data.get('msg') or data.get('error_description')}" + (f"（{hint}）" if hint else ""))
     return data
 
@@ -62,25 +63,26 @@ def tenant_access_token() -> str:
         return _token
 
 
-def send_message(open_id: str, msg_type: str, content: dict, raise_errors: bool = False) -> bool:
-    """以机器人身份私聊某个用户。默认失败只记日志、返回 False；raise_errors=True 时抛出（供测试按钮显示具体原因）。"""
+def send_message(receive_id: str, msg_type: str, content: dict, raise_errors: bool = False, id_type: str = "open_id") -> bool:
+    """以机器人身份发消息：默认私聊某个用户（open_id），id_type="chat_id" 时发到群里。
+    默认失败只记日志、返回 False；raise_errors=True 时抛出（供测试按钮显示具体原因）。"""
     if not settings.feishu_enabled:
-        log.info("[飞书未配置，跳过发送] to=%s %s", open_id, json.dumps(content, ensure_ascii=False)[:300])
+        log.info("[飞书未配置，跳过发送] to=%s %s", receive_id, json.dumps(content, ensure_ascii=False)[:300])
         if raise_errors:
             raise FeishuError("服务端未配置飞书应用")
         return False
     try:
         resp = httpx.post(
             f"{settings.feishu_open_base}/open-apis/im/v1/messages",
-            params={"receive_id_type": "open_id"},
+            params={"receive_id_type": id_type},
             headers={"Authorization": f"Bearer {tenant_access_token()}"},
-            json={"receive_id": open_id, "msg_type": msg_type, "content": json.dumps(content, ensure_ascii=False)},
+            json={"receive_id": receive_id, "msg_type": msg_type, "content": json.dumps(content, ensure_ascii=False)},
             timeout=10,
         )
         _check(resp)
         return True
     except Exception as e:  # noqa: BLE001
-        log.warning("发送飞书消息失败 to=%s: %s", open_id, e)
+        log.warning("发送飞书消息失败 to=%s: %s", receive_id, e)
         if raise_errors:
             raise
         return False
@@ -92,6 +94,32 @@ def send_text(open_id: str, text: str) -> bool:
 
 def send_card(open_id: str, card: dict, raise_errors: bool = False) -> bool:
     return send_message(open_id, "interactive", card, raise_errors=raise_errors)
+
+
+def send_chat_card(chat_id: str, card: dict) -> bool:
+    """往群里发卡片（机器人要在群里）。失败直接抛出，由调用方记录原因。"""
+    return send_message(chat_id, "interactive", card, raise_errors=True, id_type="chat_id")
+
+
+def list_bot_chats() -> list[dict]:
+    """机器人所在的群：[{chat_id, name}]。需要应用开通「获取群组信息」权限。"""
+    if not settings.feishu_enabled:
+        raise FeishuError("服务端未配置飞书应用")
+    hints = {99991672: "应用缺少读取群列表的权限：到飞书开放平台 → 权限管理，开通 im:chat:readonly（获取群组信息）后发布新版本；也可以直接填写群的 chat_id"}
+    chats, page = [], ""
+    for _ in range(20):
+        resp = httpx.get(
+            f"{settings.feishu_open_base}/open-apis/im/v1/chats",
+            params={"page_size": 100, **({"page_token": page} if page else {})},
+            headers={"Authorization": f"Bearer {tenant_access_token()}"},
+            timeout=10,
+        )
+        data = _check(resp, hints).get("data") or {}
+        chats += [{"chat_id": c["chat_id"], "name": c.get("name") or ""} for c in data.get("items") or [] if c.get("chat_id")]
+        page = data.get("page_token") or ""
+        if not data.get("has_more") or not page:
+            break
+    return chats
 
 
 def build_card(title: str, markdown: str, buttons: list[tuple[str, str]] | None = None, template: str = "blue") -> dict:

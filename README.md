@@ -9,7 +9,8 @@ GPU 预约与服务器账号管理，带飞书机器人。成员用飞书登录�
 - **服务器账号**：每人一个 Linux 账号（密码 / 公钥由平台统一下发），用户名可随时改，各服务器自动改名；是否需要预约才能登录由管理员开关控制
 - **迁移共享账号**：从旧共享账号复制配置、conda，并通过文件浏览器选择个人文件移动 / 复制到自己的家目录，后台执行
 - **校园网接入**：公网服务器经家宽代理登录学校 WebVPN，用 chisel 反向隧道连到内网 GPU
-- **飞书机器人**：新人欢迎卡片，新建预约 / 到期 / 迁移通知（修改、取消预约不发卡片），私聊查询
+- **组会管理**：每周固定时间、多个地点可选，按名单轮换 PPT 汇报人；可临时提前 / 推后 / 跳过某人，某周不开时自动顺延；组会前 N 天（默认 2 天）往指定飞书群发通知卡片并 @所有人
+- **飞书机器人**：新人欢迎卡片，新建预约 / 到期 / 迁移通知（修改、取消预约不发卡片），组会通知，私聊查询
 
 ## 代码结构
 
@@ -22,13 +23,14 @@ GPU 预约与服务器账号管理，带飞书机器人。成员用飞书登录�
 │   │   ├── main.py              Web 入口：挂载接口和静态文件，提供 /agent/* 下载，启动时合并存量预约、启动定时任务
 │   │   ├── api.py               全部 HTTP 接口：预约、账号、迁移、管理页、Agent 同步、文件浏览转发
 │   │   ├── services.py          业务规则：预约容量 / 合并 / 长期使用 / 自动延长、账号期望状态、飞书通知文案、系统设置
-│   │   ├── models.py            数据表：User、SSHKey、Server、GPU、Reservation、MigrationTask、Setting、Notice
+│   │   ├── meetings.py          组会：每周安排、汇报人轮换与临时调整、组会结束后结算、飞书群通知卡片
+│   │   ├── models.py            数据表：User、SSHKey、Server、GPU、Reservation、MigrationTask、Setting、GroupMeeting、Notice
 │   │   ├── db.py                SQLite 连接、建表、给已有表补字段（_EXTRA_COLUMNS）
 │   │   ├── config.py            环境变量配置、时区、当前日期
 │   │   ├── auth.py              飞书 OAuth 登录、飞书组织校验、会话
-│   │   ├── feishu.py            飞书开放平台封装：令牌、发消息 / 卡片、错误码提示
+│   │   ├── feishu.py            飞书开放平台封装：令牌、私聊 / 群消息和卡片、机器人所在的群、错误码提示
 │   │   ├── bot.py               飞书长连接机器人（独立进程）：欢迎卡片、私聊命令
-│   │   ├── jobs.py              定时线程（web 进程内）：长期使用自动延长、到期提醒
+│   │   ├── jobs.py              定时线程（web 进程内）：长期使用自动延长、到期提醒、组会结算与群提醒
 │   │   ├── browse.py            网页文件浏览 ↔ Agent 的请求转发（长轮询，内存队列）
 │   │   ├── tunnel.py            校园网隧道（独立进程）：登录 WebVPN，经家宽代理用 chisel 连每台 GPU
 │   │   ├── webvpn.py            WebVPN 登录客户端：密码加密、滑块验证码识别（纯标准库）
@@ -37,10 +39,11 @@ GPU 预约与服务器账号管理，带飞书机器人。成员用飞书登录�
 │   │       ├── app.js           前端逻辑
 │   │       ├── style.css        样式（含深色模式）
 │   │       └── logo.png
-│   └── tests/                   pytest：预约规则、Agent 接口、文件浏览、登录限制、Agent 同步循环
+│   └── tests/                   pytest：预约规则、Agent 接口、文件浏览、登录限制、Agent 同步循环、组会轮换
 │       ├── conftest.py
 │       ├── test_reservations.py
 │       ├── test_agent_api.py
+│       ├── test_meetings.py
 │       └── test_agent_once.py
 │
 ├── agent/                       部署在每台 GPU 服务器上（只依赖 Python 3.6+ 标准库）；也由平台经 /agent/* 提供下载

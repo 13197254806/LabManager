@@ -4,14 +4,15 @@ import logging
 import posixpath
 import re
 import time
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
+from typing import Literal
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session, joinedload
 
-from . import browse, feishu, services
+from . import browse, feishu, meetings, services
 from .auth import admin_user, current_user
 from .config import now, settings, today
 from .db import SessionLocal, get_db
@@ -655,6 +656,147 @@ def admin_test_welcome(me: User = Depends(admin_user), db: Session = Depends(get
     except Exception as e:  # noqa: BLE001
         raise HTTPException(500, f"发送失败：{e}")
     return {"ok": True}
+
+
+# ---------------- 组会 ----------------
+
+
+def _meeting_call(fn, *args, **kwargs):
+    """组会的修改出错（ValueError）时以 400 返回原因。"""
+    try:
+        return fn(*args, **kwargs)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+def _meetings_view(db: Session) -> dict:
+    meetings.settle(db)  # 先把已经结束的周结算掉，页面上才不会还显示已经开完的组会
+    return meetings.overview(db)
+
+
+@router.get("/admin/meetings")
+def admin_meetings(_: User = Depends(admin_user), db: Session = Depends(get_db)):
+    return _meetings_view(db)
+
+
+class ChatIn(BaseModel):
+    id: str = Field(pattern=r"^oc_[A-Za-z0-9_-]{1,80}$")
+    name: str = Field(default="", max_length=100)
+
+
+class MeetingConfigIn(BaseModel):
+    weekday: int = Field(ge=0, le=6)
+    time: str = Field(pattern=r"^([01]\d|2[0-3]):[0-5]\d$")
+    per_meeting: int = Field(ge=1, le=5)
+    notify_days: int = Field(ge=1, le=6)
+    locations: list[str] = Field(default_factory=list, max_length=30)
+    chats: list[ChatIn] = Field(default_factory=list, max_length=10)
+    card_extra: str = Field(default="", max_length=1000)
+
+
+@router.put("/admin/meetings/config")
+def admin_meetings_config(body: MeetingConfigIn, _: User = Depends(admin_user), db: Session = Depends(get_db)):
+    locations = list(dict.fromkeys(x.strip() for x in body.locations if x.strip()))
+    if any(len(x) > 60 for x in locations):
+        raise HTTPException(400, "地点名称最长 60 个字")
+    chats = list({c.id: {"id": c.id, "name": c.name.strip()} for c in body.chats}.values())
+    meetings.save_config(db, weekday=body.weekday, tm=meetings.parse_hm(body.time), per_meeting=body.per_meeting,
+                         notify_days=body.notify_days, locations=locations, chats=chats, card_extra=body.card_extra)
+    return _meetings_view(db)
+
+
+class EnabledIn(BaseModel):
+    enabled: bool
+
+
+@router.put("/admin/meetings/enabled")
+def admin_meetings_enabled(body: EnabledIn, _: User = Depends(admin_user), db: Session = Depends(get_db)):
+    meetings.set_enabled(db, body.enabled)
+    return _meetings_view(db)
+
+
+class RosterIn(BaseModel):
+    user_ids: list[int] = Field(max_length=200)
+
+
+@router.put("/admin/meetings/roster")
+def admin_meetings_roster(body: RosterIn, _: User = Depends(admin_user), db: Session = Depends(get_db)):
+    ids = list(dict.fromkeys(body.user_ids))
+    if ids and len(set(db.scalars(select(User.id).where(User.id.in_(ids))))) != len(ids):
+        raise HTTPException(400, "名单里有不存在的成员")
+    meetings.save_roster(db, ids)
+    return _meetings_view(db)
+
+
+class NextIn(BaseModel):
+    user_id: int
+
+
+@router.post("/admin/meetings/next")
+def admin_meetings_next(body: NextIn, _: User = Depends(admin_user), db: Session = Depends(get_db)):
+    _meeting_call(meetings.set_next, db, body.user_id)
+    return _meetings_view(db)
+
+
+class AdjustIn(BaseModel):
+    op: Literal["swap", "skip"]
+    i: int = Field(ge=0, le=500)
+    ui: int
+    j: int | None = Field(default=None, ge=0, le=500)
+    uj: int | None = None
+
+
+@router.post("/admin/meetings/adjust")
+def admin_meetings_adjust(body: AdjustIn, _: User = Depends(admin_user), db: Session = Depends(get_db)):
+    meetings.settle(db)  # 先把已经结束的组会结算掉，位置才对得上页面上看到的
+    try:
+        meetings.adjust(db, body.op, body.i, body.ui, body.j, body.uj)
+    except ValueError as e:
+        raise HTTPException(409, str(e))
+    return _meetings_view(db)
+
+
+class MeetingPatch(BaseModel):
+    start_at: datetime | None = None  # 传 null = 恢复每周默认时间
+    location: str | None = Field(default=None, max_length=128)  # 传 "" / null = 默认地点
+    cancelled: bool | None = None
+    note: str | None = Field(default=None, max_length=256)
+
+
+@router.patch("/admin/meetings/{week}")
+def admin_meetings_patch(week: date, body: MeetingPatch, _: User = Depends(admin_user), db: Session = Depends(get_db)):
+    meetings.settle(db)
+    kw = {k: getattr(body, k) for k in body.model_fields_set}
+    if kw.get("start_at") and kw["start_at"].tzinfo:  # 带时区的按平台时区换算
+        kw["start_at"] = kw["start_at"].astimezone(settings.tz).replace(tzinfo=None)
+    _meeting_call(meetings.patch_week, db, week, **kw)
+    return _meetings_view(db)
+
+
+class MeetingSendIn(BaseModel):
+    to: Literal["chat", "me"] = "chat"
+
+
+@router.post("/admin/meetings/{week}/send")
+def admin_meetings_send(week: date, body: MeetingSendIn, me: User = Depends(admin_user), db: Session = Depends(get_db)):
+    meetings.settle(db)
+    try:
+        errors = meetings.send_now(db, week, me if body.to == "me" else None)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    except feishu.FeishuError as e:
+        raise HTTPException(400, f"飞书返回错误：{e}")
+    return {"errors": errors, **_meetings_view(db)}
+
+
+@router.get("/admin/feishu/chats")
+def admin_feishu_chats(_: User = Depends(admin_user)):
+    try:
+        return feishu.list_bot_chats()
+    except feishu.FeishuError as e:
+        raise HTTPException(400, str(e))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(502, f"读取群列表失败：{e}")
 
 
 # ---------------- 文件迁移 ----------------
