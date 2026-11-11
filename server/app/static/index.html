@@ -39,6 +39,7 @@
     <symbol id="i-clock" viewBox="0 0 24 24"><circle cx="12" cy="12" r="10"/><path d="M12 6v6l4 2"/></symbol>
     <symbol id="i-up" viewBox="0 0 24 24"><path d="m18 15-6-6-6 6"/></symbol>
     <symbol id="i-skip" viewBox="0 0 24 24"><path d="m5 4 10 8-10 8z"/><path d="M19 5v14"/></symbol>
+    <symbol id="i-grip" viewBox="0 0 24 24"><circle cx="9" cy="6" r="1"/><circle cx="9" cy="12" r="1"/><circle cx="9" cy="18" r="1"/><circle cx="15" cy="6" r="1"/><circle cx="15" cy="12" r="1"/><circle cx="15" cy="18" r="1"/></symbol>
     <symbol id="i-bell" viewBox="0 0 24 24"><path d="M6 8a6 6 0 0 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10.3 21a1.94 1.94 0 0 0 3.4 0"/></symbol>
   </svg>
   <div id="login" class="login hidden">
@@ -215,19 +216,20 @@
         <div class="admin-sub hidden" id="sub-meetings">
           <div class="card gm-hero" id="gm-hero"></div>
 
-          <div class="gm-grid">
+          <div class="gm-cols gm-grid">
             <div class="card">
               <div class="card-h"><span class="icon-box"><svg class="i"><use href="#i-cal"/></svg></span><h2>近期安排</h2><span class="sub-title">未来 8 周</span></div>
               <div id="gm-upcoming" class="gm-upcoming"></div>
               <div class="card-foot">点汇报人可以临时<b>提前、推后或跳过</b>，只影响这几次，之后仍按名单轮换；某周不开时汇报人自动顺延到下一次。组会当天结束后记为已开。</div>
             </div>
-            <div class="card">
-              <div class="card-h"><span class="icon-box ok"><svg class="i"><use href="#i-users"/></svg></span><h2>汇报名单</h2><span class="sub-title">按此顺序轮换</span><span class="grow"></span><button class="btn small" type="button" id="gm-add"><svg class="i"><use href="#i-plus"/></svg>添加</button></div>
+            <div class="card gm-roster-card">
+              <div class="card-h"><span class="icon-box ok"><svg class="i"><use href="#i-users"/></svg></span><h2>汇报名单</h2><span class="sub-title">拖动调整顺序</span><span class="grow"></span><button class="btn small" type="button" id="gm-add"><svg class="i"><use href="#i-plus"/></svg>添加</button></div>
               <div id="gm-roster" class="gm-roster"></div>
+              <div id="gm-roster-note"></div>
             </div>
           </div>
 
-          <div class="welcome">
+          <div class="gm-cols gm-settings">
             <form id="gm-form">
               <div class="set-group"><h3>时间与地点</h3>
                 <div class="card">

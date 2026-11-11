@@ -2336,33 +2336,128 @@ gmEditForm.addEventListener("submit", async (e) => {
 // ---- 汇报名单 ----
 function renderGmRoster() {
   const d = gm.data, list = d.roster;
+  const nextName = list.find((u) => u.id === d.next_uid)?.name;
+  $("#gm-roster-note").innerHTML = d.adjusted && list.length
+    ? `<div class="gm-note">近期有 ${d.adjusted} 个汇报位置是临时调整过的顺序，之后从「${esc(nextName || "")}」起按名单继续。点某人的 ${icon("skip")} 可以清除临时调整、从 TA 重新开始。</div>` : "";
   if (!list.length) {
-    $("#gm-roster").innerHTML = `<div class="gm-empty">还没有汇报名单。点右上角「添加」选择成员，按汇报顺序排好，之后每次组会自动轮到下一位。</div>`;
+    $("#gm-roster").innerHTML = `<div class="gm-empty">还没有汇报名单。点右上角「添加」选择成员，拖动排好汇报顺序，之后每次组会自动轮到下一位。</div>`;
     return;
   }
-  const nextName = list.find((u) => u.id === d.next_uid)?.name;
   $("#gm-roster").innerHTML = list.map((u, i) => `<div class="gm-r${u.enabled ? "" : " off"}">
+      <button type="button" class="gm-grip" data-r-grip="${i}" title="拖动调整顺序（选中后也可以按 ↑ ↓ 键）" aria-label="调整 ${esc(u.name)} 的顺序">${icon("grip")}</button>
       <span class="n">${i + 1}</span>
       <div class="who">${avatarHtml(u.name, u.avatar_url, u.id)}<span class="nm">${esc(u.name)}</span>${u.id === d.next_uid ? `<span class="badge next" title="${d.adjusted ? "近期几次是临时调整过的顺序，之后从这里按名单继续" : "按名单顺序，下一次轮到 TA"}">${d.adjusted ? "名单从这里继续" : "下一位"}</span>` : ""}${u.enabled ? "" : `<span class="badge" title="成员已停用，暂不参与轮换">已停用</span>`}</div>
       <div class="acts">
-        <button type="button" class="btn ghost icon small" data-r-move="${i},-1" title="上移" ${i ? "" : "disabled"}>${icon("up")}</button>
-        <button type="button" class="btn ghost icon small" data-r-move="${i},1" title="下移" ${i < list.length - 1 ? "" : "disabled"}>${icon("chev")}</button>
         <button type="button" class="btn ghost icon small" data-r-next="${u.id}" title="下一次从 TA 开始" ${u.enabled ? "" : "disabled"}>${icon("skip")}</button>
         <button type="button" class="btn ghost icon small danger-ghost" data-r-del="${i}" title="移出名单">${icon("x")}</button>
-      </div></div>`).join("")
-    + (d.adjusted ? `<div class="gm-note">近期有 ${d.adjusted} 个汇报位置是临时调整过的顺序，之后从「${esc(nextName || "")}」起按名单继续。点某人的 ${icon("skip")} 可以清除临时调整、从 TA 重新开始。</div>` : "");
+      </div></div>`).join("");
 }
 const gmRosterIds = () => gm.data.roster.map((u) => u.id);
-$("#gm-roster").addEventListener("click", (e) => {
+
+// 把名单里第 from 位挪到第 to 位：先在页面上排好，再保存（失败时重新加载）
+async function gmMoveRoster(from, to) {
+  if (from === to || to < 0 || to >= gm.data.roster.length) return null;
+  const list = [...gm.data.roster];
+  list.splice(to, 0, ...list.splice(from, 1));
+  gm.data.roster = list;
+  gm.sig = "";
+  renderGmRoster();
+  const r = await gmCall("/api/admin/meetings/roster", { user_ids: list.map((u) => u.id) }, { method: "PUT", msg: "" });
+  if (!r) loadMeetings();
+  return r;
+}
+
+// ---- 汇报名单拖动排序：用鼠标按住一行上下拖（触屏按住左侧的 ⋮⋮），松手保存；拖到列表边缘会自动滚动 ----
+const gmRosterBox = $("#gm-roster");
+let gmDrag = null;
+const gmContentY = (clientY) => clientY - gmRosterBox.getBoundingClientRect().top + gmRosterBox.scrollTop;
+gmRosterBox.addEventListener("pointerdown", (e) => {
+  const row = e.target.closest(".gm-r"), grip = e.target.closest(".gm-grip");
+  if (!row || e.button !== 0 || (e.target.closest("button") && !grip)) return;
+  if (e.pointerType !== "mouse" && !grip) return;  // 触屏只能拖把手，免得挡住列表滚动
+  e.preventDefault();
+  const rows = $$(".gm-r", gmRosterBox), from = rows.indexOf(row);
+  gmDrag = { row, rows, from, to: from, y0: gmContentY(e.clientY), lastY: e.clientY, started: false, auto: 0, raf: 0,
+    tops: rows.map((r) => r.offsetTop), hs: rows.map((r) => r.offsetHeight) };
+  row.setPointerCapture(e.pointerId);
+});
+gmRosterBox.addEventListener("pointermove", (e) => {
+  if (!gmDrag) return;
+  gmDrag.lastY = e.clientY;
+  gmDragMove();
+});
+function gmDragMove() {
+  const d = gmDrag;
+  const dy = gmContentY(d.lastY) - d.y0;
+  if (!d.started) {
+    if (Math.abs(dy) < 4) return;
+    d.started = true;
+    state.dragging = true;  // 拖动时暂停自动刷新
+    d.row.classList.add("dragging");
+    gmRosterBox.classList.add("sorting");
+  }
+  const n = d.rows.length, top = d.tops[d.from], h = d.hs[d.from];
+  const y = Math.max(-top, Math.min(d.tops[n - 1] + d.hs[n - 1] - top - h, dy));
+  d.row.style.transform = `translateY(${y}px)`;
+  // 被拖的这一行的中线越过谁的中线，就排到谁的位置
+  const c = top + h / 2 + y;
+  let to = d.from;
+  d.tops.forEach((t, i) => {
+    const mid = t + d.hs[i] / 2;
+    if (i < d.from && c < mid) to = Math.min(to, i);
+    if (i > d.from && c > mid) to = Math.max(to, i);
+  });
+  d.to = to;
+  d.rows.forEach((r, i) => {
+    if (i === d.from) return;
+    const shift = i >= to && i < d.from ? h : i <= to && i > d.from ? -h : 0;
+    r.style.transform = shift ? `translateY(${shift}px)` : "";
+  });
+  const rect = gmRosterBox.getBoundingClientRect();
+  d.auto = d.lastY < rect.top + 36 ? -10 : d.lastY > rect.bottom - 36 ? 10 : 0;
+  if (d.auto && !d.raf) d.raf = requestAnimationFrame(gmAutoScroll);
+}
+function gmAutoScroll() {
+  const d = gmDrag;
+  if (!d) return;
+  d.raf = 0;
+  if (!d.auto) return;
+  const before = gmRosterBox.scrollTop;
+  gmRosterBox.scrollTop += d.auto;
+  if (gmRosterBox.scrollTop !== before) gmDragMove();  // 滚到头了就停
+}
+function gmDragEnd(e) {
+  const d = gmDrag;
+  if (!d) return;
+  gmDrag = null;
+  cancelAnimationFrame(d.raf);
+  state.dragging = false;
+  d.rows.forEach((r) => (r.style.transform = ""));
+  d.row.classList.remove("dragging");
+  gmRosterBox.classList.remove("sorting");
+  if (d.started && e.type === "pointerup" && d.to !== d.from) gmMoveRoster(d.from, d.to);
+}
+gmRosterBox.addEventListener("pointerup", gmDragEnd);
+gmRosterBox.addEventListener("pointercancel", gmDragEnd);
+gmRosterBox.addEventListener("lostpointercapture", gmDragEnd);
+// 键盘：选中某人左侧的 ⋮⋮ 后按 ↑ ↓ 移动
+gmRosterBox.addEventListener("keydown", async (e) => {
+  const grip = e.target.closest(".gm-grip");
+  if (!grip || (e.key !== "ArrowUp" && e.key !== "ArrowDown")) return;
+  e.preventDefault();
+  const i = Number(grip.dataset.rGrip), to = i + (e.key === "ArrowUp" ? -1 : 1);
+  if (to < 0 || to >= gm.data.roster.length) return;
+  const refocus = () => $(`[data-r-grip="${to}"]`, gmRosterBox)?.focus();
+  const saving = gmMoveRoster(i, to);
+  refocus();
+  await saving;
+  refocus();
+});
+gmRosterBox.addEventListener("click", (e) => {
   const t = e.target.closest("button");
   if (!t || t.disabled) return;
   const d = t.dataset;
-  if (d.rMove) {
-    const [i, dir] = d.rMove.split(",").map(Number);
-    const ids = gmRosterIds();
-    [ids[i], ids[i + dir]] = [ids[i + dir], ids[i]];
-    gmCall("/api/admin/meetings/roster", { user_ids: ids }, { method: "PUT", msg: "" });
-  } else if (d.rNext) {
+  if (d.rNext) {
     const u = gm.data.roster.find((x) => x.id === Number(d.rNext));
     const note = gm.data.adjusted ? "近期的临时调整会被清除。" : "";
     if (confirm(`下一次组会从「${u.name}」开始，按名单顺序轮换？${note}`)) gmCall("/api/admin/meetings/next", { user_id: u.id }, { msg: `下一次从 ${u.name} 开始` });
@@ -2389,7 +2484,7 @@ function openGmPick({ title, sub, ico, items, emptyText, onOk }) {
 }
 function renderGmPickItems(items, emptyText = "") {
   $("#gm-pick-list").innerHTML = items === null ? `<p class="muted small">正在读取…</p>`
-    : items.length ? items.map((x) => `<label><input type="checkbox" value="${esc(x.value)}" ${x.checked ? "checked" : ""}><span class="ck">${icon("check")}</span>${x.avatar || ""}<span class="lbl"><b>${esc(x.label)}</b>${x.sub ? `<small>${esc(x.sub)}</small>` : ""}</span></label>`).join("")
+    : items.length ? items.map((x) => `<label${x.title ? ` title="${esc(x.title)}"` : ""}><input type="checkbox" value="${esc(x.value)}" ${x.checked ? "checked" : ""}><span class="ck">${icon("check")}</span>${x.avatar || ""}<span class="lbl"><b>${esc(x.label)}</b>${x.sub ? `<small>${esc(x.sub)}</small>` : ""}</span></label>`).join("")
     : `<p class="muted small">${esc(emptyText)}</p>`;
   $("#gm-pick-all").classList.toggle("hidden", !items?.length);
 }
@@ -2446,8 +2541,14 @@ function renderGmLocs() {
   $("#gm-locs").innerHTML = gm.locations.map((l, i) => `<span class="gm-tag">${icon("pin")}<span class="t">${esc(l)}</span>${i === 0
     ? `<span class="def">默认</span>` : `<button type="button" class="link-btn" data-loc-def="${i}">设为默认</button>`}<button type="button" class="btn ghost icon small danger-ghost" data-loc-del="${i}" title="删除">${icon("x")}</button></span>`).join("");
 }
+// 群头像：飞书给的是 https 图片地址；没有（手动填的 chat_id 还没查到）或加载失败时显示群图标
+function gmChatAvatar(c) {
+  const fallback = `<span class="gm-chat-av">${icon("users")}</span>`;
+  if (!/^https:\/\//.test(c.avatar || "")) return fallback;
+  return `<img class="gm-chat-av" src="${esc(c.avatar)}" alt="" referrerpolicy="no-referrer" onerror="this.outerHTML=${esc(JSON.stringify(fallback))}">`;
+}
 function renderGmChats() {
-  $("#gm-chats").innerHTML = gm.chats.map((c, i) => `<span class="gm-tag">${icon("users")}<span class="t">${esc(c.name || "未命名的群")}</span><span class="sub mono">${esc(c.id)}</span><button type="button" class="btn ghost icon small danger-ghost" data-chat-del="${i}" title="移除">${icon("x")}</button></span>`).join("");
+  $("#gm-chats").innerHTML = gm.chats.map((c, i) => `<span class="gm-tag chat" title="${esc(c.id)}">${gmChatAvatar(c)}<span class="t">${esc(c.name || "未命名的群")}</span><span class="sub mono">${esc(c.id)}</span><button type="button" class="btn ghost icon small danger-ghost" data-chat-del="${i}" title="移除">${icon("x")}</button></span>`).join("");
 }
 function gmAddLoc() {
   const inp = $("#gm-loc-input"), v = inp.value.trim();
@@ -2486,9 +2587,10 @@ $("#gm-form").addEventListener("input", (e) => {
 });
 $("#gm-pick-chats").onclick = async () => {
   openGmPick({ title: "选择飞书群", sub: "机器人所在的群；选中的群会收到组会通知", ico: "users", items: null, onOk: (ids) => {
-    const known = new Map((gmPickDialog._chats || []).map((c) => [c.chat_id, c.name]));
+    const known = new Map((gmPickDialog._chats || []).map((c) => [c.chat_id, c]));
     // 机器人已经不在、列表里没有的群保留（可以在设置里手动移除）
-    gm.chats = [...gm.chats.filter((c) => !known.has(c.id)), ...ids.map((id) => ({ id, name: known.get(id) || "" }))];
+    gm.chats = [...gm.chats.filter((c) => !known.has(c.id)),
+      ...ids.map((id) => ({ id, name: known.get(id)?.name || "", avatar: known.get(id)?.avatar || "" }))];
     renderGmChats();
     setGmDirty(true);
   } });
@@ -2496,7 +2598,8 @@ $("#gm-pick-chats").onclick = async () => {
     const chats = await api("/api/admin/feishu/chats");
     gmPickDialog._chats = chats;
     const have = new Set(gm.chats.map((c) => c.id));
-    renderGmPickItems(chats.map((c) => ({ value: c.chat_id, label: c.name || "未命名的群", sub: c.chat_id, checked: have.has(c.chat_id) })),
+    renderGmPickItems(chats.map((c) => ({ value: c.chat_id, label: c.name || "未命名的群", sub: c.chat_id, checked: have.has(c.chat_id),
+      avatar: gmChatAvatar(c), title: c.chat_id })),
       "机器人还不在任何群里：先在飞书群设置 → 群机器人里把它加进去。");
   } catch (err) {
     gmPickDialog._chats = [];

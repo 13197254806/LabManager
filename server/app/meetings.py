@@ -22,7 +22,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from . import feishu
-from .config import now
+from .config import now, settings
 from .models import GroupMeeting, Setting, User
 from .services import set_setting
 
@@ -43,7 +43,7 @@ DEFAULTS = {
     "gm_per_meeting": "1",  # 每次几位汇报人
     "gm_notify_days": "2",  # 提前几天发卡片（与组会同一时刻）
     "gm_locations": "[]",  # 第一个是默认地点
-    "gm_chats": "[]",  # [{"id": "oc_xxx", "name": "群名"}]
+    "gm_chats": "[]",  # [{"id": "oc_xxx", "name": "群名", "avatar": "群头像地址"}]
     "gm_card_extra": "",  # 卡片末尾的附加说明（lark_md）
     "gm_roster": "[]",  # 汇报名单（user_id，按轮换顺序）
     "gm_head": "[]",
@@ -372,7 +372,7 @@ def build_card(cfg: Cfg, items: list[Meeting], i: int, users: dict[int, User], a
         if nxt:
             elements.append(_fields([
                 ("🗓 下次组会", f"{_day(nxt.start)} {hm(nxt.start)}\n{nxt.location or '地点待定'}"),
-                ("🎤 下次汇报", _who(users, nxt.uids)),
+                ("📊 下次汇报", _who(users, nxt.uids)),
             ]))
     else:
         title, template = f"📅 组会通知 · {_day(m.start)}", "blue"
@@ -383,9 +383,9 @@ def build_card(cfg: Cfg, items: list[Meeting], i: int, users: dict[int, User], a
         else:
             nxt_label, nxt_text = "下周汇报", "待定"
         elements = [
-            _md(f"{mention}组会安排如下，请大家准时参加。"),
+            _md(f"{mention}本周组会安排如下，请汇报的同学做好准备。"),
             _fields([("🕑 时间", f"{_day(m.start)} {hm(m.start)}"), ("📍 地点", m.location or "待定")]),
-            _fields([("🎤 本周汇报", _who(users, m.uids)), (f"⏭ {nxt_label}", nxt_text)]),
+            _fields([("📊 本周汇报", _who(users, m.uids)), (f"⏭ {nxt_label}", nxt_text)]),
         ]
         if m.note:
             elements.append(_md(f"📝 {m.note}"))
@@ -480,6 +480,31 @@ def send_now(db: Session, week: date, me: User | None = None) -> list[str]:
 
 
 # ---------------- 管理页的修改 ----------------
+
+_chat_info_tried: set[str] = set()
+
+
+def fill_chat_info(db: Session):
+    """缺群名或群头像的群（手动填的 chat_id、旧版本保存的群）向飞书查一次补上并保存。
+    每个群每次启动最多查一次：查不到（机器人不在群里、没权限）也不会每次打开页面都去查。"""
+    if not settings.feishu_enabled:
+        return
+    with lock:
+        cfg = load(db)
+        todo = [c for c in cfg.chats if not (c.get("name") and c.get("avatar")) and c["id"] not in _chat_info_tried]
+        if not todo:
+            return
+        for c in todo:
+            _chat_info_tried.add(c["id"])
+            try:
+                info = feishu.get_chat(c["id"])
+            except Exception as e:  # noqa: BLE001
+                log.info("查询群信息失败 %s: %s", c["id"], e)
+                continue
+            c["name"] = c.get("name") or info["name"]
+            c["avatar"] = c.get("avatar") or info["avatar"]
+        set_setting(db, "gm_chats", json.dumps(cfg.chats, ensure_ascii=False))
+        db.commit()
 
 
 def save_config(db: Session, *, weekday: int, tm: time, per_meeting: int, notify_days: int,
