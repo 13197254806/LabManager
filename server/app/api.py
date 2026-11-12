@@ -16,7 +16,7 @@ from . import browse, feishu, meetings, reports, services
 from .auth import admin_user, current_user
 from .config import now, settings, today
 from .db import SessionLocal, get_db
-from .models import GPU, MigrationTask, Reservation, Server, SSHKey, User
+from .models import GPU, MigrationTask, Reservation, Server, Setting, SSHKey, User
 
 log = logging.getLogger(__name__)
 
@@ -607,8 +607,7 @@ def admin_delete_server(sid: int, _: User = Depends(admin_user), db: Session = D
 
 
 SETTING_KEYS = (
-    "lab_name", "welcome_title", "welcome_markdown", "welcome_links", "welcome_chat_ids",
-    "max_reservation_days", "max_advance_days", "max_gpu_sharers", "reminder_hour",
+    "lab_name", "max_reservation_days", "max_advance_days", "max_gpu_sharers", "reminder_hour",
     "auto_renew_before_hours", "auto_renew_days", "migration_requires_approval", "require_reservation_to_login",
     "refresh_interval_seconds", "restrict_to_admin_tenant", "process_kill_grace_hours",
 )
@@ -637,8 +636,6 @@ def admin_put_settings(body: dict[str, str], _: User = Depends(admin_user), db: 
             v = str(v).strip()
             if not v or len(v) > 40:
                 raise HTTPException(400, "平台名称不能为空，最长 40 个字")
-        if k == "welcome_chat_ids":  # 逗号 / 空白 / 换行分隔都接受，统一存成逗号分隔
-            v = ",".join(c for c in re.split(r"[,\s，]+", str(v)) if c)
         if k in SETTING_KEYS:
             services.set_setting(db, k, v)
     db.commit()
@@ -646,17 +643,116 @@ def admin_put_settings(body: dict[str, str], _: User = Depends(admin_user), db: 
     return {k: services.get_setting(db, k) for k in SETTING_KEYS}
 
 
-@router.post("/admin/welcome/test")
-def admin_test_welcome(me: User = Depends(admin_user), db: Session = Depends(get_db)):
+# ---------------- 飞书卡片 ----------------
+# 管理员编辑一张卡片（标题 + 正文 + 按钮），发给自己预览或发到选中的群；
+# 「新人欢迎卡片」是其中一个模板：新成员入群时机器人自动私聊发送的就是它。
+
+
+class ChatIn(BaseModel):
+    id: str = Field(pattern=r"^oc_[A-Za-z0-9_-]{1,80}$")
+    name: str = Field(default="", max_length=100)
+    avatar: str = Field(default="", max_length=1000, pattern=r"^(https://\S+)?$")  # 群头像，只接受 https 地址
+
+
+class CardIn(BaseModel):
+    title: str = Field(max_length=100)
+    color: str = "blue"
+    markdown: str = Field(default="", max_length=5000)
+    links: str = Field(default="", max_length=2000)
+
+
+class CardSendIn(CardIn):
+    to: Literal["me", "chats"]
+    chats: list[ChatIn] = Field(default_factory=list, max_length=30)
+    at_all: bool = False
+
+
+class ChatsIn(BaseModel):
+    chats: list[ChatIn] = Field(default_factory=list, max_length=30)
+
+
+def _check_card(body: CardIn) -> list[tuple[str, str]]:
+    if not body.title.strip():
+        raise HTTPException(400, "标题不能为空")
+    if body.color not in services.CARD_COLORS:
+        raise HTTPException(400, "不支持的标题颜色")
+    try:
+        buttons = services.parse_buttons(body.links, strict=True)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+    if not body.markdown.strip() and not buttons:
+        raise HTTPException(400, "正文和按钮至少要填一个")
+    return buttons
+
+
+def _chat_list(chats: list[ChatIn]) -> list[dict]:
+    return list({c.id: {"id": c.id, "name": c.name.strip(), "avatar": c.avatar} for c in chats}.values())
+
+
+def _cards_view(db: Session) -> dict:
+    out = {"welcome": services.welcome_template(db), "base_url": settings.base_url}
+    for key, name in (("welcome_chat_ids", "welcome_chats"), ("card_chats", "chats")):
+        chats = services.parse_chats(services.get_setting(db, key))
+        # 补上群名和头像；只在管理页保存过时写回（.env 里的默认值不落库，改 .env 仍然生效）
+        if services.fill_chat_info(chats) and db.get(Setting, key):
+            services.set_setting(db, key, services.dump_chats(chats))
+            db.commit()
+        out[name] = chats
+    return out
+
+
+@router.get("/admin/cards")
+def admin_cards(_: User = Depends(admin_user), db: Session = Depends(get_db)):
+    return _cards_view(db)
+
+
+@router.put("/admin/cards/welcome")
+def admin_cards_welcome(body: CardIn, _: User = Depends(admin_user), db: Session = Depends(get_db)):
+    """保存为新人欢迎卡片：之后新成员自动收到的就是这一版。"""
+    _check_card(body)
+    for k in ("title", "color", "markdown", "links"):
+        services.set_setting(db, f"welcome_{k}", getattr(body, k).strip() if k == "title" else getattr(body, k))
+    db.commit()
+    return _cards_view(db)
+
+
+@router.put("/admin/cards/welcome-chats")
+def admin_cards_welcome_chats(body: ChatsIn, _: User = Depends(admin_user), db: Session = Depends(get_db)):
+    """只对这些群的新成员自动发欢迎卡片；空 = 机器人所在的所有群。"""
+    services.set_setting(db, "welcome_chat_ids", services.dump_chats(_chat_list(body.chats)))
+    db.commit()
+    return _cards_view(db)
+
+
+@router.post("/admin/cards/send")
+def admin_cards_send(body: CardSendIn, me: User = Depends(admin_user), db: Session = Depends(get_db)):
+    """发给自己预览（私聊里 @所有人 无效，不加），或发到选中的群。返回发成功几个、失败的群和原因。"""
+    _check_card(body)
     if not settings.feishu_enabled:
         raise HTTPException(400, "服务端未配置飞书应用")
-    try:
-        services.send_welcome(db, me.open_id, force=True, raise_errors=True)
-    except feishu.FeishuError as e:
-        raise HTTPException(400, f"飞书返回错误：{e}")
-    except Exception as e:  # noqa: BLE001
-        raise HTTPException(500, f"发送失败：{e}")
-    return {"ok": True}
+    if body.to == "me":
+        try:
+            feishu.send_card(me.open_id, services.make_card(body.title, body.markdown, body.links, body.color), raise_errors=True)
+        except feishu.FeishuError as e:
+            raise HTTPException(400, f"飞书返回错误：{e}")
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(502, f"发送失败：{e}")
+        return {"sent": 1, "errors": []}
+    chats = _chat_list(body.chats)
+    if not chats:
+        raise HTTPException(400, "先选择要发到哪些群")
+    card = services.make_card(body.title, body.markdown, body.links, body.color, at_all=body.at_all)
+    services.set_setting(db, "card_chats", services.dump_chats(chats))  # 下次打开页面默认还选这些群
+    db.commit()
+    sent, errors = 0, []
+    for c in chats:
+        try:
+            feishu.send_chat_card(c["id"], card)
+            sent += 1
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"{c['name'] or c['id']}：{e}")
+    log.info("%s 发送卡片「%s」到 %d 个群，失败 %d 个", me.name, body.title.strip(), sent, len(errors))
+    return {"sent": sent, "errors": errors}
 
 
 # ---------------- 组会 ----------------
@@ -679,12 +775,6 @@ def _meetings_view(db: Session) -> dict:
 def admin_meetings(_: User = Depends(admin_user), db: Session = Depends(get_db)):
     meetings.fill_chat_info(db)
     return _meetings_view(db)
-
-
-class ChatIn(BaseModel):
-    id: str = Field(pattern=r"^oc_[A-Za-z0-9_-]{1,80}$")
-    name: str = Field(default="", max_length=100)
-    avatar: str = Field(default="", max_length=1000, pattern=r"^(https://\S+)?$")  # 群头像，只接受 https 地址
 
 
 class MeetingConfigIn(BaseModel):

@@ -226,8 +226,8 @@ def wiki_move(space_id: str, node_token: str, to_space: str, to_parent: str) -> 
 
 
 def build_card(title: str, markdown: str, buttons: list[tuple[str, str]] | None = None, template: str = "blue") -> dict:
-    """生成一张简单的消息卡片：标题 + markdown 正文 + 若干链接按钮。"""
-    elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": markdown}}]
+    """生成一张简单的消息卡片：标题 + markdown 正文 + 若干链接按钮（第一个是主按钮）。正文为空时只有按钮。"""
+    elements: list[dict] = [{"tag": "div", "text": {"tag": "lark_md", "content": markdown}}] if markdown.strip() else []
     if buttons:
         elements.append(
             {

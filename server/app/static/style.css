@@ -808,3 +808,27 @@ a.gm-rep:hover { text-decoration: underline; }
 @media (max-width: 560px) {
   .gm-report-check { flex-direction: column; }
 }
+
+/* ---------------- 飞书卡片 ---------------- */
+.chat-picker { display: flex; flex-direction: column; gap: 10px; }
+.chat-empty { color: var(--faint); font-size: 13px; }
+.fc-head { flex-wrap: wrap; row-gap: 8px; }
+.fc-tpl-label { color: var(--faint); font-size: 12.5px; }
+.fc-tpls { display: flex; gap: 6px; }
+.fc-tpls .btn.active { border-color: var(--primary); color: var(--primary); background: var(--primary-soft); }
+.fc-banner { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 14px; margin-bottom: 14px; padding: 10px 12px;
+  border-radius: 10px; background: var(--primary-soft); font-size: 13px; line-height: 1.6; }
+.fc-banner-act { display: inline-flex; align-items: center; gap: 10px; margin-left: auto; }
+.fc-colors { display: flex; flex-wrap: wrap; gap: 10px; }
+.fc-colors label { position: relative; flex-direction: row; cursor: pointer; }
+.fc-colors input { position: absolute; opacity: 0; width: 0; height: 0; min-height: 0; padding: 0; border: 0; margin: 0; }
+.fc-colors span { width: 24px; height: 24px; border-radius: 50%; box-shadow: inset 0 0 0 1px rgba(0, 0, 0, .08); transition: box-shadow .12s; }
+.fc-colors input:checked + span { box-shadow: 0 0 0 2px var(--panel), 0 0 0 4px var(--text); }
+.fc-colors input:focus-visible + span { outline: 2px solid var(--primary); outline-offset: 4px; }
+#fc-links-err:empty { display: none; }
+.fc-send { margin-top: 18px; }
+.fc-actions { flex-wrap: wrap; }
+.fc-actions .btn-row { margin-left: auto; }
+.fc-result { display: grid; gap: 4px; font-size: 12.5px; line-height: 1.6; min-width: 0; flex: 1 1 200px; }
+.fcard-h .ph { opacity: .65; font-weight: 500; }
+.fcard-b .fc-btns a.def { background: var(--panel); color: var(--text); box-shadow: inset 0 0 0 1px var(--line-strong); }

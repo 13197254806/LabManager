@@ -1,5 +1,7 @@
 import base64
 import hashlib
+import json
+import logging
 import re
 import secrets
 import struct
@@ -13,6 +15,8 @@ from sqlalchemy.orm import Session, joinedload
 from . import feishu
 from .config import now, settings, today
 from .models import GPU, GpuViolation, MigrationTask, Notice, Reservation, Server, Setting, User
+
+log = logging.getLogger("services")
 
 # 预约的“检查冲突 + 写入”必须串行（网页请求和自动续约共用），避免两个人抢到同一张卡。
 # 依赖 web 以单进程运行（docker-compose 里就是单 worker）。
@@ -391,6 +395,9 @@ DEFAULT_SETTINGS = {
     ),
     # 每行一个按钮：按钮文字|链接。{base_url} 会被替换为平台地址
     "welcome_links": "打开实验室平台|{base_url}\n新人指南|https://example.feishu.cn/wiki/xxxx",
+    "welcome_color": "blue",
+    # 「管理 → 飞书卡片」上次发到的群（JSON，格式同 welcome_chat_ids），下次打开页面时默认选中
+    "card_chats": "",
     # 长期使用的自动延长：到期前多少小时触发，每次延长多少天
     # 默认：预约结束当天 20:00（距到期 4 小时）自动延长 7 天
     "auto_renew_before_hours": "4",
@@ -436,8 +443,51 @@ def get_int_setting(db: Session, key: str) -> int:
         return int(ENV_DEFAULTS[key]() if key in ENV_DEFAULTS else DEFAULT_SETTINGS[key])
 
 
+def parse_chats(value: str) -> list[dict]:
+    """群列表设置：管理页保存的是 JSON [{"id": "oc_xxx", "name": "群名", "avatar": "群头像地址"}]；
+    .env 的 WELCOME_CHAT_IDS 和旧版本保存的是逗号分隔的 chat_id。"""
+    value = (value or "").strip()
+    if value.startswith("["):
+        try:
+            items = json.loads(value)
+        except ValueError:
+            items = []
+        return [{"id": str(c["id"]), "name": str(c.get("name") or ""), "avatar": str(c.get("avatar") or "")}
+                for c in items if isinstance(c, dict) and c.get("id")]
+    return [{"id": c, "name": "", "avatar": ""} for c in re.split(r"[,\s，]+", value) if c]
+
+
+def dump_chats(chats: list[dict]) -> str:
+    return json.dumps(chats, ensure_ascii=False) if chats else ""
+
+
 def welcome_chat_ids(db: Session) -> list[str]:
-    return [c.strip() for c in get_setting(db, "welcome_chat_ids").split(",") if c.strip()]
+    """只对这些群的新成员发欢迎卡片；空 = 机器人所在的所有群。"""
+    return [c["id"] for c in parse_chats(get_setting(db, "welcome_chat_ids"))]
+
+
+_chat_info: dict[str, dict] = {}  # 查过的群名和头像（查不到记空），每个群每次启动最多查一次
+
+
+def fill_chat_info(chats: list[dict]) -> bool:
+    """缺群名或头像的群（手动填的 chat_id、.env 里的群）向飞书查一下补上。返回有没有补到。"""
+    if not settings.feishu_enabled:
+        return False
+    changed = False
+    for c in chats:
+        if c.get("name") and c.get("avatar"):
+            continue
+        if c["id"] not in _chat_info:
+            try:
+                _chat_info[c["id"]] = feishu.get_chat(c["id"])
+            except Exception as e:  # noqa: BLE001
+                log.info("查询群信息失败 %s: %s", c["id"], e)
+                _chat_info[c["id"]] = {}
+        for k in ("name", "avatar"):
+            if not c.get(k) and _chat_info[c["id"]].get(k):
+                c[k] = _chat_info[c["id"]][k]
+                changed = True
+    return changed
 
 
 def sync_runtime(db: Session):
@@ -481,15 +531,44 @@ def describe(rs: list[Reservation]) -> str:
     return "\n".join(lines)
 
 
-def welcome_card(db: Session) -> dict:
+# 飞书卡片标题栏的颜色（header.template）
+CARD_COLORS = ("blue", "wathet", "turquoise", "green", "yellow", "orange", "red", "carmine", "violet", "purple", "indigo", "grey")
+MAX_CARD_BUTTONS = 6
+
+
+def parse_buttons(text: str, strict: bool = False) -> list[tuple[str, str]]:
+    """按钮：每行「按钮文字|链接」，{base_url} 换成平台地址。
+    strict=False 时跳过写错的行（欢迎卡片照常发）；strict=True 时报出第几行写错了（管理页保存 / 发送时）。"""
     buttons = []
-    for line in get_setting(db, "welcome_links").splitlines():
-        if "|" in line:
-            text, url = line.split("|", 1)
-            url = url.strip().replace("{base_url}", settings.base_url)
-            if text.strip() and url.startswith("http"):
-                buttons.append((text.strip(), url))
-    return feishu.build_card(get_setting(db, "welcome_title"), get_setting(db, "welcome_markdown"), buttons)
+    for n, line in enumerate(text.splitlines(), 1):
+        if not line.strip():
+            continue
+        label, sep, url = line.partition("|")
+        url = url.strip().replace("{base_url}", settings.base_url)
+        if sep and label.strip() and re.match(r"^https?://\S+$", url):
+            buttons.append((label.strip(), url))
+        elif strict:
+            raise ValueError(f"按钮第 {n} 行要写成「按钮文字|链接」，链接以 http:// 或 https:// 开头")
+    if strict and len(buttons) > MAX_CARD_BUTTONS:
+        raise ValueError(f"按钮最多 {MAX_CARD_BUTTONS} 个")
+    return buttons
+
+
+def make_card(title: str, markdown: str, links: str, color: str = "blue", at_all: bool = False, strict: bool = False) -> dict:
+    """标题 + 正文（lark_md）+ 链接按钮。at_all：正文开头 @所有人（只在群里有效）。"""
+    md = markdown.strip().replace("{base_url}", settings.base_url)
+    if at_all:
+        md = f"<at id=all></at> {md}".rstrip()
+    return feishu.build_card(title.strip(), md, parse_buttons(links, strict), color if color in CARD_COLORS else "blue")
+
+
+def welcome_template(db: Session) -> dict:
+    return {k: get_setting(db, f"welcome_{k}") for k in ("title", "color", "markdown", "links")}
+
+
+def welcome_card(db: Session) -> dict:
+    t = welcome_template(db)
+    return make_card(t["title"], t["markdown"], t["links"], t["color"])
 
 
 def send_welcome(db: Session, open_id: str, force: bool = False, raise_errors: bool = False) -> bool:
