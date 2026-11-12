@@ -189,7 +189,7 @@
           <button data-sub="migrations"><svg class="i"><use href="#i-swap"/></svg>迁移记录 <span class="count" id="cnt-migrations"></span></button>
           <button data-sub="meetings"><svg class="i"><use href="#i-present"/></svg>组会</button>
           <button data-sub="rules"><svg class="i"><use href="#i-zap"/></svg>预约与迁移规则</button>
-          <button data-sub="welcome"><svg class="i"><use href="#i-send"/></svg>新人欢迎卡片</button>
+          <button data-sub="cards"><svg class="i"><use href="#i-send"/></svg>飞书卡片</button>
         </div>
 
         <div class="admin-sub" id="sub-servers">
@@ -246,8 +246,7 @@
               <div class="set-group"><h3>飞书群提醒</h3>
                 <div class="card">
                   <div class="set-row col"><div><div class="t">发到哪些群</div><div class="d">机器人要先被拉进群里。卡片会 @所有人；群里如果限制了谁能 @所有人，需要放开或把机器人设为群管理员。</div></div>
-                    <div class="gm-chips" id="gm-chats"></div>
-                    <div class="gm-add-row"><button class="btn" type="button" id="gm-pick-chats"><svg class="i"><use href="#i-search"/></svg>从机器人所在的群里选…</button><input id="gm-chat-input" class="mono" placeholder="或直接填 chat_id：oc_xxxxxxxx" maxlength="90"><button class="btn" type="button" id="gm-chat-add">添加</button></div></div>
+                    <div class="chat-picker" id="gm-chats"></div></div>
                   <div class="set-row"><div><div class="t">提醒时间</div><div class="d">在组会开始前几天的同一时刻自动发通知卡片，每次组会只自动发一次。某周不开也会发一张「组会暂停」卡片。</div></div>
                     <div class="inline-num">提前 <input type="number" name="notify_days" min="1" max="6" required> 天</div></div>
                   <div class="set-row col"><div><div class="t">卡片附加说明<span class="field-hint" style="margin-left:6px">可选</span></div><div class="d">显示在卡片最后，比如「汇报人请提前一天把 PPT 发到群里」、线上会议链接。支持飞书 <code>lark_md</code> 语法。</div></div>
@@ -327,24 +326,47 @@
           </form>
         </div>
 
-        <div class="admin-sub hidden" id="sub-welcome">
+        <div class="admin-sub hidden" id="sub-cards">
           <div class="welcome">
-            <div class="card">
-              <div class="card-h"><h2>编辑卡片</h2></div>
-              <div class="card-b">
-                <p class="card-note" style="margin-bottom:14px">新成员加入飞书企业或机器人所在的群时，机器人会私聊发送这张卡片。正文支持飞书 <code>lark_md</code> 语法。</p>
-                <form id="welcome-form" class="stack">
-                  <label>标题<input name="welcome_title"></label>
-                  <label>正文<textarea name="welcome_markdown" rows="8"></textarea></label>
-                  <label>发送范围<span class="field-hint">只对这些群的新成员发送欢迎卡片：填群的 chat_id，多个用逗号分隔；留空 = 机器人所在的所有群</span><textarea name="welcome_chat_ids" rows="2" class="mono" placeholder="oc_xxxxxxxx, oc_yyyyyyyy"></textarea></label>
-                  <label>按钮<span class="field-hint">每行一个：<code>按钮文字|链接</code>，<code>{base_url}</code> 代表平台地址</span><textarea name="welcome_links" rows="3" class="mono"></textarea></label>
-                  <div class="btn-row"><button class="btn primary">保存</button><button class="btn" type="button" id="welcome-test"><svg class="i"><use href="#i-send"/></svg>发给我自己测试</button></div>
-                </form>
+            <div>
+              <div class="card">
+                <div class="card-h fc-head"><h2>编辑卡片</h2><span class="grow"></span><span class="fc-tpl-label">模板</span>
+                  <div class="fc-tpls"><button class="btn small" type="button" id="fc-tpl-welcome">👋 新人欢迎卡片</button><button class="btn small" type="button" id="fc-tpl-blank"><svg class="i"><use href="#i-plus"/></svg>空白卡片</button></div></div>
+                <div class="card-b">
+                  <div class="fc-banner hidden" id="fc-welcome-banner">
+                    <span>正在编辑<b>新人欢迎卡片</b>：新成员加入企业或群时，机器人自动私聊发送的是<b>保存过的</b>这一版。</span>
+                    <span class="fc-banner-act"><span class="muted small" id="fc-welcome-state"></span><button class="btn small primary" type="button" id="fc-welcome-save">保存为欢迎卡片</button></span>
+                  </div>
+                  <form id="fc-form" class="stack" autocomplete="off">
+                    <label>标题<input name="title" maxlength="100" placeholder="如：本周六机房停电通知"></label>
+                    <div><div class="label">标题颜色</div><div class="fc-colors" id="fc-colors" role="radiogroup" aria-label="标题颜色"></div></div>
+                    <label>正文<span class="field-hint">支持飞书 <code>lark_md</code>：<code>**加粗**</code> <code>*斜体*</code> <code>~~删除线~~</code> <code>[文字](链接)</code></span><textarea name="markdown" rows="8" maxlength="5000"></textarea></label>
+                    <label>按钮<span class="field-hint">可选，每行一个：<code>按钮文字|链接</code>，<code>{base_url}</code> 代表平台地址；第一个是主按钮</span><textarea name="links" rows="3" class="mono" maxlength="2000" placeholder="打开平台|{base_url}"></textarea><span class="error small" id="fc-links-err"></span></label>
+                  </form>
+                </div>
+              </div>
+
+              <div class="set-group fc-send"><h3>发送</h3>
+                <div class="card">
+                  <div class="set-row col"><div><div class="t">发到哪些群</div><div class="d">机器人要先被拉进群里。下次打开这个页面，默认还选上次发过的群。</div></div>
+                    <div class="chat-picker" id="fc-chats"></div></div>
+                  <div class="set-row"><div><div class="t">@所有人</div><div class="d">在正文开头 @所有人，只对群有效。群里如果限制了谁能 @所有人，需要放开或把机器人设为群管理员。</div></div>
+                    <label class="switch"><input type="checkbox" id="fc-at-all"><i></i></label></div>
+                  <div class="set-row fc-actions"><div class="fc-result" id="fc-result"></div>
+                    <div class="btn-row"><button class="btn" type="button" id="fc-send-me"><svg class="i"><use href="#i-send"/></svg>发给我预览</button><button class="btn primary" type="button" id="fc-send-chats"><svg class="i"><use href="#i-bell"/></svg><span>发到群里</span></button></div></div>
+                </div>
+              </div>
+
+              <div class="set-group"><h3>新成员自动欢迎</h3>
+                <div class="card">
+                  <div class="set-row col"><div><div class="t">自动欢迎哪些群的新成员</div><div class="d">新成员加入飞书企业，或加入下面这些群时，机器人私聊发一次「新人欢迎卡片」（内容点上方的「👋 新人欢迎卡片」修改）。不选 = 机器人所在的所有群。改动立即生效。</div></div>
+                    <div class="chat-picker" id="fc-welcome-chats"></div></div>
+                </div>
               </div>
             </div>
             <div class="preview-wrap">
-              <div class="preview-label"><span>实时预览</span><span>飞书卡片样式（示意）</span></div>
-              <div class="fcard"><div class="fcard-h" id="wp-title"></div><div class="fcard-b" id="wp-body"></div><div class="fcard-btns" id="wp-btns"></div></div>
+              <div class="preview-label"><span>实时预览</span><span id="fc-preview-for">飞书卡片样式（示意）</span></div>
+              <div class="fcard" id="fc-preview"></div>
             </div>
           </div>
         </div>

@@ -72,7 +72,7 @@ def on_chat_member_added(data):
     ev = _as_dict(data).get("event", {})
     chat_id = ev.get("chat_id")
     with SessionLocal() as db:
-        allowed = services.welcome_chat_ids(db)  # 管理页「新人欢迎卡片」里设置；留空 = 机器人所在的所有群
+        allowed = services.welcome_chat_ids(db)  # 管理页「飞书卡片 → 新成员自动欢迎」里设置；留空 = 机器人所在的所有群
     if allowed and chat_id not in allowed:
         return
     for u in ev.get("users") or []:

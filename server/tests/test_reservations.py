@@ -455,10 +455,8 @@ def test_rule_settings_are_validated(admin):
         assert admin.put("/api/admin/settings", json={key: bad}).status_code == 400, (key, bad)
     assert admin.put("/api/admin/settings", json={"lab_name": "   "}).status_code == 400
     assert admin.put("/api/admin/settings", json={"lab_name": "x" * 41}).status_code == 400
-    # 平台名称、欢迎卡片的群列表
-    r = admin.put("/api/admin/settings", json={"lab_name": " 安全与隐私实验室 ", "welcome_chat_ids": "oc_a, oc_b\noc_c，oc_d"})
+    r = admin.put("/api/admin/settings", json={"lab_name": " 安全与隐私实验室 "})
     assert r.status_code == 200 and r.json()["lab_name"] == "安全与隐私实验室"
-    assert r.json()["welcome_chat_ids"] == "oc_a,oc_b,oc_c,oc_d"
     assert admin.get("/api/config").json()["lab_name"] == "安全与隐私实验室"
 
 

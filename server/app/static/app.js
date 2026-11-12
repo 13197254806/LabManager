@@ -1783,7 +1783,7 @@ async function refreshAdmin() {
   } catch { /* 自动刷新失败时保持现状，下次再试 */ }
 }
 
-let rulesDirty = false, welcomeDirty = false;
+let rulesDirty = false;
 function setRulesDirty(d) {
   rulesDirty = d;
   $("#rules-bar").classList.toggle("clean", !d);
@@ -1792,34 +1792,196 @@ function setRulesDirty(d) {
 }
 $("#rules-form").addEventListener("input", () => setRulesDirty(true));
 
-// 新人欢迎卡片的实时预览（只是示意：支持 **加粗** 和以 - 开头的列表）
-function renderWelcomePreview() {
-  const f = $("#welcome-form");
-  $("#wp-title").textContent = f.welcome_title.value;
-  let html = "", list = [];
-  const inline = (t) => esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>");
-  const flush = () => { if (list.length) { html += `<ul>${list.map((i) => `<li>${inline(i)}</li>`).join("")}</ul>`; list = []; } };
-  for (const line of f.welcome_markdown.value.split("\n")) {
-    if (/^\s*-\s+/.test(line)) list.push(line.replace(/^\s*-\s+/, ""));
-    else { flush(); if (line.trim()) html += `<p>${inline(line)}</p>`; }
-  }
-  flush();
-  $("#wp-body").innerHTML = html;
-  $("#wp-btns").innerHTML = f.welcome_links.value.split("\n").filter((l) => l.includes("|")).map((l) => `<span>${esc(l.split("|")[0].trim())}</span>`).join("");
+// ---------------- 飞书卡片 ----------------
+// 编辑一张卡片（标题 + 正文 + 按钮），发给自己预览或发到选中的群。
+// 「新人欢迎卡片」是一个模板：点按钮载入，改完「保存为欢迎卡片」，新成员自动收到的就是保存的这一版。
+// 卡片标题栏颜色（飞书 header.template），预览里用的近似色
+const FC_HEAD = { blue: "#3370ff", turquoise: "#14c0ff", green: "#34c724", orange: "#ff8800", red: "#f54a45", purple: "#7f3bf5", grey: "#8f959e" };
+const FC_COLOR_NAMES = { blue: "蓝", turquoise: "青", green: "绿", orange: "橙", red: "红", purple: "紫", grey: "灰" };
+const FC_DRAFT = "lab-card-draft";
+const fc = { loaded: false, data: null, welcome: false };
+const fcForm = $("#fc-form"), fcEl = fcForm.elements;
+$("#fc-colors").innerHTML = Object.entries(FC_HEAD).map(([c, hex]) =>
+  `<label title="${FC_COLOR_NAMES[c]}"><input type="radio" name="color" value="${c}" aria-label="${FC_COLOR_NAMES[c]}"><span style="background:${hex}"></span></label>`).join("");
+
+const fcValues = () => ({ title: fcEl.title.value, color: fcEl.color.value || "blue", markdown: fcEl.markdown.value, links: fcEl.links.value });
+const fcSig = (v) => JSON.stringify([v.title.trim(), v.color, v.markdown, v.links]);
+const fcEmpty = (v) => !v.title.trim() && !v.markdown.trim() && !v.links.trim();
+function fcFill(v) {
+  fcEl.title.value = v.title || "";
+  fcEl.color.value = FC_HEAD[v.color] ? v.color : "blue";
+  fcEl.markdown.value = v.markdown || "";
+  fcEl.links.value = v.links || "";
 }
-$("#welcome-form").addEventListener("input", () => { welcomeDirty = true; renderWelcomePreview(); });
+function fcSaveDraft() {
+  try { localStorage.setItem(FC_DRAFT, JSON.stringify({ ...fcValues(), at_all: $("#fc-at-all").checked, welcome: fc.welcome })); } catch {}
+}
+function fcReadDraft() {
+  try { return JSON.parse(localStorage.getItem(FC_DRAFT) || "null"); } catch { return null; }
+}
+// 按钮：每行「按钮文字|链接」；和后端一样检查，写错的行在输入框下面提示
+function fcParseLinks(text) {
+  const base = fc.data?.base_url || location.origin, buttons = [], bad = [];
+  text.split("\n").forEach((line, i) => {
+    if (!line.trim()) return;
+    const at = line.indexOf("|"), label = at < 0 ? "" : line.slice(0, at).trim();
+    const url = at < 0 ? "" : line.slice(at + 1).trim().replaceAll("{base_url}", base);
+    if (label && /^https?:\/\/\S+$/.test(url)) buttons.push([label, url]);
+    else bad.push(i + 1);
+  });
+  return { buttons, bad };
+}
+function fcProblem(v) {
+  const { buttons, bad } = fcParseLinks(v.links);
+  if (!v.title.trim()) return "标题不能为空";
+  if (bad.length) return `按钮第 ${bad.join("、")} 行要写成「按钮文字|链接」，链接以 http:// 或 https:// 开头`;
+  if (buttons.length > 6) return "按钮最多 6 个";
+  if (!v.markdown.trim() && !buttons.length) return "正文和按钮至少要填一个";
+  return "";
+}
+function renderFcPreview() {
+  const v = fcValues(), atAll = $("#fc-at-all").checked;
+  const { buttons, bad } = fcParseLinks(v.links);
+  $("#fc-links-err").textContent = bad.length ? `第 ${bad.join("、")} 行要写成「按钮文字|链接」，链接以 http:// 或 https:// 开头` : buttons.length > 6 ? "按钮最多 6 个" : "";
+  const md = v.markdown.trim().replaceAll("{base_url}", fc.data?.base_url || location.origin);
+  const body = (atAll ? `<span class="at">@所有人</span> ` : "") + larkMd(md, {});
+  $("#fc-preview").innerHTML = `<div class="fcard-h" style="background:${FC_HEAD[v.color] || FC_HEAD.blue}">${v.title.trim() ? esc(v.title.trim()) : `<span class="ph">卡片标题</span>`}</div>
+    <div class="fcard-b">${md || atAll ? `<div class="fc-div">${body}</div>` : ""}${buttons.length
+      ? `<div class="fc-btns">${buttons.map(([t, u], i) => `<a href="${esc(u)}" target="_blank" rel="noopener"${i ? ` class="def"` : ""}>${esc(t)}</a>`).join("")}</div>`
+      : md ? "" : `<p class="muted">在左边填写正文或按钮。</p>`}</div>`;
+}
+function fcSetWelcome(on) {
+  fc.welcome = on;
+  $("#fc-welcome-banner").classList.toggle("hidden", !on);
+  $("#fc-tpl-welcome").classList.toggle("active", on);
+  fcWelcomeState();
+}
+function fcWelcomeState() {
+  if (!fc.welcome) return;
+  const same = !!fc.data && fcSig(fcValues()) === fcSig(fc.data.welcome);
+  $("#fc-welcome-state").textContent = !fc.data ? "" : same ? "和已保存的一致" : "有未保存的修改";
+  $("#fc-welcome-save").disabled = same;
+}
+function fcSendLabel() {
+  const n = fcChats.chats.length, b = $("#fc-send-chats");
+  b.querySelector("span").textContent = n ? `发到 ${n} 个群` : "发到群里";
+  b.disabled = !n;
+  b.title = n ? "" : "先在上面选择要发到哪些群";
+}
+function fcChanged() { renderFcPreview(); fcWelcomeState(); fcSaveDraft(); }
+fcForm.addEventListener("input", fcChanged);
+fcForm.addEventListener("submit", (e) => e.preventDefault());
+$("#fc-at-all").addEventListener("change", fcChanged);
+
+async function loadCards() {
+  try {
+    const d = await api("/api/admin/cards");
+    fc.data = d;
+    fcWelcomeChats.set(d.welcome_chats);
+    if (!fc.loaded) {
+      fc.loaded = true;
+      fcChats.set(d.chats);
+      fcSendLabel();
+      // 第一次打开（没有草稿）：先载入新人欢迎卡片，和改版前看到的一样
+      if (!fcReadDraft()) { fcFill(d.welcome); fcSetWelcome(true); }
+    }
+    renderFcPreview();
+    fcWelcomeState();
+  } catch { /* 网络问题：下次进入管理页再试 */ }
+}
+
+$("#fc-tpl-welcome").onclick = async () => {
+  const cur = fcValues();
+  try {
+    fc.data = await api("/api/admin/cards");  // 取最新保存的版本（可能是别的管理员改的）
+  } catch (err) { return toast(err.message); }
+  const w = fc.data.welcome;
+  if (!fcEmpty(cur) && fcSig(cur) !== fcSig(w) && !confirm(fc.welcome
+    ? "放弃未保存的修改，恢复成已保存的新人欢迎卡片？" : "用新人欢迎卡片替换正在编辑的内容？")) return;
+  fcFill(w);
+  fcSetWelcome(true);
+  fcChanged();
+};
+$("#fc-tpl-blank").onclick = () => {
+  const cur = fcValues();
+  const keep = fc.welcome && fc.data && fcSig(cur) === fcSig(fc.data.welcome);  // 没改过的欢迎卡片，直接换掉
+  if (!fcEmpty(cur) && !keep && !confirm(fc.welcome ? "放弃对新人欢迎卡片未保存的修改，换成空白卡片？" : "清空正在编辑的内容？")) return;
+  fcFill({ color: fcEl.color.value });
+  fcSetWelcome(false);
+  fcChanged();
+  fcEl.title.focus();
+};
+$("#fc-welcome-save").onclick = async () => {
+  const v = fcValues(), bad = fcProblem(v);
+  if (bad) return toast(bad);
+  try {
+    fc.data = await api("/api/admin/cards/welcome", { method: "PUT", body: v });
+    fcWelcomeState();
+    toast("已保存：新成员会收到这一版欢迎卡片");
+  } catch (err) { toast(err.message); }
+};
+
+async function fcSend(to) {
+  const v = fcValues(), chats = fcChats.chats, atAll = $("#fc-at-all").checked, bad = fcProblem(v);
+  if (bad) return toast(bad);
+  if (to === "chats") {
+    if (!chats.length) return toast("先选择要发到哪些群");
+    const names = chats.map((c) => `「${c.name || c.id}」`).join("");
+    if (!confirm(`把卡片「${v.title.trim()}」发到 ${chats.length} 个群${atAll ? "并 @所有人" : ""}？\n${names}`)) return;
+  }
+  const btn = $(to === "me" ? "#fc-send-me" : "#fc-send-chats");
+  btn.disabled = true;
+  try {
+    const r = await api("/api/admin/cards/send", { method: "POST", body: { ...v, to, chats, at_all: atAll } });
+    if (to === "me") return toast("已发给你，请在飞书里查看");
+    const t = new Date().toTimeString().slice(0, 5);
+    $("#fc-result").innerHTML = (r.sent ? `<div class="gm-chk ok">${icon("check")}<span>${t} 已发到 ${r.sent} 个群</span></div>` : "")
+      + r.errors.map((e) => `<div class="gm-chk bad">${icon("x")}<span>${esc(e)}</span></div>`).join("");
+    toast(r.errors.length ? `${r.errors.length} 个群发送失败，原因见页面` : `已发到 ${r.sent} 个群`);
+  } catch (err) {
+    toast(err.message);
+  } finally {
+    btn.disabled = false;
+    if (to === "chats") fcSendLabel();
+  }
+}
+$("#fc-send-me").onclick = () => fcSend("me");
+$("#fc-send-chats").onclick = () => fcSend("chats");
+
+// 发到哪些群：发送成功后记住，下次默认还选这些
+const fcChats = chatPicker($("#fc-chats"), { pickSub: "机器人所在的群；选中的群会收到这张卡片", onChange: fcSendLabel });
+// 新成员自动欢迎的群：改动立即保存
+const fcWelcomeChats = chatPicker($("#fc-welcome-chats"), {
+  pickSub: "这些群里有新成员加入时，机器人私聊发欢迎卡片；一个都不选 = 机器人所在的所有群",
+  emptyText: "未选择：机器人所在的所有群都会欢迎新成员",
+  onChange: async (chats) => {
+    try {
+      fc.data = await api("/api/admin/cards/welcome-chats", { method: "PUT", body: { chats } });
+      fcWelcomeChats.set(fc.data.welcome_chats);
+      toast(chats.length ? `已保存：只欢迎这 ${chats.length} 个群的新成员` : "已保存：机器人所在的所有群都会欢迎新成员");
+    } catch (err) {
+      toast(err.message);
+      fcWelcomeChats.set(fc.data?.welcome_chats || []);
+    }
+  },
+});
+
+{ // 恢复上次没发完的草稿
+  const d = fcReadDraft();
+  fcFill(d || {});
+  $("#fc-at-all").checked = !!d?.at_all;
+  fcSetWelcome(!!d?.welcome);
+  renderFcPreview();
+  fcSendLabel();
+}
 
 async function loadAdmin() {
   loadMeetings();
+  if (!fc.loaded) loadCards();
   try {
     const [tables, settings] = await Promise.all([fetchAdminTables(), api("/api/admin/settings")]);
     adminSig = JSON.stringify(tables);
     renderAdminTables(tables);
-    if (!welcomeDirty) {
-      const f = $("#welcome-form");
-      for (const k of ["welcome_title", "welcome_markdown", "welcome_links", "welcome_chat_ids"]) f[k].value = settings[k];
-      renderWelcomePreview();
-    }
     if (!rulesDirty) {
       const r = $("#rules-form");
       for (const k of ["lab_name", "max_reservation_days", "max_advance_days", "max_gpu_sharers", "reminder_hour"]) r[k].value = settings[k];
@@ -2061,26 +2223,11 @@ $("#rules-form").addEventListener("submit", async (e) => {
   }
 });
 
-$("#welcome-form").addEventListener("submit", async (e) => {
-  e.preventDefault();
-  const f = e.target;
-  try {
-    await api("/api/admin/settings", { method: "PUT", body: { welcome_title: f.welcome_title.value, welcome_markdown: f.welcome_markdown.value, welcome_links: f.welcome_links.value, welcome_chat_ids: f.welcome_chat_ids.value } });
-    welcomeDirty = false;
-    toast("已保存");
-  } catch (err) {
-    toast(err.message);
-  }
-});
-$("#welcome-test").onclick = async () => {
-  try { await api("/api/admin/welcome/test", { method: "POST" }); toast("已发送，请查看飞书"); } catch (err) { toast(err.message); }
-};
-
 // ---------------- 组会 ----------------
 
 // 后端的星期：0 = 周一
 const GM_WEEK = ["一", "二", "三", "四", "五", "六", "日"];
-const gm = { data: null, sig: "", dirty: false, locations: [], chats: [] };
+const gm = { data: null, sig: "", dirty: false, locations: [] };
 
 // "2026-11-12T14:00:00" 是平台时区的“墙上时间”，按字面拆开显示，不经过浏览器时区换算
 function gmParts(iso) {
@@ -2592,9 +2739,8 @@ function fillGmForm() {
   f.report_archive.value = c.report_archive;
   f.report_keep.value = c.report_keep;
   gm.locations = [...c.locations];
-  gm.chats = c.chats.map((x) => ({ ...x }));
+  gmChats.set(c.chats);
   renderGmLocs();
-  renderGmChats();
   setGmDirty(false);
 }
 function renderGmLocs() {
@@ -2607,9 +2753,63 @@ function gmChatAvatar(c) {
   if (!/^https:\/\//.test(c.avatar || "")) return fallback;
   return `<img class="gm-chat-av" src="${esc(c.avatar)}" alt="" referrerpolicy="no-referrer" onerror="this.outerHTML=${esc(JSON.stringify(fallback))}">`;
 }
-function renderGmChats() {
-  $("#gm-chats").innerHTML = gm.chats.map((c, i) => `<span class="gm-tag chat" title="${esc(c.id)}">${gmChatAvatar(c)}<span class="t">${esc(c.name || "未命名的群")}</span><span class="sub mono">${esc(c.id)}</span><button type="button" class="btn ghost icon small danger-ghost" data-chat-del="${i}" title="移除">${icon("x")}</button></span>`).join("");
+// 选飞书群：已选的群 + 「从机器人所在的群里选…」+ 直接填 chat_id。组会提醒、飞书卡片、新成员自动欢迎共用
+function chatPicker(root, { pickSub, emptyText = "", onChange }) {
+  root.innerHTML = `<div class="gm-chips"></div>
+    <div class="gm-add-row"><button class="btn" type="button" data-pick>${icon("search")}从机器人所在的群里选…</button><input class="mono" data-chat-input placeholder="或直接填 chat_id：oc_xxxxxxxx" maxlength="90" autocomplete="off"><button class="btn" type="button" data-add>添加</button></div>`;
+  const chips = root.querySelector(".gm-chips"), inp = root.querySelector("input");
+  const p = { chats: [] };
+  const render = () => {
+    chips.innerHTML = p.chats.length
+      ? p.chats.map((c, i) => `<span class="gm-tag chat" title="${esc(c.id)}">${gmChatAvatar(c)}<span class="t">${esc(c.name || "未命名的群")}</span><span class="sub mono">${esc(c.id)}</span><button type="button" class="btn ghost icon small danger-ghost" data-del="${i}" title="移除">${icon("x")}</button></span>`).join("")
+      : emptyText ? `<span class="chat-empty">${esc(emptyText)}</span>` : "";
+  };
+  const changed = () => { render(); onChange?.(p.chats); };
+  p.set = (list) => { p.chats = (list || []).map((x) => ({ ...x })); render(); };
+  const add = () => {
+    const v = inp.value.trim();
+    if (!v) return;
+    if (!/^oc_[A-Za-z0-9_-]+$/.test(v)) return toast("chat_id 以 oc_ 开头，可以在飞书开放平台的 API 调试台里查到；更方便的是点「从机器人所在的群里选」");
+    inp.value = "";
+    if (p.chats.some((c) => c.id === v)) return;
+    p.chats.push({ id: v, name: "", avatar: "" });
+    changed();
+  };
+  const pick = async () => {
+    openGmPick({ title: "选择飞书群", sub: pickSub, ico: "users", items: null, onOk: (ids) => {
+      const known = new Map((gmPickDialog._chats || []).map((c) => [c.chat_id, c]));
+      // 机器人已经不在、列表里没有的群保留（可以点 × 手动移除）
+      const next = [...p.chats.filter((c) => !known.has(c.id)),
+        ...ids.map((id) => ({ id, name: known.get(id)?.name || "", avatar: known.get(id)?.avatar || "" }))];
+      if (JSON.stringify(next) === JSON.stringify(p.chats)) return;
+      p.chats = next;
+      changed();
+    } });
+    try {
+      const chats = await api("/api/admin/feishu/chats");
+      gmPickDialog._chats = chats;
+      const have = new Set(p.chats.map((c) => c.id));
+      renderGmPickItems(chats.map((c) => ({ value: c.chat_id, label: c.name || "未命名的群", sub: c.chat_id, checked: have.has(c.chat_id),
+        avatar: gmChatAvatar(c), title: c.chat_id })),
+        "机器人还不在任何群里：先在飞书群设置 → 群机器人里把它加进去。");
+    } catch (err) {
+      gmPickDialog._chats = [];
+      renderGmPickItems([], "");
+      $("#gm-pick-error").textContent = `${err.message}`;
+    }
+  };
+  root.addEventListener("click", (e) => {
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.hasAttribute("data-pick")) pick();
+    else if (b.hasAttribute("data-add")) add();
+    else if (b.dataset.del) { p.chats.splice(Number(b.dataset.del), 1); changed(); }
+  });
+  inp.addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); add(); } });
+  render();
+  return p;
 }
+const gmChats = chatPicker($("#gm-chats"), { pickSub: "机器人所在的群；选中的群会收到组会通知", onChange: () => setGmDirty(true) });
 function gmAddLoc() {
   const inp = $("#gm-loc-input"), v = inp.value.trim();
   if (!v) return;
@@ -2619,54 +2819,20 @@ function gmAddLoc() {
   renderGmLocs();
   setGmDirty(true);
 }
-function gmAddChat() {
-  const inp = $("#gm-chat-input"), v = inp.value.trim();
-  if (!v) return;
-  if (!/^oc_[A-Za-z0-9_-]+$/.test(v)) return toast("chat_id 以 oc_ 开头，可以在飞书开放平台的 API 调试台里查到；更方便的是点「从机器人所在的群里选」");
-  if (!gm.chats.some((c) => c.id === v)) gm.chats.push({ id: v, name: "" });
-  inp.value = "";
-  renderGmChats();
-  setGmDirty(true);
-}
 $("#gm-loc-add").onclick = gmAddLoc;
-$("#gm-chat-add").onclick = gmAddChat;
 $("#gm-loc-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); gmAddLoc(); } });
-$("#gm-chat-input").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); gmAddChat(); } });
 $("#gm-form").addEventListener("click", (e) => {
   const t = e.target.closest("button");
   if (!t) return;
   const d = t.dataset;
   if (d.locDef) { gm.locations.unshift(...gm.locations.splice(Number(d.locDef), 1)); renderGmLocs(); setGmDirty(true); }
   else if (d.locDel) { gm.locations.splice(Number(d.locDel), 1); renderGmLocs(); setGmDirty(true); }
-  else if (d.chatDel) { gm.chats.splice(Number(d.chatDel), 1); renderGmChats(); setGmDirty(true); }
 });
 $("#gm-form").addEventListener("input", (e) => {
-  if (e.target.id === "gm-loc-input" || e.target.id === "gm-chat-input") return;  // 还没点「添加」不算改动
+  if (e.target.id === "gm-loc-input" || e.target.matches("[data-chat-input]")) return;  // 还没点「添加」不算改动
   setGmDirty(true);
   if (e.target.name === "card_extra") renderGmPreview();
 });
-$("#gm-pick-chats").onclick = async () => {
-  openGmPick({ title: "选择飞书群", sub: "机器人所在的群；选中的群会收到组会通知", ico: "users", items: null, onOk: (ids) => {
-    const known = new Map((gmPickDialog._chats || []).map((c) => [c.chat_id, c]));
-    // 机器人已经不在、列表里没有的群保留（可以在设置里手动移除）
-    gm.chats = [...gm.chats.filter((c) => !known.has(c.id)),
-      ...ids.map((id) => ({ id, name: known.get(id)?.name || "", avatar: known.get(id)?.avatar || "" }))];
-    renderGmChats();
-    setGmDirty(true);
-  } });
-  try {
-    const chats = await api("/api/admin/feishu/chats");
-    gmPickDialog._chats = chats;
-    const have = new Set(gm.chats.map((c) => c.id));
-    renderGmPickItems(chats.map((c) => ({ value: c.chat_id, label: c.name || "未命名的群", sub: c.chat_id, checked: have.has(c.chat_id),
-      avatar: gmChatAvatar(c), title: c.chat_id })),
-      "机器人还不在任何群里：先在飞书群设置 → 群机器人里把它加进去。");
-  } catch (err) {
-    gmPickDialog._chats = [];
-    renderGmPickItems([], "");
-    $("#gm-pick-error").textContent = `${err.message}`;
-  }
-};
 $("#gm-form").addEventListener("submit", async (e) => {
   e.preventDefault();
   const f = e.target, old = gm.data.config;
@@ -2675,7 +2841,7 @@ $("#gm-form").addEventListener("submit", async (e) => {
   try {
     const d = await api("/api/admin/meetings/config", { method: "PUT", body: {
       weekday: Number(f.weekday.value), time: f.time.value, per_meeting: Number(f.per_meeting.value),
-      notify_days: Number(f.notify_days.value), locations: gm.locations, chats: gm.chats, card_extra: f.card_extra.value, ...rep,
+      notify_days: Number(f.notify_days.value), locations: gm.locations, chats: gmChats.chats, card_extra: f.card_extra.value, ...rep,
     } });
     applyMeetings(d, true);
     toast("已保存");
@@ -2702,13 +2868,14 @@ async function gmReportCheck() {
 $("#gm-r-check").onclick = () => (gm.dirty ? toast("有未保存的更改：先保存设置，再检查") : gmReportCheck());
 
 // ---- 卡片预览（按后端生成的卡片画，和真正发出去的一致）----
-const FC_HEAD = { blue: "#3370ff", grey: "#8f959e", green: "#34c724", orange: "#ff8800", red: "#f54a45", turquoise: "#14c0ff" };
 function larkMd(text, names) {
   return esc(text)
     .replace(/&lt;at id=all&gt;&lt;\/at&gt;/g, `<span class="at">@所有人</span>`)
     .replace(/&lt;at id=([\w-]+)&gt;&lt;\/at&gt;/g, (_, id) => `<span class="at">@${esc(names[id] || id)}</span>`)
     .replace(/\*\*(.+?)\*\*/g, "<b>$1</b>")
-    .replace(/\[([^\]\n]+)\]\((https:\/\/[^\s)]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`)
+    .replace(/\*([^*\n]+)\*/g, "<i>$1</i>")
+    .replace(/~~([^~\n]+)~~/g, "<s>$1</s>")
+    .replace(/\[([^\]\n]+)\]\((https?:\/\/[^\s)]+)\)/g, `<a href="$2" target="_blank" rel="noopener">$1</a>`)
     .replace(/\n/g, "<br>");
 }
 function renderGmPreview() {

@@ -1,0 +1,22 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "lab-dev",
+      "runtimeExecutable": "/usr/bin/env",
+      "runtimeArgs": [
+        "DEV_LOGIN=1",
+        "DATABASE_URL=sqlite:////private/tmp/claude-501/-Users-songchangtian--claude-spares-spare-4JhBzg/39595abc-17ce-43d9-bef8-d7a951cea902/scratchpad/dev.db",
+        "BASE_URL=http://localhost:8765",
+        "TUNNEL_DIR=/private/tmp/claude-501/-Users-songchangtian--claude-spares-spare-4JhBzg/39595abc-17ce-43d9-bef8-d7a951cea902/scratchpad/tunnel",
+        "FEISHU_APP_ID=",
+        "FEISHU_APP_SECRET=",
+        "/Users/songchangtian/Project/Lab/server/.venv/bin/uvicorn",
+        "app.main:app",
+        "--app-dir", "/Users/songchangtian/Project/Lab/server",
+        "--port", "8765"
+      ],
+      "port": 8765
+    }
+  ]
+}
